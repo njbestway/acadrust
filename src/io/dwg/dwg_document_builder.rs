@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crate::document::CadDocument;
 use crate::entities::*;
 use crate::entities::EntityCommon;
-use crate::error::Result;
+use crate::notification::{NotificationCollection, NotificationType};
 use crate::types::Handle;
 use crate::io::dwg::dwg_stream_readers::object_reader::{
     DwgObjectReader, EntityCommonData,
@@ -74,12 +74,28 @@ impl HandleMaps {
 /// Builds a `CadDocument` from parsed DWG object data.
 pub struct DwgDocumentBuilder {
     obj_reader: DwgObjectReader,
+    /// Whether to use failsafe mode (report skipped records via notifications).
+    failsafe: bool,
+    /// Notifications collected during building.
+    notifications: NotificationCollection,
 }
 
 impl DwgDocumentBuilder {
     /// Create a new builder wrapping the object reader.
     pub fn new(obj_reader: DwgObjectReader) -> Self {
-        Self { obj_reader }
+        Self {
+            obj_reader,
+            failsafe: false,
+            notifications: NotificationCollection::new(),
+        }
+    }
+
+    /// Enable or disable failsafe mode.
+    ///
+    /// When enabled, skipped records are reported as notifications
+    /// instead of being silently lost.
+    pub fn set_failsafe(&mut self, failsafe: bool) {
+        self.failsafe = failsafe;
     }
 
     /// Build the document by iterating all handles and dispatching objects.
@@ -87,8 +103,13 @@ impl DwgDocumentBuilder {
     /// Uses a two-pass approach:
     /// 1. Read table entries → build handle→name maps
     /// 2. Read entities and objects → resolve handle references
-    pub fn build(self, document: &mut CadDocument) -> Result<()> {
+    ///
+    /// Returns collected notifications (skipped records, warnings).
+    pub fn build(mut self, document: &mut CadDocument) -> NotificationCollection {
         let handles = self.obj_reader.handles();
+        let mut skipped_pass1 = 0u32;
+        let mut skipped_pass2 = 0u32;
+        let total_handles = handles.len();
 
         // ── Pass 1: Build handle→name maps from table entries ──────────
         let mut maps = HandleMaps::new();
@@ -112,7 +133,17 @@ impl DwgDocumentBuilder {
                 }));
                 let (obj_handle, type_code) = match result {
                     Ok(v) => v,
-                    Err(_) => continue,  // skip corrupt record
+                    Err(_) => {
+                        skipped_pass1 += 1;
+                        self.notifications.notify(
+                            NotificationType::Error,
+                            format!(
+                                "Skipped corrupt table record at handle {:#X} (panic in common data)",
+                                handle
+                            ),
+                        );
+                        continue;
+                    }
                 };
 
                 let table_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -154,14 +185,27 @@ impl DwgDocumentBuilder {
                         _ => None,
                     }
                 }));
-                if let Ok(Some((kind, h, name))) = table_result {
-                    match kind {
-                        "layer" => { maps.layers.insert(h, name); },
-                        "block" => { maps.blocks.insert(h, name); },
-                        "style" => { maps.text_styles.insert(h, name); },
-                        "ltype" => { maps.linetypes.insert(h, name); },
-                        "dimstyle" => { maps.dim_styles.insert(h, name); },
-                        _ => {}
+                match table_result {
+                    Ok(Some((kind, h, name))) => {
+                        match kind {
+                            "layer" => { maps.layers.insert(h, name); },
+                            "block" => { maps.blocks.insert(h, name); },
+                            "style" => { maps.text_styles.insert(h, name); },
+                            "ltype" => { maps.linetypes.insert(h, name); },
+                            "dimstyle" => { maps.dim_styles.insert(h, name); },
+                            _ => {}
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        skipped_pass1 += 1;
+                        self.notifications.notify(
+                            NotificationType::Error,
+                            format!(
+                                "Skipped corrupt table record at handle {:#X}, type_code={}",
+                                handle, type_code
+                            ),
+                        );
                     }
                 }
             }
@@ -184,12 +228,35 @@ impl DwgDocumentBuilder {
                 self.process_pass2_record(handle, type_code, reader, document, &maps);
             }));
             if result.is_err() {
-                // Silently skip corrupt object — it will be missing from the document
+                skipped_pass2 += 1;
+                self.notifications.notify(
+                    NotificationType::Error,
+                    format!(
+                        "Skipped corrupt record at handle {:#X}, type_code={} (panic recovered)",
+                        handle, type_code
+                    ),
+                );
                 continue;
             }
         }
 
-        Ok(())
+        // Summary notification
+        let total_skipped = skipped_pass1 + skipped_pass2;
+        if total_skipped > 0 {
+            self.notifications.notify(
+                NotificationType::Warning,
+                format!(
+                    "DWG build summary: {} of {} handles processed, {} records skipped ({} table, {} entity/object)",
+                    total_handles as u32 - total_skipped,
+                    total_handles,
+                    total_skipped,
+                    skipped_pass1,
+                    skipped_pass2,
+                ),
+            );
+        }
+
+        self.notifications
     }
 
     /// Process a single object record in Pass 2.

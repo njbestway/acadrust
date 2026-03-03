@@ -100,6 +100,11 @@ impl NotificationCollection {
         self.items.iter().any(|n| n.notification_type == nt)
     }
 
+    /// Append all notifications from another collection.
+    pub fn extend(&mut self, other: NotificationCollection) {
+        self.items.extend(other.items);
+    }
+
     /// Consume the collection into a `Vec`.
     pub fn into_vec(self) -> Vec<Notification> {
         self.items

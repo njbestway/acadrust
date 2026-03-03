@@ -125,12 +125,44 @@ pub struct DwgPageCrcInfo {
     pub crc: u64,
 }
 
+/// Options controlling how DWG files are read.
+///
+/// When `failsafe` is enabled the reader will attempt to recover as
+/// much data as possible from damaged or partially-corrupt files
+/// instead of returning an error.  Specific behaviours:
+///
+/// * File-header parsing errors are caught and an empty/partial
+///   result is returned rather than propagating the error.
+/// * Missing pages in a section are skipped instead of aborting.
+/// * Skipped records and sections are reported through the
+///   [`CadDocument::notifications`] collection.
+#[derive(Debug, Clone)]
+pub struct DwgReadOptions {
+    /// When `true`, recover as much data as possible from corrupt files.
+    pub failsafe: bool,
+}
+
+impl Default for DwgReadOptions {
+    fn default() -> Self {
+        Self { failsafe: false }
+    }
+}
+
+impl DwgReadOptions {
+    /// Create options with failsafe mode enabled.
+    pub fn failsafe() -> Self {
+        Self { failsafe: true }
+    }
+}
+
 /// DWG file reader with CRC-64 extraction support.
 ///
 /// Reads DWG binary files and provides access to all internal
 /// integrity checksums including the AC1021 Header CRC-64.
 pub struct DwgReader<R: Read + Seek> {
     stream: R,
+    /// Options controlling read behaviour.
+    pub options: DwgReadOptions,
     /// Notifications collected during reading
     pub notifications: NotificationCollection,
 }
@@ -141,6 +173,17 @@ impl DwgReader<File> {
         let file = File::open(path)?;
         Ok(Self {
             stream: file,
+            options: DwgReadOptions::default(),
+            notifications: NotificationCollection::new(),
+        })
+    }
+
+    /// Open a DWG file from a filesystem path with custom options.
+    pub fn from_file_with_options<P: AsRef<Path>>(path: P, options: DwgReadOptions) -> Result<Self, DxfError> {
+        let file = File::open(path)?;
+        Ok(Self {
+            stream: file,
+            options,
             notifications: NotificationCollection::new(),
         })
     }
@@ -151,6 +194,16 @@ impl<R: Read + Seek> DwgReader<R> {
     pub fn from_stream(stream: R) -> Self {
         Self {
             stream,
+            options: DwgReadOptions::default(),
+            notifications: NotificationCollection::new(),
+        }
+    }
+
+    /// Create a reader from any seekable stream with custom options.
+    pub fn from_stream_with_options(stream: R, options: DwgReadOptions) -> Self {
+        Self {
+            stream,
+            options,
             notifications: NotificationCollection::new(),
         }
     }
@@ -163,9 +216,26 @@ impl<R: Read + Seek> DwgReader<R> {
     /// 2. Section buffer extraction (Classes, Header, Handles, Objects)
     /// 3. Classes, header variables, and handle map parsing
     /// 4. Object dispatch and entity/object mapping via `DwgDocumentBuilder`
+    ///
+    /// In failsafe mode, file-header errors are caught and a partial
+    /// document is returned instead of propagating the error.
     pub fn read(&mut self) -> std::result::Result<crate::document::CadDocument, DxfError> {
+        let failsafe = self.options.failsafe;
+
         // 1. Read the DWG file header and section map
-        let info = self.read_file_header()?;
+        let info = match self.read_file_header() {
+            Ok(info) => info,
+            Err(e) if failsafe => {
+                self.notifications.notify(
+                    NotificationType::Error,
+                    format!("Failsafe: file header read failed, returning partial document: {}", e),
+                );
+                let mut doc = crate::document::CadDocument::default();
+                doc.notifications.extend(std::mem::take(&mut self.notifications));
+                return Ok(doc);
+            }
+            Err(e) => return Err(e),
+        };
         let dxf_version = crate::types::DxfVersion::parse(&info.version_string)
             .unwrap_or(crate::types::DxfVersion::Unknown);
         let mut document = crate::document::CadDocument::with_version(dxf_version);
@@ -223,13 +293,10 @@ impl<R: Read + Seek> DwgReader<R> {
                     handle_map,
                 ) {
                     Ok(obj_reader) => {
-                        let builder = crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::new(obj_reader);
-                        if let Err(e) = builder.build(&mut document) {
-                            self.notifications.notify(
-                                NotificationType::Warning,
-                                format!("Object mapping partially failed: {}", e),
-                            );
-                        }
+                        let mut builder = crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::new(obj_reader);
+                        builder.set_failsafe(failsafe);
+                        let build_notifications = builder.build(&mut document);
+                        self.notifications.extend(build_notifications);
                     },
                     Err(e) => self.notifications.notify(
                         NotificationType::Warning,
@@ -238,6 +305,10 @@ impl<R: Read + Seek> DwgReader<R> {
                 }
             }
         }
+
+        // Transfer reader notifications to the document so callers can
+        // inspect them via `document.notifications`.
+        document.notifications.extend(std::mem::take(&mut self.notifications));
 
         Ok(document)
     }
@@ -738,18 +809,24 @@ impl<R: Read + Seek> DwgReader<R> {
     /// Reads and concatenates all pages belonging to the given section,
     /// producing the complete section data ready for parsing.
     ///
+    /// In failsafe mode, missing or unreadable pages are skipped and a
+    /// warning notification is emitted rather than aborting the entire
+    /// section read.
+    ///
     /// # Arguments
     /// * `section_name` - Section name (e.g., "AcDb:Header", "AcDb:Classes")
     /// * `info` - Previously read file header info containing section descriptors
     ///
     /// # Returns
     /// The complete decompressed section buffer, or an error if the section
-    /// is not found or a page cannot be read.
+    /// is not found or a page cannot be read (unless in failsafe mode).
     pub fn get_section_buffer(
         &mut self,
         section_name: &str,
         info: &DwgFileHeaderInfo,
     ) -> Result<Vec<u8>, DxfError> {
+        let failsafe = self.options.failsafe;
+
         // Find the section descriptor
         let section = info.section_descriptors.iter()
             .find(|s| s.name == section_name)
@@ -770,17 +847,21 @@ impl<R: Read + Seek> DwgReader<R> {
         let encoding = section.encoding;
         let block_size: usize = 251;
 
+        let mut skipped_pages = 0u32;
+
         for page in &section.pages {
             // Look up the page record to get the file offset
             if let Some(&(page_offset, _page_size)) = info.page_records.get(&(page.page_number as i32)) {
-                let page_data = if encoding == 1 {
+                let page_result = if encoding == 1 {
                     // encoding=1: read raw data directly (no RS, no LZ77).
                     // AutoCAD stores encoding=1 pages as raw bytes aligned to 32.
                     let read_size = page.decompressed_size as usize;
-                    self.stream.seek(SeekFrom::Start(AC21_FILE_HEADER_SIZE + page_offset as u64))?;
-                    let mut buf = vec![0u8; read_size];
-                    self.stream.read_exact(&mut buf)?;
-                    buf
+                    (|| -> Result<Vec<u8>, DxfError> {
+                        self.stream.seek(SeekFrom::Start(AC21_FILE_HEADER_SIZE + page_offset as u64))?;
+                        let mut buf = vec![0u8; read_size];
+                        self.stream.read_exact(&mut buf)?;
+                        Ok(buf)
+                    })()
                 } else {
                     self.get_page_buffer_at(
                         page_offset as u64,
@@ -788,15 +869,55 @@ impl<R: Read + Seek> DwgReader<R> {
                         page.decompressed_size,
                         1, // correction factor is always 1 for data pages
                         block_size,
-                    )?
+                    )
                 };
 
-                result.extend_from_slice(&page_data);
+                match page_result {
+                    Ok(page_data) => result.extend_from_slice(&page_data),
+                    Err(e) if failsafe => {
+                        skipped_pages += 1;
+                        self.notifications.notify(
+                            NotificationType::Error,
+                            format!(
+                                "Failsafe: skipped corrupt page {} in section '{}': {}",
+                                page.page_number, section_name, e
+                            ),
+                        );
+                        // Fill with zeros to maintain expected offsets
+                        let fill_size = page.decompressed_size as usize;
+                        result.extend(std::iter::repeat(0u8).take(fill_size));
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else if failsafe {
+                skipped_pages += 1;
+                self.notifications.notify(
+                    NotificationType::Error,
+                    format!(
+                        "Failsafe: page {} not found in page map for section '{}'",
+                        page.page_number, section_name
+                    ),
+                );
+                // Fill with zeros to maintain expected offsets
+                let fill_size = page.decompressed_size as usize;
+                result.extend(std::iter::repeat(0u8).take(fill_size));
             } else {
                 return Err(DxfError::Parse(
                     format!("Page {} not found in page map", page.page_number)
                 ));
             }
+        }
+
+        if skipped_pages > 0 {
+            self.notifications.notify(
+                NotificationType::Warning,
+                format!(
+                    "Failsafe: {} of {} pages skipped in section '{}'",
+                    skipped_pages,
+                    section.pages.len(),
+                    section_name
+                ),
+            );
         }
 
         // Truncate to the declared section size (last page may be padded)

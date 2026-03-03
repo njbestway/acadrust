@@ -87,7 +87,7 @@ pub use document::CadDocument;
 
 // Re-export I/O types
 pub use io::dxf::{DxfReader, DxfWriter};
-pub use io::dwg::DwgWriter;
+pub use io::dwg::{DwgReader, DwgReadOptions, DwgWriter};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
