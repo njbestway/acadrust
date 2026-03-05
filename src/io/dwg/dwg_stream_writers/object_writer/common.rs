@@ -76,6 +76,8 @@ pub const OBJ_APPID_CONTROL: i16 = 66;
 pub const OBJ_APPID: i16 = 67;
 pub const OBJ_DIMSTYLE_CONTROL: i16 = 68;
 pub const OBJ_DIMSTYLE: i16 = 69;
+pub const OBJ_VPENT_HDR_CONTROL: i16 = 70;
+pub const OBJ_VPENT_HDR: i16 = 71;
 pub const OBJ_GROUP: i16 = 72;
 pub const OBJ_MLINESTYLE: i16 = 73;
 pub const OBJ_OLE2FRAME: i16 = 74;
@@ -315,8 +317,9 @@ impl<'a> DwgObjectWriter<'a> {
 
         // ── R13-R2000 (pre-R2004): Nolinks + prev/next entity chain ──
         // In R13/R14/R2000, entities in a block form a doubly-linked list.
-        // Each entity must have prev/next entity handles.
-        // C# ACadSharp always writes both handles regardless of hasLinks.
+        // NOLINKS bit = 1 means handles are sequential (reader infers
+        // prev = handle-1, next = handle+1) and prev/next handles are omitted.
+        // NOLINKS bit = 0 means prev/next handles are written explicitly.
         if !self.version.r2004_plus() {
             let prev_h = self.prev_handle.unwrap_or(Handle::NULL);
             let next_h = self.next_handle.unwrap_or(Handle::NULL);
@@ -325,14 +328,16 @@ impl<'a> DwgObjectWriter<'a> {
                 && !next_h.is_null()
                 && next_h.value() == handle.value().wrapping_add(1);
 
-            // MAIN: Nolinks bit (true = sequential links)
+            // MAIN: Nolinks bit (true = sequential, reader infers prev/next)
             self.writer.write_bit(has_links);
 
-            // HANDLE: prev + next entity handles (always written, matching C#)
-            self.writer
-                .write_handle(DwgReferenceType::SoftPointer, prev_h.value());
-            self.writer
-                .write_handle(DwgReferenceType::SoftPointer, next_h.value());
+            // HANDLE: prev + next entity handles only when NOT sequential
+            if !has_links {
+                self.writer
+                    .write_handle(DwgReferenceType::SoftPointer, prev_h.value());
+                self.writer
+                    .write_handle(DwgReferenceType::SoftPointer, next_h.value());
+            }
         }
 
         // ── MAIN: Color (EnColor) ──
