@@ -326,7 +326,8 @@ pub fn read_layer(
 
     if version.r2000_plus() {
         let values = reader.read_bit_short();
-        line_weight = (values >> 5) & 0x1F;
+        let lw_index = ((values >> 5) & 0x1F) as u8;
+        line_weight = crate::types::LineWeight::from_dwg_index(lw_index).as_i16();
         frozen = (values & 0b0001) != 0;
         off = (values & 0b0010) != 0;
         frozen_in_new_vp = (values & 0b0100) != 0;

@@ -352,8 +352,10 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(1.0); // simplified: always 1.0
 
         // ── R13-R14 only: invisibility + early return ──
+        // R13/R14 DWG convention: 0 = invisible, non-zero = visible
+        // (inverted from R2000+ where 0 = visible, 1 = invisible)
         if self.version.r13_14_only() {
-            self.writer.write_bit_short(if invisible { 1 } else { 0 });
+            self.writer.write_bit_short(if invisible { 0 } else { 1 });
             return;
         }
 
@@ -392,9 +394,8 @@ impl<'a> DwgObjectWriter<'a> {
         // ── MAIN: Invisibility ──
         self.writer.write_bit_short(if invisible { 1 } else { 0 });
 
-        // ── R2000+: Lineweight ──
-        let lw_val = line_weight.as_i16();
-        self.writer.write_byte(lw_val as u8);
+        // ── R2000+: Lineweight (5-bit DWG index) ──
+        self.writer.write_byte(line_weight.to_dwg_index());
     }
 
     // ── write_common_non_entity_data ────────────────────────────────
@@ -520,11 +521,11 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     // ── entity-mode helper ──────────────────────────────────────────
-    /// Returns the 2-bit entity-mode value:
-    /// - 0 = owned (owner handle present) — VERTEX, ATTRIB, SEQEND, etc.
-    /// - 1 = paper-space block
-    /// - 2 = model-space block
-    /// - 3 = (unused)
+    /// Returns the 2-bit entity-mode value (per ODA spec §19.4.4):
+    /// - 0 = owned (owner handle present) — VERTEX, ATTRIB, SEQEND,
+    ///       or entity inside a named block
+    /// - 1 = paper-space entity (BB 01 → *Paper_Space)
+    /// - 2 = model-space entity (BB 10 → *Model_Space)
     fn get_entity_mode(&self, owner_handle: &Handle) -> u8 {
         // Check if owner is model-space or paper-space block record
         let ms_handle = self
@@ -540,12 +541,12 @@ impl<'a> DwgObjectWriter<'a> {
 
         if let Some(ms) = ms_handle {
             if *owner_handle == ms {
-                return 2;
+                return 2; // model space (BB 10)
             }
         }
         if let Some(ps) = ps_handle {
             if *owner_handle == ps {
-                return 1;
+                return 1; // paper space (BB 01)
             }
         }
         0

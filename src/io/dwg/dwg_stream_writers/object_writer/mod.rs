@@ -373,7 +373,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.write_xref_dependant_bit();
 
         if self.version.r2000_plus() {
-            let lw_index = layer.line_weight.as_i16();
+            let lw_index = layer.line_weight.to_dwg_index() as i16;
             let mut values: i16 = (lw_index & 0x1F) << 5; // lineweight in bits 5..9
 
             if layer.flags.frozen {
@@ -383,8 +383,9 @@ impl<'a> DwgObjectWriter<'a> {
             if layer.flags.off {
                 values |= 0b0010;
             }
-            // frozen in new VP
-            if layer.flags.frozen {
+            // frozen in new VP (bit 2) — always false for now
+            // (LayerFlags doesn't expose a separate frozen_in_new_vp flag)
+            if false {
                 values |= 0b0100;
             }
             if layer.flags.locked {
@@ -705,8 +706,10 @@ impl<'a> DwgObjectWriter<'a> {
                     // Ensure the full extents fit, with 10% margin
                     let vh = (ext_height.max(ext_width / ar)) * 1.1;
                     vp.view_height = if vh > 0.0 { vh } else { 10.0 };
+                    // view_center is in DCS, whose origin = view_target.
+                    // Keep view_target at its default (origin) so
+                    // view_center acts as the WCS center directly.
                     vp.view_center = Vector2::new(center.x, center.y);
-                    vp.view_target = crate::types::Vector3::new(center.x, center.y, 0.0);
                 }
             }
         }
@@ -731,8 +734,10 @@ impl<'a> DwgObjectWriter<'a> {
 
         // View height BD 40
         self.writer.write_bit_double(vport.view_height);
-        // Aspect ratio BD 41 — stored as aspect_ratio * view_height (R13+ quirk)
-        self.writer.write_bit_double(vport.aspect_ratio * vport.view_height);
+        // Aspect ratio BD 41 — DWG stores aspect_ratio * view_height
+        // (R13 quirk; reader divides by view_height to get actual ratio)
+        self.writer
+            .write_bit_double(vport.aspect_ratio * vport.view_height);
         // View Center 2RD 12
         self.writer
             .write_2raw_double(crate::types::Vector2 {
@@ -797,10 +802,10 @@ impl<'a> DwgObjectWriter<'a> {
         // Fast zoom B 73
         self.writer.write_bit(true);
         // UCSICON X 74 — 2 individual bits
-        self.writer.write_bit(false); // bit 0 (OnLower)
-        self.writer.write_bit(false); // bit 1 (OnOrigin)
+        self.writer.write_bit(true); // bit 0: UCS icon display ON
+        self.writer.write_bit(true); // bit 1: UCS icon at origin
         // Grid on/off B 76
-        self.writer.write_bit(false);
+        self.writer.write_bit(true);
         // Grid spacing 2RD 15
         self.writer
             .write_2raw_double(crate::types::Vector2 {

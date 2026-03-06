@@ -349,9 +349,11 @@ impl DwgObjectReader {
         let linetype_scale = reader.read_bit_double();
 
         // R13-R14: invisibility + return early
+        // R13/R14 DWG convention: 0 = invisible, non-zero = visible
+        // (inverted from R2000+ where 0 = visible, 1 = invisible)
         let invisible;
         if self.version.r13_14_only() {
-            invisible = reader.read_bit_short() != 0;
+            invisible = reader.read_bit_short() == 0;
             return EntityCommonData {
                 common,
                 has_graphic,
@@ -400,9 +402,10 @@ impl DwgObjectReader {
         // Invisibility
         invisible = reader.read_bit_short() != 0;
 
-        // R2000+: Lineweight
+        // R2000+: Lineweight (5-bit DWG index → raw byte value)
         let line_weight = if self.version.r2000_plus() {
-            reader.read_byte()
+            let idx = reader.read_byte();
+            crate::types::LineWeight::from_dwg_index(idx).as_i16() as u8
         } else {
             0
         };
