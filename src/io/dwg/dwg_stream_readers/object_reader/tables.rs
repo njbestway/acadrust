@@ -271,19 +271,15 @@ pub struct BlockHeaderData {
 // ════════════════════════════════════════════════════════════════════════
 
 /// Read xref-dependant bits for a table entry.
-/// - R13/R14: B (64-flag) + B (xdep)
-/// - R2000-R2006: B (64-flag) + BS (xrefindex+1) + B (xdep)
+/// - Pre-R2007: B (64-flag) + BS (xrefindex+1) + B (xdep)
 /// - R2007+: BS (combined)
 fn read_xref_dependant_bits(reader: &mut DwgMergedReader, version: DwgVersion) {
     if version.r2007_plus() {
         let _combined = reader.read_bit_short();
-    } else if version.r2000_plus() {
+    } else {
+        // Pre-R2007 (R13/R14/R2000-R2006): B + BS + B
         let _xref_64 = reader.read_bit();
         let _xref_index = reader.read_bit_short();
-        let _xref_dep = reader.read_bit();
-    } else {
-        // R13/R14: only 64-flag and xdep
-        let _xref_64 = reader.read_bit();
         let _xref_dep = reader.read_bit();
     }
 }
@@ -352,8 +348,7 @@ pub fn read_layer(
         plottable = (values & 0b10000) != 0;
     } else {
         frozen = reader.read_bit();
-        let on = reader.read_bit();
-        off = !on;
+        off = reader.read_bit(); // off flag (0=on, 1=off, same as R2000+)
         frozen_in_new_vp = reader.read_bit();
         locked = reader.read_bit();
     }

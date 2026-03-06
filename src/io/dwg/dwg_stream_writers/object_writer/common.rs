@@ -479,12 +479,8 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r2007_plus() {
             // R2007+: xrefindex+1 BS 70 (combined flags)
             self.writer.write_bit_short(0);
-        } else if self.version.r13_14_only() {
-            // R13/R14: only 64-flag B and xdep B (no xrefindex BS)
-            self.writer.write_bit(false); // 64-flag (referenced)
-            self.writer.write_bit(false); // xref dependent
         } else {
-            // R2000-R2006: 64-flag B, xrefindex+1 BS, xdep B
+            // Pre-R2007: 64-flag B (Referenced), xrefindex+1 BS, Xdep B (XrefDependent)
             self.writer.write_bit(false); // referenced flag
             self.writer.write_bit_short(0); // xrefindex+1
             self.writer.write_bit(false); // xref dependent flag

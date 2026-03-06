@@ -397,7 +397,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_short(values);
         } else {
             self.writer.write_bit(layer.flags.frozen);
-            self.writer.write_bit(!layer.flags.off); // on flag
+            self.writer.write_bit(layer.flags.off); // off flag (0=on, 1=off, same as R2000+)
             self.writer.write_bit(false); // frozen in new VP
             self.writer.write_bit(layer.flags.locked);
         }
