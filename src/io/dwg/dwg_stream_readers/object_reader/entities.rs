@@ -6,7 +6,8 @@
 
 use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_version::DwgVersion;
-use crate::types::{Vector2, Vector3, DxfVersion};
+use crate::types::{Color, Handle, Vector2, Vector3, DxfVersion};
+use crate::entities::multileader::*;
 use super::safe_count;
 
 // ════════════════════════════════════════════════════════════════════════
@@ -621,14 +622,9 @@ pub fn read_mtext(
 
     let style_handle = reader.read_handle();
 
-    let mut linespacing_style = 0i16;
-    let mut linespacing_factor = 1.0;
-    let mut unknown_bit = false;
-    if version.r2000_plus() {
-        linespacing_style = reader.read_bit_short();
-        linespacing_factor = reader.read_bit_double();
-        unknown_bit = reader.read_bit();
-    }
+    let linespacing_style = reader.read_bit_short();
+    let linespacing_factor = reader.read_bit_double();
+    let unknown_bit = reader.read_bit();
 
     let mut background_flags = 0i32;
     if version.r2004_plus() {
@@ -1267,54 +1263,38 @@ pub fn read_viewport(reader: &mut DwgMergedReader, version: DwgVersion, _dxf_ver
     let width = reader.read_bit_double();
     let height = reader.read_bit_double();
 
-    let mut view_target = Vector3::ZERO;
-    let mut view_direction = Vector3::UNIT_Z;
-    let mut twist_angle = 0.0;
-    let mut view_height = 0.0;
-    let mut lens_length = 50.0;
-    let mut front_clip_z = 0.0;
-    let mut back_clip_z = 0.0;
-    let mut snap_angle = 0.0;
-    let mut view_center = Vector2::ZERO;
-    let mut snap_base = Vector2::ZERO;
-    let mut snap_spacing = Vector2::ZERO;
-    let mut grid_spacing = Vector2::ZERO;
-    let mut circle_sides = 100i16;
-    let mut frozen_layer_count = 0i32;
-    let mut status_flags = 0i32;
-    let mut render_mode = 0u8;
+    // View data (read for all versions)
+    let view_target = reader.read_3bit_double();
+    let view_direction = reader.read_3bit_double();
+    let twist_angle = reader.read_bit_double();
+    let view_height = reader.read_bit_double();
+    let lens_length = reader.read_bit_double();
+    let front_clip_z = reader.read_bit_double();
+    let back_clip_z = reader.read_bit_double();
+    let snap_angle = reader.read_bit_double();
+    let view_center = reader.read_2raw_double();
+    let snap_base = reader.read_2raw_double();
+    let snap_spacing = reader.read_2raw_double();
+    let grid_spacing = reader.read_2raw_double();
+    let circle_sides = reader.read_bit_short();
 
-    if version.r2000_plus() {
-        view_target = reader.read_3bit_double();
-        view_direction = reader.read_3bit_double();
-        twist_angle = reader.read_bit_double();
-        view_height = reader.read_bit_double();
-        lens_length = reader.read_bit_double();
-        front_clip_z = reader.read_bit_double();
-        back_clip_z = reader.read_bit_double();
-        snap_angle = reader.read_bit_double();
-        view_center = reader.read_2raw_double();
-        snap_base = reader.read_2raw_double();
-        snap_spacing = reader.read_2raw_double();
-        grid_spacing = reader.read_2raw_double();
-        circle_sides = reader.read_bit_short();
-    }
     if version.r2007_plus() {
         let _grid_major = reader.read_bit_short();
     }
-    if version.r2000_plus() {
-        frozen_layer_count = reader.read_bit_long();
-        status_flags = reader.read_bit_long();
-        let _style_sheet = reader.read_variable_text();
-        render_mode = reader.read_byte();
-        let _ucs_at_origin = reader.read_bit();
-        let _ucs_per_viewport = reader.read_bit();
-        let _ucs_origin = reader.read_3bit_double();
-        let _ucs_x_axis = reader.read_3bit_double();
-        let _ucs_y_axis = reader.read_3bit_double();
-        let _ucs_elevation = reader.read_bit_double();
-        let _ucs_ortho_type = reader.read_bit_short();
-    }
+
+    // Status/UCS data (read for all versions)
+    let frozen_layer_count = reader.read_bit_long();
+    let status_flags = reader.read_bit_long();
+    let _style_sheet = reader.read_variable_text();
+    let render_mode = reader.read_byte();
+    let _ucs_at_origin = reader.read_bit();
+    let _ucs_per_viewport = reader.read_bit();
+    let _ucs_origin = reader.read_3bit_double();
+    let _ucs_x_axis = reader.read_3bit_double();
+    let _ucs_y_axis = reader.read_3bit_double();
+    let _ucs_elevation = reader.read_bit_double();
+    let _ucs_ortho_type = reader.read_bit_short();
+
     if version.r2004_plus() {
         let _shade_plot_mode = reader.read_bit_short();
     }
@@ -1576,6 +1556,457 @@ pub fn read_attribute_entity(reader: &mut DwgMergedReader, version: DwgVersion, 
     let lock_position = if version.r2007_plus() { reader.read_bit() } else { false };
 
     AttributeCommonData { text_data, att_version, att_type, tag, field_length, flags, lock_position }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  MultiLeader reader
+// ════════════════════════════════════════════════════════════════════════
+
+/// Data returned by the multileader reader.
+#[derive(Debug, Clone)]
+pub struct MultiLeaderData {
+    pub context: MultiLeaderAnnotContext,
+    pub style_handle: u64,
+    pub property_override_flags: u32,
+    pub path_type: i16,
+    pub line_color: Color,
+    pub line_type_handle: u64,
+    pub line_weight: i32,
+    pub enable_landing: bool,
+    pub enable_dogleg: bool,
+    pub dogleg_length: f64,
+    pub arrowhead_handle: u64,
+    pub arrowhead_size: f64,
+    pub content_type: i16,
+    pub text_style_handle: u64,
+    pub text_left_attachment: i16,
+    pub text_right_attachment: i16,
+    pub text_angle_type: i16,
+    pub text_alignment: i16,
+    pub text_color: Color,
+    pub text_frame: bool,
+    pub block_content_handle: u64,
+    pub block_content_color: Color,
+    pub block_scale: Vector3,
+    pub block_rotation: f64,
+    pub block_connection_type: i16,
+    pub enable_annotation_scale: bool,
+    pub block_attributes: Vec<BlockAttribute>,
+    pub text_direction_negative: bool,
+    pub text_align_in_ipe: i16,
+    pub text_attachment_point: i16,
+    pub scale_factor: f64,
+    pub text_attachment_direction: i16,
+    pub text_bottom_attachment: i16,
+    pub text_top_attachment: i16,
+    pub extend_leader_to_text: bool,
+}
+
+pub fn read_multileader(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> MultiLeaderData {
+    // R2010+: version
+    if version.r2010_plus() {
+        let _ml_version = reader.read_bit_short();
+    }
+
+    // Annotation context (inline)
+    let context = read_multileader_annotation_context(reader, version, dxf_version);
+
+    // Common data
+    let style_handle = reader.read_handle();
+    let property_override_flags = reader.read_bit_long() as u32;
+    let path_type = reader.read_bit_short();
+    let line_color = reader.read_cm_color();
+    let line_type_handle = reader.read_handle();
+    let line_weight = reader.read_bit_long();
+    let enable_landing = reader.read_bit();
+    let enable_dogleg = reader.read_bit();
+    let dogleg_length = reader.read_bit_double();
+    let arrowhead_handle = reader.read_handle();
+    let arrowhead_size = reader.read_bit_double();
+    let content_type = reader.read_bit_short();
+    let text_style_handle = reader.read_handle();
+    let text_left_attachment = reader.read_bit_short();
+    let text_right_attachment = reader.read_bit_short();
+    let text_angle_type = reader.read_bit_short();
+    let text_alignment = reader.read_bit_short();
+    let text_color = reader.read_cm_color();
+    let text_frame = reader.read_bit();
+    let block_content_handle = reader.read_handle();
+    let block_content_color = reader.read_cm_color();
+    let block_scale = reader.read_3bit_double();
+    let block_rotation = reader.read_bit_double();
+    let block_connection_type = reader.read_bit_short();
+    let enable_annotation_scale = reader.read_bit();
+
+    // Block attributes
+    let ba_count = safe_count(reader.read_bit_long());
+    let mut block_attributes = Vec::with_capacity(ba_count as usize);
+    for _ in 0..ba_count {
+        let def_handle = reader.read_handle();
+        let text = reader.read_variable_text();
+        let index = reader.read_bit_short();
+        let width = reader.read_bit_double();
+        block_attributes.push(BlockAttribute {
+            attribute_definition_handle: if def_handle != 0 { Some(Handle::from(def_handle)) } else { None },
+            text,
+            index,
+            width,
+        });
+    }
+
+    let text_direction_negative = reader.read_bit();
+    let text_align_in_ipe = reader.read_bit_short();
+    let text_attachment_point = reader.read_bit_short();
+    let scale_factor = reader.read_bit_double();
+
+    let mut text_attachment_direction: i16 = 0;
+    let mut text_bottom_attachment: i16 = 0;
+    let mut text_top_attachment: i16 = 0;
+    if version.r2010_plus() {
+        text_attachment_direction = reader.read_bit_short();
+        text_bottom_attachment = reader.read_bit_short();
+        text_top_attachment = reader.read_bit_short();
+    }
+
+    let mut extend_leader_to_text = false;
+    if version.r2013_plus(dxf_version) {
+        extend_leader_to_text = reader.read_bit();
+    }
+
+    MultiLeaderData {
+        context,
+        style_handle,
+        property_override_flags,
+        path_type,
+        line_color,
+        line_type_handle,
+        line_weight,
+        enable_landing,
+        enable_dogleg,
+        dogleg_length,
+        arrowhead_handle,
+        arrowhead_size,
+        content_type,
+        text_style_handle,
+        text_left_attachment,
+        text_right_attachment,
+        text_angle_type,
+        text_alignment,
+        text_color,
+        text_frame,
+        block_content_handle,
+        block_content_color,
+        block_scale,
+        block_rotation,
+        block_connection_type,
+        enable_annotation_scale,
+        block_attributes,
+        text_direction_negative,
+        text_align_in_ipe,
+        text_attachment_point,
+        scale_factor,
+        text_attachment_direction,
+        text_bottom_attachment,
+        text_top_attachment,
+        extend_leader_to_text,
+    }
+}
+
+fn read_multileader_annotation_context(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> MultiLeaderAnnotContext {
+    // Leader root count
+    let leader_root_count = safe_count(reader.read_bit_long());
+
+    // Read each leader root
+    let mut leader_roots = Vec::with_capacity(leader_root_count as usize);
+    for _ in 0..leader_root_count {
+        leader_roots.push(read_leader_root(reader, version, dxf_version));
+    }
+
+    // Common data
+    let scale_factor = reader.read_bit_double();
+    let content_base_point = reader.read_3bit_double();
+    let text_height = reader.read_bit_double();
+    let arrowhead_size = reader.read_bit_double();
+    let landing_gap = reader.read_bit_double();
+    let text_left_attachment = TextAttachmentType::from(reader.read_bit_short());
+    let text_right_attachment = TextAttachmentType::from(reader.read_bit_short());
+    let text_alignment = TextAlignmentType::from(reader.read_bit_short());
+    let block_connection_type = BlockContentConnectionType::from(reader.read_bit_short());
+
+    let has_text_contents = reader.read_bit();
+
+    let mut text_string = String::new();
+    let mut text_normal = Vector3::ZERO;
+    let mut text_style_handle: Option<Handle> = None;
+    let mut text_location = Vector3::ZERO;
+    let mut text_direction = Vector3::UNIT_X;
+    let mut text_rotation = 0.0;
+    let mut text_width = 0.0;
+    let mut text_boundary_height = 0.0;
+    let mut line_spacing_factor = 1.0;
+    let mut line_spacing_style = LineSpacingStyle::default();
+    let mut text_color = Color::ByLayer;
+    let mut text_attachment_point = TextAttachmentPointType::default();
+    let mut text_flow_direction = FlowDirectionType::default();
+    let mut background_fill_color = Color::ByLayer;
+    let mut background_scale_factor = 1.5;
+    let mut background_transparency = 0i32;
+    let mut background_fill_enabled = false;
+    let mut background_mask_fill_on = false;
+    let mut column_type = 0i16;
+    let mut text_height_automatic = false;
+    let mut column_width = 0.0;
+    let mut column_gutter = 0.0;
+    let mut column_flow_reversed = false;
+    let mut column_sizes: Vec<f64> = Vec::new();
+    let mut word_break = false;
+
+    if has_text_contents {
+        text_string = reader.read_variable_text();
+        text_normal = reader.read_3bit_double();
+        let ts_handle = reader.read_handle();
+        text_style_handle = if ts_handle != 0 { Some(Handle::from(ts_handle)) } else { None };
+        text_location = reader.read_3bit_double();
+        text_direction = reader.read_3bit_double();
+        text_rotation = reader.read_bit_double();
+        text_width = reader.read_bit_double();
+        text_boundary_height = reader.read_bit_double();
+        line_spacing_factor = reader.read_bit_double();
+        line_spacing_style = LineSpacingStyle::from(reader.read_bit_short());
+        text_color = reader.read_cm_color();
+        text_attachment_point = TextAttachmentPointType::from(reader.read_bit_short());
+        text_flow_direction = FlowDirectionType::from(reader.read_bit_short());
+        background_fill_color = reader.read_cm_color();
+        background_scale_factor = reader.read_bit_double();
+        background_transparency = reader.read_bit_long();
+        background_fill_enabled = reader.read_bit();
+        background_mask_fill_on = reader.read_bit();
+        column_type = reader.read_bit_short();
+        text_height_automatic = reader.read_bit();
+        column_width = reader.read_bit_double();
+        column_gutter = reader.read_bit_double();
+        column_flow_reversed = reader.read_bit();
+
+        let col_count = safe_count(reader.read_bit_long());
+        column_sizes = Vec::with_capacity(col_count as usize);
+        for _ in 0..col_count {
+            column_sizes.push(reader.read_bit_double());
+        }
+
+        word_break = reader.read_bit();
+        let _unknown = reader.read_bit();
+    }
+
+    let has_block_contents = reader.read_bit();
+
+    let mut block_content_handle: Option<Handle> = None;
+    let mut block_content_normal = Vector3::UNIT_Z;
+    let mut block_content_location = Vector3::ZERO;
+    let mut block_content_scale = Vector3::new(1.0, 1.0, 1.0);
+    let mut block_rotation = 0.0;
+    let mut block_content_color = Color::ByLayer;
+    let mut transform_matrix = [0.0f64; 16];
+    // Set identity
+    transform_matrix[0] = 1.0;
+    transform_matrix[5] = 1.0;
+    transform_matrix[10] = 1.0;
+    transform_matrix[15] = 1.0;
+
+    if has_block_contents {
+        let bh = reader.read_handle();
+        block_content_handle = if bh != 0 { Some(Handle::from(bh)) } else { None };
+        block_content_normal = reader.read_3bit_double();
+        block_content_location = reader.read_3bit_double();
+        block_content_scale = reader.read_3bit_double();
+        block_rotation = reader.read_bit_double();
+        block_content_color = reader.read_cm_color();
+
+        for i in 0..16 {
+            transform_matrix[i] = reader.read_bit_double();
+        }
+    }
+
+    let base_point = reader.read_3bit_double();
+    let base_direction = reader.read_3bit_double();
+    let base_vertical = reader.read_3bit_double();
+    let normal_reversed = reader.read_bit();
+
+    let mut text_top_attachment = TextAttachmentType::default();
+    let mut text_bottom_attachment = TextAttachmentType::default();
+    if version.r2010_plus() {
+        text_top_attachment = TextAttachmentType::from(reader.read_bit_short());
+        text_bottom_attachment = TextAttachmentType::from(reader.read_bit_short());
+    }
+
+    MultiLeaderAnnotContext {
+        leader_roots,
+        scale_factor,
+        content_base_point,
+        has_text_contents,
+        text_string,
+        text_normal,
+        text_location,
+        text_direction,
+        text_rotation,
+        text_height,
+        text_width,
+        text_boundary_height,
+        line_spacing_factor,
+        line_spacing_style,
+        text_color,
+        text_attachment_point,
+        text_flow_direction,
+        text_alignment,
+        text_left_attachment,
+        text_right_attachment,
+        text_top_attachment,
+        text_bottom_attachment,
+        text_height_automatic,
+        word_break,
+        text_style_handle,
+        has_block_contents,
+        block_content_handle,
+        block_content_normal,
+        block_content_location,
+        block_content_scale,
+        block_rotation,
+        block_content_color,
+        block_connection_type,
+        column_type,
+        column_width,
+        column_gutter,
+        column_flow_reversed,
+        column_sizes,
+        background_fill_enabled,
+        background_mask_fill_on,
+        background_fill_color,
+        background_scale_factor,
+        background_transparency,
+        base_point,
+        base_direction,
+        base_vertical,
+        normal_reversed,
+        arrowhead_size,
+        landing_gap,
+        transform_matrix,
+        scale_handle: None,
+    }
+}
+
+fn read_leader_root(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    _dxf_version: DxfVersion,
+) -> LeaderRoot {
+    let content_valid = reader.read_bit();
+    let unknown = reader.read_bit();
+    let connection_point = reader.read_3bit_double();
+    let direction = reader.read_3bit_double();
+
+    let bp_count = safe_count(reader.read_bit_long());
+    let mut break_points = Vec::with_capacity(bp_count as usize);
+    for _ in 0..bp_count {
+        let start_point = reader.read_3bit_double();
+        let end_point = reader.read_3bit_double();
+        break_points.push(StartEndPointPair { start_point, end_point });
+    }
+
+    let leader_index = reader.read_bit_long();
+    let landing_distance = reader.read_bit_double();
+
+    let line_count = safe_count(reader.read_bit_long());
+    let mut lines = Vec::with_capacity(line_count as usize);
+    for _ in 0..line_count {
+        lines.push(read_leader_line(reader, version));
+    }
+
+    let mut text_attachment_direction = TextAttachmentDirectionType::default();
+    if version.r2010_plus() {
+        text_attachment_direction = TextAttachmentDirectionType::from(reader.read_bit_short());
+    }
+
+    LeaderRoot {
+        content_valid,
+        unknown,
+        connection_point,
+        direction,
+        break_points,
+        leader_index,
+        landing_distance,
+        lines,
+        text_attachment_direction,
+    }
+}
+
+fn read_leader_line(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+) -> LeaderLine {
+    let pt_count = safe_count(reader.read_bit_long());
+    let mut points = Vec::with_capacity(pt_count as usize);
+    for _ in 0..pt_count {
+        points.push(reader.read_3bit_double());
+    }
+
+    let break_info_count = reader.read_bit_long();
+    let mut segment_index = 0;
+    let mut break_points = Vec::new();
+    if break_info_count > 0 {
+        segment_index = reader.read_bit_long();
+        let sep_count = safe_count(reader.read_bit_long());
+        break_points = Vec::with_capacity(sep_count as usize);
+        for _ in 0..sep_count {
+            let start_point = reader.read_3bit_double();
+            let end_point = reader.read_3bit_double();
+            break_points.push(StartEndPointPair { start_point, end_point });
+        }
+    }
+
+    let index = reader.read_bit_long();
+
+    let mut path_type = MultiLeaderPathType::default();
+    let mut line_color = Color::ByLayer;
+    let mut line_type_handle: Option<Handle> = None;
+    let mut line_weight = crate::types::LineWeight::ByLayer;
+    let mut arrowhead_size = 0.0;
+    let mut arrowhead_handle: Option<Handle> = None;
+    let mut override_flags = LeaderLinePropertyOverrideFlags::NONE;
+
+    if version.r2010_plus() {
+        path_type = MultiLeaderPathType::from(reader.read_bit_short());
+        line_color = reader.read_cm_color();
+        let lt_handle = reader.read_handle();
+        line_type_handle = if lt_handle != 0 { Some(Handle::from(lt_handle)) } else { None };
+        let lw = reader.read_bit_long();
+        line_weight = crate::types::LineWeight::from_value(lw as i16);
+        arrowhead_size = reader.read_bit_double();
+        let ah_handle = reader.read_handle();
+        arrowhead_handle = if ah_handle != 0 { Some(Handle::from(ah_handle)) } else { None };
+        override_flags = LeaderLinePropertyOverrideFlags::from_bits_truncate(reader.read_bit_long() as u32);
+    }
+
+    LeaderLine {
+        points,
+        break_info_count,
+        segment_index,
+        break_points,
+        index,
+        path_type,
+        line_color,
+        line_type_handle,
+        line_weight,
+        arrowhead_size,
+        arrowhead_handle,
+        override_flags,
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════

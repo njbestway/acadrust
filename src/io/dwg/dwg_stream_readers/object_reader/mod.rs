@@ -338,9 +338,10 @@ impl DwgObjectReader {
             }
         }
 
-        // R13-R14: save position for size
+        // R13-R14: size field (RL = main_size_bits) — reposition handle reader
         if self.version.r13_14_only() {
-            let _size = reader.read_raw_long();
+            let main_size_bits = reader.read_raw_long();
+            reader.reposition_handle_reader(main_size_bits);
         }
 
         // Entity mode (2 bits)
@@ -500,9 +501,10 @@ impl DwgObjectReader {
         // Read common data (type + size + handle + xdata)
         let common = self.read_common_data(reader, type_code);
 
-        // R13-R14: size placeholder
+        // R13-R14: size field (RL = main_size_bits) — reposition handle reader
         if self.version.r13_14_only() {
-            let _size = reader.read_raw_long();
+            let main_size_bits = reader.read_raw_long();
+            reader.reposition_handle_reader(main_size_bits);
         }
 
         // Owner handle (soft pointer)

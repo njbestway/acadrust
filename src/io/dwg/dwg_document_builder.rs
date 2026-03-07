@@ -19,6 +19,7 @@ use crate::entities::*;
 use crate::entities::EntityCommon;
 use crate::notification::{NotificationCollection, NotificationType};
 use crate::types::Handle;
+use crate::types::LineWeight;
 use crate::io::dwg::dwg_stream_readers::object_reader::{
     DwgObjectReader, EntityCommonData,
 };
@@ -475,6 +476,9 @@ impl DwgDocumentBuilder {
                     e.rotation = data.rotation;
                     e.relative_x_scale = data.relative_x_scale;
                     e.oblique_angle = data.oblique_angle;
+                    e.thickness = data.thickness;
+                    e.shape_number = data.shape_number as i32;
+                    e.normal = data.normal;
                     e.style_handle = Some(Handle::from(data.style_handle));
                     let _ = document.add_entity(EntityType::Shape(e));
                 },
@@ -518,8 +522,12 @@ impl DwgDocumentBuilder {
                     let mut e = Spline::new();
                     e.common = entity_common;
                     e.degree = data.degree;
+                    e.flags.rational = data.rational;
+                    e.flags.closed = data.closed;
+                    e.flags.periodic = data.periodic;
                     e.knots = data.knots;
                     e.control_points = data.control_points;
+                    e.weights = data.weights;
                     e.fit_points = data.fit_points;
                     let _ = document.add_entity(EntityType::Spline(e));
                 },
@@ -530,11 +538,6 @@ impl DwgDocumentBuilder {
                     e.value = data.value;
                     e.insertion_point = data.insertion_point;
                     e.height = data.height;
-                    e.alignment_point = Some(data.alignment_point);
-                    e.rotation = data.rotation;
-                    e.oblique_angle = data.oblique_angle;
-                    e.width_factor = data.width_factor;
-                    e.normal = data.normal;
                     e.horizontal_alignment = match data.horizontal_alignment {
                         1 => TextHorizontalAlignment::Center,
                         2 => TextHorizontalAlignment::Right,
@@ -549,6 +552,16 @@ impl DwgDocumentBuilder {
                         3 => TextVerticalAlignment::Top,
                         _ => TextVerticalAlignment::Baseline,
                     };
+                    // Only set alignment_point when alignment mode actually uses it
+                    e.alignment_point = if data.horizontal_alignment != 0 || data.vertical_alignment != 0 {
+                        Some(data.alignment_point)
+                    } else {
+                        None
+                    };
+                    e.rotation = data.rotation;
+                    e.oblique_angle = data.oblique_angle;
+                    e.width_factor = data.width_factor;
+                    e.normal = data.normal;
                     e.style = maps.style_name(data.style_handle);
                     let _ = document.add_entity(EntityType::Text(e));
                 },
@@ -880,8 +893,46 @@ impl DwgDocumentBuilder {
                 },
 
                 OBJ_MULTILEADER => {
+                    let data = entities::read_multileader(
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
+                    );
                     let mut e = MultiLeader::new();
                     e.common = entity_common;
+                    e.context = data.context;
+                    e.style_handle = if data.style_handle != 0 { Some(Handle::from(data.style_handle)) } else { None };
+                    e.property_override_flags = MultiLeaderPropertyOverrideFlags::from_bits_truncate(data.property_override_flags);
+                    e.path_type = MultiLeaderPathType::from(data.path_type);
+                    e.line_color = data.line_color;
+                    e.line_type_handle = if data.line_type_handle != 0 { Some(Handle::from(data.line_type_handle)) } else { None };
+                    e.line_weight = LineWeight::from_value(data.line_weight as i16);
+                    e.enable_landing = data.enable_landing;
+                    e.enable_dogleg = data.enable_dogleg;
+                    e.dogleg_length = data.dogleg_length;
+                    e.arrowhead_handle = if data.arrowhead_handle != 0 { Some(Handle::from(data.arrowhead_handle)) } else { None };
+                    e.arrowhead_size = data.arrowhead_size;
+                    e.content_type = LeaderContentType::from(data.content_type);
+                    e.text_style_handle = if data.text_style_handle != 0 { Some(Handle::from(data.text_style_handle)) } else { None };
+                    e.text_left_attachment = TextAttachmentType::from(data.text_left_attachment);
+                    e.text_right_attachment = TextAttachmentType::from(data.text_right_attachment);
+                    e.text_angle_type = TextAngleType::from(data.text_angle_type);
+                    e.text_alignment = TextAlignmentType::from(data.text_alignment);
+                    e.text_color = data.text_color;
+                    e.text_frame = data.text_frame;
+                    e.block_content_handle = if data.block_content_handle != 0 { Some(Handle::from(data.block_content_handle)) } else { None };
+                    e.block_content_color = data.block_content_color;
+                    e.block_scale = data.block_scale;
+                    e.block_rotation = data.block_rotation;
+                    e.block_connection_type = BlockContentConnectionType::from(data.block_connection_type);
+                    e.enable_annotation_scale = data.enable_annotation_scale;
+                    e.block_attributes = data.block_attributes;
+                    e.text_direction_negative = data.text_direction_negative;
+                    e.text_align_in_ipe = data.text_align_in_ipe;
+                    e.text_attachment_point = TextAttachmentPointType::from(data.text_attachment_point);
+                    e.scale_factor = data.scale_factor;
+                    e.text_attachment_direction = TextAttachmentDirectionType::from(data.text_attachment_direction);
+                    e.text_bottom_attachment = TextAttachmentType::from(data.text_bottom_attachment);
+                    e.text_top_attachment = TextAttachmentType::from(data.text_top_attachment);
+                    e.extend_leader_to_text = data.extend_leader_to_text;
                     let _ = document.add_entity(EntityType::MultiLeader(e));
                 },
 

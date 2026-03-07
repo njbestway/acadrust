@@ -234,6 +234,17 @@ impl DwgMergedReader {
     //  Handle reads — from handle reader if available, else main
     // ════════════════════════════════════════════════════════════════════════
 
+    /// Reposition the handle reader to a new bit position.
+    ///
+    /// Used for R13/R14 where the handle-stream split point (RL) is
+    /// discovered inside the entity preamble rather than at the top of
+    /// the record.
+    pub fn reposition_handle_reader(&mut self, bit_position: i64) {
+        if let Some(ref mut handle_reader) = self.handle {
+            handle_reader.set_position_in_bits(bit_position);
+        }
+    }
+
     /// Read a handle reference.
     ///
     /// For R2007+, this reads from the separate handle stream.

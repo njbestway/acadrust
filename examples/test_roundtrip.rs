@@ -208,9 +208,9 @@ fn main() {
             ))
         })),
         ("SHAPE", Box::new(|| {
-            EntityType::Shape(Shape::with_name(
+            EntityType::Shape(Shape::with_number(
                 Vector3::new(50.0, 50.0, 0.0),
-                "BOX",
+                1,
                 5.0,
             ))
         })),

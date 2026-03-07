@@ -351,15 +351,12 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer
             .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
-        // R2000+:
-        if self.version.r2000_plus() {
-            // Linespacing Style BS 73 (1=At Least, 2=Exact)
-            self.writer.write_bit_short(1);
-            // Linespacing Factor BD 44
-            self.writer.write_bit_double(e.line_spacing_factor);
-            // Unknown bit B
-            self.writer.write_bit(false);
-        }
+        // Linespacing Style BS 73 (1=At Least, 2=Exact)
+        self.writer.write_bit_short(1);
+        // Linespacing Factor BD 44
+        self.writer.write_bit_double(e.line_spacing_factor);
+        // Unknown bit B
+        self.writer.write_bit(false);
 
         // R2004+:
         if self.version.r2004_plus() {
@@ -412,7 +409,10 @@ impl<'a> DwgObjectWriter<'a> {
             let has_no_flags = e.invisible_edges.bits() == 0;
             self.writer.write_bit(has_no_flags);
 
-            let z_is_zero = e.first_corner.z == 0.0;
+            let z_is_zero = e.first_corner.z == 0.0
+                && e.second_corner.z == 0.0
+                && e.third_corner.z == 0.0
+                && e.fourth_corner.z == 0.0;
             self.writer.write_bit(z_is_zero);
 
             self.writer.write_raw_double(e.first_corner.x);
@@ -688,17 +688,7 @@ impl<'a> DwgObjectWriter<'a> {
 
                 // Generate clamped uniform knot vector if not provided
                 let knots: Vec<f64> = if e.knots.is_empty() && !e.control_points.is_empty() {
-                    let n = e.control_points.len();
-                    let p = e.degree as usize;
-                    let m = n + p + 1;
-                    let mut kv = Vec::with_capacity(m);
-                    for _ in 0..=p { kv.push(0.0); }
-                    let internal = m - 2 * (p + 1);
-                    for i in 1..=internal {
-                        kv.push(i as f64 / (internal + 1) as f64);
-                    }
-                    for _ in 0..=p { kv.push(1.0); }
-                    kv
+                    Spline::generate_clamped_knots(e.degree as usize, e.control_points.len())
                 } else {
                     e.knots.clone()
                 };
@@ -1136,58 +1126,54 @@ impl<'a> DwgObjectWriter<'a> {
         // Height BD 41
         self.writer.write_bit_double(e.height);
 
-        // R2000+:
-        if self.version.r2000_plus() {
-            self.writer.write_3bit_double(e.view_target);
-            self.writer.write_3bit_double(e.view_direction);
-            self.writer.write_bit_double(e.twist_angle);
-            self.writer.write_bit_double(e.view_height);
-            self.writer.write_bit_double(e.lens_length);
-            self.writer.write_bit_double(e.front_clip_z);
-            self.writer.write_bit_double(e.back_clip_z);
-            self.writer.write_bit_double(e.snap_angle);
-            self.writer
-                .write_2raw_double(Vector2::new(e.view_center.x, e.view_center.y));
-            self.writer
-                .write_2raw_double(Vector2::new(e.snap_base.x, e.snap_base.y));
-            self.writer
-                .write_2raw_double(Vector2::new(e.snap_spacing.x, e.snap_spacing.y));
-            self.writer
-                .write_2raw_double(Vector2::new(e.grid_spacing.x, e.grid_spacing.y));
-            // Circle Zoom BS 72
-            self.writer.write_bit_short(e.circle_sides);
-        }
+        // View data (written for all versions)
+        self.writer.write_3bit_double(e.view_target);
+        self.writer.write_3bit_double(e.view_direction);
+        self.writer.write_bit_double(e.twist_angle);
+        self.writer.write_bit_double(e.view_height);
+        self.writer.write_bit_double(e.lens_length);
+        self.writer.write_bit_double(e.front_clip_z);
+        self.writer.write_bit_double(e.back_clip_z);
+        self.writer.write_bit_double(e.snap_angle);
+        self.writer
+            .write_2raw_double(Vector2::new(e.view_center.x, e.view_center.y));
+        self.writer
+            .write_2raw_double(Vector2::new(e.snap_base.x, e.snap_base.y));
+        self.writer
+            .write_2raw_double(Vector2::new(e.snap_spacing.x, e.snap_spacing.y));
+        self.writer
+            .write_2raw_double(Vector2::new(e.grid_spacing.x, e.grid_spacing.y));
+        // Circle Zoom BS 72
+        self.writer.write_bit_short(e.circle_sides);
 
         // R2007+: Grid Major BS 61
         if self.version.r2007_plus() {
             self.writer.write_bit_short(0);
         }
 
-        // R2000+:
-        if self.version.r2000_plus() {
-            // Frozen layer count BL
-            self.writer.write_bit_long(e.frozen_layers.len() as i32);
-            // Status flags BL 90
-            self.writer.write_bit_long(e.status.to_bits());
-            // Style Sheet TV 1
-            self.writer.write_variable_text("");
-            // Render Mode RC 281
-            self.writer.write_byte(e.render_mode as u8);
-            // UCS at origin B 74
-            self.writer.write_bit(e.ucs_icon_visible);
-            // UCS per viewport B 71
-            self.writer.write_bit(e.ucs_per_viewport);
-            // UCS Origin 3BD 110
-            self.writer.write_3bit_double(e.ucs_origin);
-            // UCS X Axis 3BD 111
-            self.writer.write_3bit_double(e.ucs_x_axis);
-            // UCS Y Axis 3BD 112
-            self.writer.write_3bit_double(e.ucs_y_axis);
-            // UCS Elevation BD 146
-            self.writer.write_bit_double(e.elevation);
-            // UCS Ortho View Type BS 79
-            self.writer.write_bit_short(e.ucs_ortho_type);
-        }
+        // Status/UCS data (written for all versions)
+        // Frozen layer count BL
+        self.writer.write_bit_long(e.frozen_layers.len() as i32);
+        // Status flags BL 90
+        self.writer.write_bit_long(e.status.to_bits());
+        // Style Sheet TV 1
+        self.writer.write_variable_text("");
+        // Render Mode RC 281
+        self.writer.write_byte(e.render_mode as u8);
+        // UCS at origin B 74
+        self.writer.write_bit(e.ucs_icon_visible);
+        // UCS per viewport B 71
+        self.writer.write_bit(e.ucs_per_viewport);
+        // UCS Origin 3BD 110
+        self.writer.write_3bit_double(e.ucs_origin);
+        // UCS X Axis 3BD 111
+        self.writer.write_3bit_double(e.ucs_x_axis);
+        // UCS Y Axis 3BD 112
+        self.writer.write_3bit_double(e.ucs_y_axis);
+        // UCS Elevation BD 146
+        self.writer.write_bit_double(e.elevation);
+        // UCS Ortho View Type BS 79
+        self.writer.write_bit_short(e.ucs_ortho_type);
 
         // R2004+: ShadePlot Mode BS 170
         if self.version.r2004_plus() {
@@ -1204,28 +1190,20 @@ impl<'a> DwgObjectWriter<'a> {
                 .write_cm_color(&crate::types::Color::from_index(e.ambient_color as i16));
         }
 
-        // R13-R14 Only: null handle reference
-        if self.version.r13_14_only() {
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, 0);
-        }
-
-        // R2000+: Frozen layer handles
-        if self.version.r2000_plus() {
-            for h in &e.frozen_layers {
-                if self.version.r2004_plus() {
-                    self.writer
-                        .write_handle(DwgReferenceType::SoftPointer, h.value());
-                } else {
-                    self.writer
-                        .write_handle(DwgReferenceType::HardPointer, h.value());
-                }
+        // Frozen layer handles (written for all versions)
+        for h in &e.frozen_layers {
+            if self.version.r2004_plus() {
+                self.writer
+                    .write_handle(DwgReferenceType::SoftPointer, h.value());
+            } else {
+                self.writer
+                    .write_handle(DwgReferenceType::HardPointer, h.value());
             }
-
-            // Clip boundary handle (hard pointer)
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, 0);
         }
+
+        // Clip boundary handle (hard pointer)
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, 0);
 
         // R2000 (AC1015) only: VIEWPORT ENT HEADER
         if self.version == crate::io::dwg::dwg_version::DwgVersion::AC15 {
@@ -1233,13 +1211,11 @@ impl<'a> DwgObjectWriter<'a> {
                 .write_handle(DwgReferenceType::HardPointer, 0);
         }
 
-        // R2000+: Named UCS and Base UCS handles
-        if self.version.r2000_plus() {
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, e.ucs_handle.value());
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, e.base_ucs_handle.value());
-        }
+        // Named UCS and Base UCS handles (written for all versions)
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, e.ucs_handle.value());
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, e.base_ucs_handle.value());
 
         // R2007+: 4 additional handles
         if self.version.r2007_plus() {

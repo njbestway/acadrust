@@ -75,9 +75,11 @@ impl Spline {
 
     /// Create a spline from control points
     pub fn from_control_points(degree: i32, control_points: Vec<Vector3>) -> Self {
+        let knots = Self::generate_clamped_knots(degree as usize, control_points.len());
         Spline {
             degree,
             control_points,
+            knots,
             ..Self::new()
         }
     }
@@ -88,6 +90,32 @@ impl Spline {
             fit_points,
             ..Self::new()
         }
+    }
+
+    /// Generate a clamped uniform knot vector for the given degree and
+    /// number of control points.
+    ///
+    /// The result has `n + p + 1` elements: `p+1` zeros, evenly-spaced
+    /// internal knots, and `p+1` ones.
+    pub fn generate_clamped_knots(degree: usize, num_control_points: usize) -> Vec<f64> {
+        if num_control_points == 0 {
+            return Vec::new();
+        }
+        let n = num_control_points;
+        let p = degree;
+        let m = n + p + 1;
+        let mut kv = Vec::with_capacity(m);
+        for _ in 0..=p {
+            kv.push(0.0);
+        }
+        let internal = m - 2 * (p + 1);
+        for i in 1..=internal {
+            kv.push(i as f64 / (internal + 1) as f64);
+        }
+        for _ in 0..=p {
+            kv.push(1.0);
+        }
+        kv
     }
 
     /// Get the number of control points
