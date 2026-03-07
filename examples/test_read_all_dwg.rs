@@ -313,7 +313,7 @@ fn read_and_validate(
         ));
     }
 
-    // Check standard linetypes
+    // Check standard linetypes and show pattern details
     let lt_names: Vec<String> = doc.line_types.iter().map(|lt| lt.name.clone()).collect();
     let expected_lts = ["ByLayer", "ByBlock", "Continuous"];
     for name in &expected_lts {
@@ -323,17 +323,53 @@ fn read_and_validate(
                 name, lt_names.join(", ")));
         }
     }
+    // Show linetype definitions
+    for lt in doc.line_types.iter() {
+        if lt.name == "ByLayer" || lt.name == "ByBlock" || lt.name == "Continuous" { continue; }
+        let pattern: Vec<String> = lt.elements.iter().take(8)
+            .map(|e| format!("{:.2}", e.length)).collect();
+        let suffix = if lt.elements.len() > 8 { "..." } else { "" };
+        details.push(format!("linetype \"{}\": desc=\"{}\" len={:.2} pattern=[{}{}]",
+            lt.name, lt.description, lt.pattern_length, pattern.join(","), suffix));
+    }
 
-    // List all layers
-    let layer_names: Vec<String> = doc.layers.iter().map(|l| l.name.clone()).collect();
-    if layer_names.len() <= 8 {
-        details.push(format!("layers: [{}]", layer_names.join(", ")));
-    } else {
-        details.push(format!(
-            "layers: [{}... +{} more]",
-            layer_names[..6].join(", "),
-            layer_names.len() - 6,
-        ));
+    // List all layers with their properties
+    for layer in doc.layers.iter() {
+        let mut linfo = format!("layer \"{}\": color={} lt=\"{}\"",
+            layer.name, layer.color, layer.line_type);
+        match layer.line_weight {
+            acadrust::types::LineWeight::ByLayer | acadrust::types::LineWeight::Default => {},
+            ref lw => linfo.push_str(&format!(" lw={}", lw)),
+        }
+        if layer.flags.frozen { linfo.push_str(" FROZEN"); }
+        if layer.flags.locked { linfo.push_str(" LOCKED"); }
+        if layer.flags.off { linfo.push_str(" OFF"); }
+        if !layer.is_plottable { linfo.push_str(" no-plot"); }
+        details.push(linfo);
+    }
+
+    // Text style definitions (font mapping)
+    for ts in doc.text_styles.iter() {
+        let mut sinfo = format!("style \"{}\": font=\"{}\"", ts.name, ts.font_file);
+        if !ts.big_font_file.is_empty() { sinfo.push_str(&format!(" bigfont=\"{}\"", ts.big_font_file)); }
+        if !ts.true_type_font.is_empty() { sinfo.push_str(&format!(" ttf=\"{}\"", ts.true_type_font)); }
+        if ts.height != 0.0 { sinfo.push_str(&format!(" h={:.2}", ts.height)); }
+        if ts.width_factor != 1.0 { sinfo.push_str(&format!(" wfactor={:.2}", ts.width_factor)); }
+        if ts.oblique_angle != 0.0 { sinfo.push_str(&format!(" oblique={:.1}°", ts.oblique_angle.to_degrees())); }
+        details.push(sinfo);
+    }
+
+    // Dimension style key settings
+    for ds in doc.dim_styles.iter() {
+        let mut dinfo = format!("dimstyle \"{}\": scale={:.2} txtsz={:.2} arrowsz={:.2}",
+            ds.name, ds.dimscale, ds.dimtxt, ds.dimasz);
+        if ds.dimgap != 0.0 { dinfo.push_str(&format!(" gap={:.2}", ds.dimgap)); }
+        if ds.dimexo != 0.0 { dinfo.push_str(&format!(" exo={:.2}", ds.dimexo)); }
+        if ds.dimexe != 0.0 { dinfo.push_str(&format!(" exe={:.2}", ds.dimexe)); }
+        if !ds.dimpost.is_empty() { dinfo.push_str(&format!(" post=\"{}\"", ds.dimpost)); }
+        if !ds.dimtxsty.is_empty() { dinfo.push_str(&format!(" txstyle=\"{}\"", ds.dimtxsty)); }
+        dinfo.push_str(&format!(" units={} dec={}", ds.dimlunit, ds.dimdec));
+        details.push(dinfo);
     }
 
     // ── Step 7: Check block records ──
@@ -349,20 +385,27 @@ fn read_and_validate(
 
     let ms_entities = model_space.map(|b| b.entities.len()).unwrap_or(0);
     let ps_entities = paper_space.map(|b| b.entities.len()).unwrap_or(0);
-    let custom_blocks: Vec<String> = doc.block_records.iter()
-        .filter(|b| !b.is_layout())
-        .map(|b| b.name.clone())
-        .collect();
 
     details.push(format!(
-        "blocks: {} total, MS={} entities, PS={} entities{}",
+        "blocks: {} total, MS={} entities, PS={} entities",
         block_record_count, ms_entities, ps_entities,
-        if custom_blocks.is_empty() {
-            String::new()
-        } else {
-            format!(", custom: [{}]", custom_blocks.join(", "))
-        },
     ));
+    // Show custom block contents
+    for blk in doc.block_records.iter().filter(|b| !b.is_layout()) {
+        let ent_types: Vec<String> = blk.entities.iter()
+            .map(|e| get_entity_type_name(e))
+            .collect();
+        let mut binfo = format!("block \"{}\": {} entities", blk.name, blk.entities.len());
+        if !ent_types.is_empty() {
+            let shown: Vec<&str> = ent_types.iter().take(6).map(|s| s.as_str()).collect();
+            let suffix = if ent_types.len() > 6 { format!("...+{}", ent_types.len() - 6) } else { String::new() };
+            binfo.push_str(&format!(" types=[{}{}]", shown.join(", "), suffix));
+        }
+        if blk.flags.anonymous { binfo.push_str(" ANON"); }
+        if blk.flags.has_attributes { binfo.push_str(" HAS-ATTRIBS"); }
+        if blk.flags.is_xref { binfo.push_str(" XREF"); }
+        details.push(binfo);
+    }
 
     // ── Step 8: Check entities (VIEWPORT may have 0 in model space) ──
     if entity_count == 0 && expected_type != "VIEWPORT" {
@@ -720,6 +763,11 @@ fn has_nan_vec3(v: &acadrust::types::Vector3) -> bool {
     v.x.is_nan() || v.y.is_nan() || v.z.is_nan()
 }
 
+/// Returns true if the normal/extrusion is the default (0,0,1) — WCS aligned.
+fn is_default_normal(v: &acadrust::types::Vector3) -> bool {
+    v.x == 0.0 && v.y == 0.0 && (v.z == 1.0 || v.z == 0.0)
+}
+
 fn fmt_vec3(v: &acadrust::types::Vector3) -> String {
     if v.z == 0.0 {
         format!("({:.4}, {:.4})", v.x, v.y)
@@ -735,48 +783,126 @@ fn format_entity_data(entity: &EntityType) -> String {
     let handle = format!("{:#X}", common.handle.value());
     let layer = &common.layer;
 
+    // Common properties beyond handle/layer
+    let mut common_parts: Vec<String> = Vec::new();
+    match common.color {
+        acadrust::types::Color::ByLayer => {}
+        ref c => common_parts.push(format!("color={}", c)),
+    }
+    match common.line_weight {
+        acadrust::types::LineWeight::ByLayer => {}
+        ref lw => common_parts.push(format!("lw={}", lw)),
+    }
+    let common_suffix = if common_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" | {}", common_parts.join(", "))
+    };
+
     let data = match entity {
         EntityType::Line(l) => {
-            format!("start={} end={} thickness={}", fmt_vec3(&l.start), fmt_vec3(&l.end), l.thickness)
+            let mut s = format!("start={} end={}", fmt_vec3(&l.start), fmt_vec3(&l.end));
+            if l.thickness != 0.0 { s.push_str(&format!(" thickness={}", l.thickness)); }
+            if !is_default_normal(&l.normal) { s.push_str(&format!(" normal={}", fmt_vec3(&l.normal))); }
+            s
         }
         EntityType::Circle(c) => {
-            format!("center={} r={:.4} thickness={}", fmt_vec3(&c.center), c.radius, c.thickness)
+            let mut s = format!("center={} r={:.4}", fmt_vec3(&c.center), c.radius);
+            if c.thickness != 0.0 { s.push_str(&format!(" thickness={}", c.thickness)); }
+            if !is_default_normal(&c.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&c.normal))); }
+            s
         }
         EntityType::Arc(a) => {
-            format!("center={} r={:.4} start={:.2}° end={:.2}°",
+            let mut s = format!("center={} r={:.4} start={:.2}° end={:.2}°",
                 fmt_vec3(&a.center), a.radius,
-                a.start_angle.to_degrees(), a.end_angle.to_degrees())
+                a.start_angle.to_degrees(), a.end_angle.to_degrees());
+            if a.thickness != 0.0 { s.push_str(&format!(" thickness={}", a.thickness)); }
+            if !is_default_normal(&a.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&a.normal))); }
+            s
         }
         EntityType::Ellipse(e) => {
-            format!("center={} major={} ratio={:.4} param=[{:.2}..{:.2}]",
+            let mut s = format!("center={} major={} ratio={:.4} param=[{:.2}..{:.2}]",
                 fmt_vec3(&e.center), fmt_vec3(&e.major_axis),
-                e.minor_axis_ratio, e.start_parameter, e.end_parameter)
+                e.minor_axis_ratio, e.start_parameter, e.end_parameter);
+            if !is_default_normal(&e.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&e.normal))); }
+            s
         }
         EntityType::Point(p) => {
             format!("location={} thickness={}", fmt_vec3(&p.location), p.thickness)
         }
         EntityType::Text(t) => {
-            format!("\"{}\" at={} h={:.4} rot={:.1}° style=\"{}\"",
-                truncate_str(&t.value, 40), fmt_vec3(&t.insertion_point),
-                t.height, t.rotation.to_degrees(), t.style)
+            let mut s = format!("\"{}\" at={} h={:.4}",
+                truncate_str(&t.value, 40), fmt_vec3(&t.insertion_point), t.height);
+            if let Some(ref ap) = t.alignment_point { s.push_str(&format!(" align_pt={}", fmt_vec3(ap))); }
+            if t.rotation != 0.0 { s.push_str(&format!(" rot={:.1}°", t.rotation.to_degrees())); }
+            if t.width_factor != 1.0 { s.push_str(&format!(" wfactor={:.2}", t.width_factor)); }
+            if t.oblique_angle != 0.0 { s.push_str(&format!(" oblique={:.1}°", t.oblique_angle.to_degrees())); }
+            s.push_str(&format!(" style=\"{}\"", t.style));
+            if !is_default_normal(&t.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&t.normal))); }
+            s
         }
         EntityType::MText(m) => {
-            format!("\"{}\" at={} h={:.4} w={:.1} rot={:.1}° style=\"{}\"",
+            let mut s = format!("\"{}\" at={} h={:.4} w={:.1}",
                 truncate_str(&m.value, 40), fmt_vec3(&m.insertion_point),
-                m.height, m.rectangle_width, m.rotation.to_degrees(), m.style)
+                m.height, m.rectangle_width);
+            if let Some(rh) = m.rectangle_height { s.push_str(&format!(" rh={:.1}", rh)); }
+            if m.rotation != 0.0 { s.push_str(&format!(" rot={:.1}°", m.rotation.to_degrees())); }
+            s.push_str(&format!(" attach={:?} dir={:?} style=\"{}\"", m.attachment_point, m.drawing_direction, m.style));
+            if m.line_spacing_factor != 1.0 { s.push_str(&format!(" lsf={:.2}", m.line_spacing_factor)); }
+            if !is_default_normal(&m.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&m.normal))); }
+            s
         }
         EntityType::Spline(s) => {
-            format!("degree={} {} ctrl_pts, {} knots, {} fit_pts flags=[closed={},rational={},planar={}]",
-                s.degree, s.control_points.len(), s.knots.len(), s.fit_points.len(),
-                s.flags.closed, s.flags.rational, s.flags.planar)
+            let mut parts = format!("degree={} flags=[closed={},rational={},planar={}]",
+                s.degree, s.flags.closed, s.flags.rational, s.flags.planar);
+            // Control points with coordinates
+            if !s.control_points.is_empty() {
+                let pts: Vec<String> = s.control_points.iter().take(4)
+                    .map(|p| fmt_vec3(p)).collect();
+                let suffix = if s.control_points.len() > 4 { format!("...+{}", s.control_points.len() - 4) } else { String::new() };
+                parts.push_str(&format!(" ctrl[{}]=[{}{}]", s.control_points.len(), pts.join(", "), suffix));
+            }
+            // Knot values
+            if !s.knots.is_empty() {
+                let kv: Vec<String> = s.knots.iter().take(6)
+                    .map(|k| format!("{:.2}", k)).collect();
+                let suffix = if s.knots.len() > 6 { format!("...+{}", s.knots.len() - 6) } else { String::new() };
+                parts.push_str(&format!(" knots[{}]=[{}{}]", s.knots.len(), kv.join(","), suffix));
+            }
+            // Weights (for rational splines)
+            if !s.weights.is_empty() {
+                let wv: Vec<String> = s.weights.iter().take(4)
+                    .map(|w| format!("{:.2}", w)).collect();
+                parts.push_str(&format!(" weights[{}]=[{}...]", s.weights.len(), wv.join(",")));
+            }
+            // Fit points
+            if !s.fit_points.is_empty() {
+                let fp: Vec<String> = s.fit_points.iter().take(4)
+                    .map(|p| fmt_vec3(p)).collect();
+                let suffix = if s.fit_points.len() > 4 { format!("...+{}", s.fit_points.len() - 4) } else { String::new() };
+                parts.push_str(&format!(" fit[{}]=[{}{}]", s.fit_points.len(), fp.join(", "), suffix));
+            }
+            parts
         }
         EntityType::LwPolyline(lw) => {
             let pts: Vec<String> = lw.vertices.iter().take(4)
-                .map(|v| format!("({:.4},{:.4})", v.location.x, v.location.y))
+                .map(|v| {
+                    let mut s = format!("({:.4},{:.4})", v.location.x, v.location.y);
+                    if v.bulge != 0.0 { s.push_str(&format!("b={:.4}", v.bulge)); }
+                    if v.start_width != 0.0 || v.end_width != 0.0 {
+                        s.push_str(&format!("w={:.2}/{:.2}", v.start_width, v.end_width));
+                    }
+                    s
+                })
                 .collect();
             let suffix = if lw.vertices.len() > 4 { format!("...+{}", lw.vertices.len() - 4) } else { String::new() };
-            format!("{} verts [{}{}] closed={} width={:.2} elev={:.2}",
-                lw.vertices.len(), pts.join(", "), suffix, lw.is_closed, lw.constant_width, lw.elevation)
+            let mut s = format!("{} verts [{}{}] closed={}",
+                lw.vertices.len(), pts.join(", "), suffix, lw.is_closed);
+            if lw.constant_width != 0.0 { s.push_str(&format!(" width={:.2}", lw.constant_width)); }
+            if lw.elevation != 0.0 { s.push_str(&format!(" elev={:.2}", lw.elevation)); }
+            if lw.thickness != 0.0 { s.push_str(&format!(" thickness={:.2}", lw.thickness)); }
+            if !is_default_normal(&lw.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&lw.normal))); }
+            s
         }
         EntityType::Polyline2D(p) => {
             format!("{} verts elev={:.2} thickness={:.2}",
@@ -790,10 +916,17 @@ fn format_entity_data(entity: &EntityType) -> String {
                 pf.vertices.len(), pf.faces.len(), pf.elevation)
         }
         EntityType::Insert(ins) => {
-            format!("block=\"{}\" at={} scale=({:.2},{:.2},{:.2}) rot={:.1}° rows={} cols={}",
-                ins.block_name, fmt_vec3(&ins.insert_point),
-                ins.x_scale, ins.y_scale, ins.z_scale,
-                ins.rotation.to_degrees(), ins.row_count, ins.column_count)
+            let mut s = format!("block=\"{}\" at={}", ins.block_name, fmt_vec3(&ins.insert_point));
+            if ins.x_scale != 1.0 || ins.y_scale != 1.0 || ins.z_scale != 1.0 {
+                s.push_str(&format!(" scale=({:.2},{:.2},{:.2})", ins.x_scale, ins.y_scale, ins.z_scale));
+            }
+            if ins.rotation != 0.0 { s.push_str(&format!(" rot={:.1}°", ins.rotation.to_degrees())); }
+            if ins.row_count > 1 || ins.column_count > 1 {
+                s.push_str(&format!(" rows={} cols={} rspace={:.2} cspace={:.2}",
+                    ins.row_count, ins.column_count, ins.row_spacing, ins.column_spacing));
+            }
+            if !is_default_normal(&ins.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&ins.normal))); }
+            s
         }
         EntityType::Ray(r) => {
             format!("base={} dir={}", fmt_vec3(&r.base_point), fmt_vec3(&r.direction))
@@ -816,9 +949,35 @@ fn format_entity_data(entity: &EntityType) -> String {
                 m.vertices.len(), m.faces.len(), m.edges.len(), m.subdivision_level)
         }
         EntityType::Hatch(h) => {
-            format!("{} paths solid={} pattern=\"{}\" angle={:.1}° scale={:.2}",
-                h.paths.len(), h.is_solid,
-                h.pattern.name, h.pattern_angle.to_degrees(), h.pattern_scale)
+            let mut s = format!("{} paths solid={} assoc={} pattern=\"{}\" type={:?}",
+                h.paths.len(), h.is_solid, h.is_associative,
+                h.pattern.name, h.pattern_type);
+            if h.pattern_angle != 0.0 { s.push_str(&format!(" angle={:.1}°", h.pattern_angle.to_degrees())); }
+            if h.pattern_scale != 1.0 { s.push_str(&format!(" scale={:.2}", h.pattern_scale)); }
+            if h.is_double { s.push_str(" double=true"); }
+            // Boundary path details
+            for (i, path) in h.paths.iter().enumerate().take(3) {
+                s.push_str(&format!(" path[{}]: {} edges flags={:?}",
+                    i, path.edges.len(), path.flags));
+            }
+            if h.paths.len() > 3 { s.push_str(&format!(" ...+{} paths", h.paths.len() - 3)); }
+            // Seed points
+            if !h.seed_points.is_empty() {
+                let seeds: Vec<String> = h.seed_points.iter().take(3)
+                    .map(|p| format!("({:.2},{:.2})", p.x, p.y)).collect();
+                s.push_str(&format!(" seeds=[{}]", seeds.join(", ")));
+            }
+            // Pattern line definitions
+            if !h.pattern.lines.is_empty() {
+                s.push_str(&format!(" pattern_lines={}", h.pattern.lines.len()));
+                for (i, pl) in h.pattern.lines.iter().enumerate().take(2) {
+                    s.push_str(&format!(" pline[{}]: angle={:.1}° base=({:.2},{:.2}) offset=({:.2},{:.2}) dashes={}",
+                        i, pl.angle.to_degrees(), pl.base_point.x, pl.base_point.y,
+                        pl.offset.x, pl.offset.y, pl.dash_lengths.len()));
+                }
+            }
+            if !is_default_normal(&h.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&h.normal))); }
+            s
         }
         EntityType::Leader(l) => {
             format!("{} verts style=\"{}\" arrow={} text_h={:.2}",
@@ -845,10 +1004,50 @@ fn format_entity_data(entity: &EntityType) -> String {
                 acadrust::entities::Dimension::Angular3Pt(_) => "Angular3Pt",
                 acadrust::entities::Dimension::Ordinate(_) => "Ordinate",
             };
-            let text = if base.text.is_empty() { String::new() } else { format!(" text=\"{}\"", truncate_str(&base.text, 20)) };
-            format!("{} defpt={} midpt={}{} meas={:.4} style=\"{}\"",
-                dim_type, fmt_vec3(&base.definition_point), fmt_vec3(&base.text_middle_point),
-                text, base.actual_measurement, base.style_name)
+            let mut s = format!("{} defpt={} midpt={}",
+                dim_type, fmt_vec3(&base.definition_point), fmt_vec3(&base.text_middle_point));
+            if !base.text.is_empty() { s.push_str(&format!(" text=\"{}\"", truncate_str(&base.text, 20))); }
+            if let Some(ref ut) = base.user_text { s.push_str(&format!(" user_text=\"{}\"", truncate_str(ut, 20))); }
+            s.push_str(&format!(" meas={:.4} style=\"{}\"", base.actual_measurement, base.style_name));
+            // Block name — AutoCAD renders dimensions via hidden block
+            if !base.block_name.is_empty() {
+                s.push_str(&format!(" block=\"{}\"", base.block_name));
+            }
+            s.push_str(&format!(" inspt={}", fmt_vec3(&base.insertion_point)));
+            if base.text_rotation != 0.0 { s.push_str(&format!(" txtrot={:.1}°", base.text_rotation.to_degrees())); }
+            // Sub-type specific points
+            match d {
+                acadrust::entities::Dimension::Linear(dl) => {
+                    s.push_str(&format!(" p1={} p2={} rot={:.1}°",
+                        fmt_vec3(&dl.first_point), fmt_vec3(&dl.second_point), dl.rotation.to_degrees()));
+                }
+                acadrust::entities::Dimension::Aligned(da) => {
+                    s.push_str(&format!(" p1={} p2={}",
+                        fmt_vec3(&da.first_point), fmt_vec3(&da.second_point)));
+                }
+                acadrust::entities::Dimension::Radius(dr) => {
+                    s.push_str(&format!(" vertex={} leader_len={:.2}",
+                        fmt_vec3(&dr.angle_vertex), dr.leader_length));
+                }
+                acadrust::entities::Dimension::Diameter(dd) => {
+                    s.push_str(&format!(" vertex={} leader_len={:.2}",
+                        fmt_vec3(&dd.angle_vertex), dd.leader_length));
+                }
+                acadrust::entities::Dimension::Angular2Ln(da) => {
+                    s.push_str(&format!(" p1={} p2={} vertex={}",
+                        fmt_vec3(&da.first_point), fmt_vec3(&da.second_point), fmt_vec3(&da.angle_vertex)));
+                }
+                acadrust::entities::Dimension::Angular3Pt(da) => {
+                    s.push_str(&format!(" p1={} p2={} vertex={}",
+                        fmt_vec3(&da.first_point), fmt_vec3(&da.second_point), fmt_vec3(&da.angle_vertex)));
+                }
+                acadrust::entities::Dimension::Ordinate(dord) => {
+                    s.push_str(&format!(" feature={} leader_end={} is_x={}",
+                        fmt_vec3(&dord.feature_location), fmt_vec3(&dord.leader_endpoint), dord.is_ordinate_type_x));
+                }
+            }
+            if !is_default_normal(&base.normal) { s.push_str(&format!(" extrusion={}", fmt_vec3(&base.normal))); }
+            s
         }
         EntityType::Solid3D(s) => {
             let acis_len = if s.acis_data.is_binary { s.acis_data.sab_data.len() } else { s.acis_data.sat_data.len() };
@@ -906,7 +1105,7 @@ fn format_entity_data(entity: &EntityType) -> String {
         }
     };
 
-    format!("{} [h={}, layer=\"{}\"] {}", ty, handle, layer, data)
+    format!("{} [h={}, layer=\"{}\"{}] {}", ty, handle, layer, common_suffix, data)
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
