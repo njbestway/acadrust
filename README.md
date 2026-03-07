@@ -1,4 +1,4 @@
-# acadrust 0.2.2
+# acadrust 0.2.4
 
 [![Crates.io](https://img.shields.io/crates/v/acadrust.svg)](https://crates.io/crates/acadrust)
 [![Documentation](https://docs.rs/acadrust/badge.svg)](https://docs.rs/acadrust)
@@ -16,7 +16,7 @@ acadrust provides comprehensive support for the DXF and DWG file formats with a 
 ### Core Capabilities
 
 - **📖 Read & Write DXF** — Full support for both ASCII and Binary DXF formats
-- **📐 Read & Write DWG** — Native DWG binary input/output for R13 through R2018 (8 versions)
+- **📐 Read & Write DWG** — Native DWG binary input/output for R13 through R2018 (8 versions), 208/208 roundtrip-perfect
 - **🔒 Type Safe** — Leverages Rust's type system with strongly-typed entities, tables, and objects
 - **🌐 Encoding Support** — Automatic code page detection and character encoding for pre-2007 files (~40 code pages via `encoding_rs`)
 - **🛡️ Failsafe Mode** — Optional error-tolerant parsing that collects diagnostics instead of aborting
@@ -166,7 +166,7 @@ Add acadrust to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-acadrust = "0.2.2"
+acadrust = "0.2.4"
 ```
 
 Or install via cargo:
@@ -467,6 +467,16 @@ cargo run --example gen_all_entities_all_versions
 
 This produces 216 DWG files in `target/entities_dwg/<VERSION>/` — 27 entity types across 8 versions.
 
+### Roundtrip Data Integrity Test
+
+Verify lossless write→read→write→read fidelity across all 26 entity types × 8 DWG versions (208 test cases):
+
+```bash
+cargo run --example test_roundtrip
+```
+
+All 208 roundtrips pass with **zero data drift** — 0 Trip1 field losses, 0 Trip2 divergence, 0 write failures.
+
 Run benchmarks:
 
 ```bash
@@ -486,6 +496,7 @@ cargo bench
 - [x] Unknown entity preservation
 - [x] DWG binary write (R13, R14, R2000, R2004, R2007, R2010, R2013, R2018)
 - [x] DWG binary read (R13 through R2018)
+- [x] 208/208 roundtrip data integrity (0 field drift across all entity types × all versions)
 - [ ] Geometric operations (offset, trim, extend)
 - [ ] SVG/PDF export
 - [ ] Spatial indexing for large drawings
