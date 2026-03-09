@@ -271,10 +271,13 @@ impl AcisData {
     }
 
     /// Creates ACIS data from SAT text.
+    ///
+    /// The terminator line (`End-of-ACIS-data` / `End-of-ASM-data`) is
+    /// stripped if present — the DWG/DXF writers add it back as needed.
     pub fn from_sat(sat: &str) -> Self {
         Self {
             version: AcisVersion::Version1,
-            sat_data: sat.to_string(),
+            sat_data: Self::strip_sat_terminator(sat),
             sab_data: Vec::new(),
             is_binary: false,
         }
@@ -293,6 +296,27 @@ impl AcisData {
     /// Returns true if this contains valid data.
     pub fn has_data(&self) -> bool {
         !self.sat_data.is_empty() || !self.sab_data.is_empty()
+    }
+
+    /// Strip the `End-of-ACIS-data` / `End-of-ASM-data` terminator line
+    /// (and any trailing blank lines) from raw SAT text.
+    ///
+    /// Internally, `sat_data` never contains the terminator — the writers
+    /// append it at serialisation time.  This keeps the representation
+    /// consistent regardless of the data source (DXF reader, DWG reader,
+    /// user API).
+    pub fn strip_sat_terminator(sat: &str) -> String {
+        let mut result = String::with_capacity(sat.len());
+        for line in sat.lines() {
+            if line.starts_with("End-of-ACIS-data")
+                || line.starts_with("End-of-ASM-data")
+            {
+                break;
+            }
+            result.push_str(line);
+            result.push('\n');
+        }
+        result
     }
 
     /// Returns the data size in bytes.

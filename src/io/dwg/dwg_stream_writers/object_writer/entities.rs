@@ -2760,14 +2760,21 @@ impl<'a> DwgObjectWriter<'a> {
         self.entity_preamble(common::OBJ_3DSOLID, &e.common);
         self.write_acis_data(&e.acis_data, &e.wires, &e.silhouettes);
 
-        // 3DSOLID-specific: history_handle bit + handle (R2007+)
-        if self.version.r2007_plus() {
-            let has_history = e.history_handle.is_some();
-            self.writer.write_bit(has_history);
-            if let Some(hh) = e.history_handle {
-                self.writer
-                    .write_handle(DwgReferenceType::HardPointer, hh.value());
-            }
+        // acis_empty_bit — second copy of the "empty" flag.
+        // Per LibreDWG this is always present in COMMON_3DSOLID.
+        self.writer.write_bit(false);
+
+        // history handle — only present when ACIS version > 1 (SAB) per
+        // LibreDWG spec.  For SAT (version 1) it is absent.
+        let acis_ver: i16 = match e.acis_data.version {
+            AcisVersion::Version1 => 1,
+            AcisVersion::Version2 => 2,
+        };
+        if acis_ver > 1 {
+            self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                e.history_handle.map(|h| h.value()).unwrap_or(0),
+            );
         }
 
         self.register_object(e.common.handle);
@@ -2776,16 +2783,24 @@ impl<'a> DwgObjectWriter<'a> {
     fn write_region(&mut self, e: &Region) {
         self.entity_preamble(common::OBJ_REGION, &e.common);
         self.write_acis_data(&e.acis_data, &e.wires, &e.silhouettes);
+        // acis_empty_bit (COMMON_3DSOLID — always present)
+        self.writer.write_bit(false);
         self.register_object(e.common.handle);
     }
 
     fn write_body(&mut self, e: &Body) {
         self.entity_preamble(common::OBJ_BODY, &e.common);
         self.write_acis_data(&e.acis_data, &e.wires, &e.silhouettes);
+        // acis_empty_bit (COMMON_3DSOLID — always present)
+        self.writer.write_bit(false);
         self.register_object(e.common.handle);
     }
 
     /// Write ACIS/SAT modeler geometry data shared by 3DSOLID, REGION, BODY.
+    ///
+    /// This writes both `ENCODE_3DSOLID` (acis data) and the wireframe part
+    /// of `COMMON_3DSOLID`.  The caller must still write `acis_empty_bit`
+    /// and any version-dependent trailing fields (history_id, etc.).
     fn write_acis_data(
         &mut self,
         acis: &AcisData,
@@ -2795,43 +2810,51 @@ impl<'a> DwgObjectWriter<'a> {
         let has_data = acis.has_data();
         self.writer.write_bit(!has_data); // acis_empty (inverted: true = empty)
 
-        if !has_data {
-            return;
-        }
+        if has_data {
+            // Unknown bit — per ODA spec / LibreDWG / ACadSharp this B
+            // is always present between acis_empty and the version BS.
+            self.writer.write_bit(false);
 
-        // ACIS version
-        let acis_version: i16 = match acis.version {
-            AcisVersion::Version1 => 1,
-            AcisVersion::Version2 => 2,
-        };
-        self.writer.write_bit_short(acis_version);
+            // ACIS version
+            let acis_version: i16 = match acis.version {
+                AcisVersion::Version1 => 1,
+                AcisVersion::Version2 => 2,
+            };
+            self.writer.write_bit_short(acis_version);
 
-        if acis_version == 1 {
-            // SAT text
-            if self.version.r2004_plus() {
-                // R2004+: encrypt and write as a single byte block
-                let plain = acis.sat_data.as_bytes();
+            if acis_version == 1 {
+                // SAT text — all DWG versions use the same encoding:
+                // BL-sized blocks of encrypted bytes (cipher: 159 - byte)
+                // terminated by BL(0).  Per LibreDWG dwg.spec.
+                let stripped = AcisData::strip_sat_terminator(&acis.sat_data);
+                let mut full = stripped.clone();
+                full.push_str("End-of-ACIS-data\n");
+                let plain = full.as_bytes();
+
+                // Encrypt with selective 159-substitution cipher
+                // (per LibreDWG dwg.spec: bytes <= 32 pass through, bytes > 32: 159 - byte)
                 let mut encrypted = Vec::with_capacity(plain.len());
-                for (i, &b) in plain.iter().enumerate() {
-                    encrypted.push(b.wrapping_add((i & 0xFF) as u8));
+                for &b in plain.iter() {
+                    if b <= 32 {
+                        encrypted.push(b);
+                    } else {
+                        encrypted.push(159u8.wrapping_sub(b));
+                    }
                 }
+
+                // Write as a single block + terminating BL(0)
                 self.writer.write_bit_long(encrypted.len() as i32);
                 self.writer.write_bytes(&encrypted);
+                self.writer.write_bit_long(0); // terminating empty block
             } else {
-                // R13–R2000: write individual text lines
-                for line in acis.sat_data.lines() {
-                    self.writer.write_variable_text(line);
-                }
-                self.writer.write_variable_text("End-of-ACIS-data");
+                // SAB binary (R2007+)
+                self.writer.write_bit_long(acis.sab_data.len() as i32);
+                self.writer.write_bytes(&acis.sab_data);
             }
-        } else {
-            // SAB binary (R2007+)
-            self.writer.write_bit_long(acis.sab_data.len() as i32);
-            self.writer.write_bytes(&acis.sab_data);
         }
 
-        // Wireframe data
-        let wireframe_present = !wires.is_empty();
+        // ── COMMON_3DSOLID: Wireframe data (always present) ─────────
+        let wireframe_present = has_data && !wires.is_empty();
         self.writer.write_bit(wireframe_present);
 
         if wireframe_present {
@@ -2844,37 +2867,10 @@ impl<'a> DwgObjectWriter<'a> {
 
             self.writer.write_bit_long(wires.len() as i32);
             for wire in wires {
-                self.writer.write_bit_long(wire.acis_index);
-                self.writer.write_byte(wire.wire_type as u8);
-                self.writer.write_bit_long(wire.selection_marker);
-                // Color as i32 (BL)
-                let color_val: i32 = match wire.color {
-                    crate::types::Color::ByLayer => 256,
-                    crate::types::Color::ByBlock => 0,
-                    crate::types::Color::Index(idx) => idx as i32,
-                    _ => 256,
-                };
-                self.writer.write_bit_long(color_val);
-                self.writer.write_bit_long(wire.points.len() as i32);
-                for pt in &wire.points {
-                    self.writer.write_3bit_double(*pt);
-                }
-                self.writer.write_bit(wire.has_transform);
-                if wire.has_transform {
-                    self.writer.write_3bit_double(wire.x_axis);
-                    self.writer.write_3bit_double(wire.y_axis);
-                    self.writer.write_3bit_double(wire.z_axis);
-                    self.writer.write_3bit_double(wire.translation);
-                    self.writer.write_bit_double(wire.scale);
-                    self.writer.write_bit(wire.has_rotation);
-                    self.writer.write_bit(wire.has_reflection);
-                    self.writer.write_bit(wire.has_shear);
-                }
+                self.write_wire(wire);
             }
-        }
 
-        // Silhouettes (R2007+)
-        if self.version.r2007_plus() {
+            // Silhouettes (inside wireframe section per LibreDWG)
             self.writer.write_bit_long(silhouettes.len() as i32);
             for sil in silhouettes {
                 self.writer.write_bit_long(sil.viewport_id as i32);
@@ -2884,33 +2880,41 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit(sil.is_perspective);
                 self.writer.write_bit_long(sil.wires.len() as i32);
                 for wire in &sil.wires {
-                    self.writer.write_bit_long(wire.acis_index);
-                    self.writer.write_byte(wire.wire_type as u8);
-                    self.writer.write_bit_long(wire.selection_marker);
-                    let color_val: i32 = match wire.color {
-                        crate::types::Color::ByLayer => 256,
-                        crate::types::Color::ByBlock => 0,
-                        crate::types::Color::Index(idx) => idx as i32,
-                        _ => 256,
-                    };
-                    self.writer.write_bit_long(color_val);
-                    self.writer.write_bit_long(wire.points.len() as i32);
-                    for pt in &wire.points {
-                        self.writer.write_3bit_double(*pt);
-                    }
-                    self.writer.write_bit(wire.has_transform);
-                    if wire.has_transform {
-                        self.writer.write_3bit_double(wire.x_axis);
-                        self.writer.write_3bit_double(wire.y_axis);
-                        self.writer.write_3bit_double(wire.z_axis);
-                        self.writer.write_3bit_double(wire.translation);
-                        self.writer.write_bit_double(wire.scale);
-                        self.writer.write_bit(wire.has_rotation);
-                        self.writer.write_bit(wire.has_reflection);
-                        self.writer.write_bit(wire.has_shear);
-                    }
+                    self.write_wire(wire);
                 }
             }
+        }
+
+        // NOTE: acis_empty_bit is NOT written here — the caller writes it
+        // after this function returns, along with any entity-specific data.
+    }
+
+    /// Write a single wire struct (shared by wires and silhouette wires).
+    fn write_wire(&mut self, wire: &Wire) {
+        self.writer.write_bit_long(wire.acis_index);
+        self.writer.write_byte(wire.wire_type as u8);
+        self.writer.write_bit_long(wire.selection_marker);
+        let color_val: i32 = match wire.color {
+            crate::types::Color::ByLayer => 256,
+            crate::types::Color::ByBlock => 0,
+            crate::types::Color::Index(idx) => idx as i32,
+            _ => 256,
+        };
+        self.writer.write_bit_long(color_val);
+        self.writer.write_bit_long(wire.points.len() as i32);
+        for pt in &wire.points {
+            self.writer.write_3bit_double(*pt);
+        }
+        self.writer.write_bit(wire.has_transform);
+        if wire.has_transform {
+            self.writer.write_3bit_double(wire.x_axis);
+            self.writer.write_3bit_double(wire.y_axis);
+            self.writer.write_3bit_double(wire.z_axis);
+            self.writer.write_3bit_double(wire.translation);
+            self.writer.write_bit_double(wire.scale);
+            self.writer.write_bit(wire.has_rotation);
+            self.writer.write_bit(wire.has_reflection);
+            self.writer.write_bit(wire.has_shear);
         }
     }
 }

@@ -974,4 +974,188 @@ mod tests {
         let bytes = result.unwrap();
         assert!(bytes.len() > 200, "Output should be non-trivial");
     }
+
+    // ── File-level DWG roundtrip tests for 3DSOLID / REGION / BODY ──
+
+    fn make_sat_sample() -> &'static str {
+        "700 0 1 0\n\
+         @7 unknown 12 ACIS 7.0 NT 24 Wed Jan 01 00:00:00 2025 1.0 9.9999999999999995e-007 1e-010\n\
+         body $-1 $1 $-1 $-1 #\n\
+         lump $-1 $-1 $2 $0 #\n\
+         shell $-1 $-1 $-1 $3 $-1 $1 #\n\
+         face $-1 $-1 $-1 $4 $2 $5 forward single #\n\
+         loop $-1 $-1 $6 $3 #\n\
+         plane-surface $-1 0 0 5 0 0 1 1 0 0 forward_v I I I I #\n\
+         coedge $-1 $6 $6 $-1 $7 forward $4 $-1 #\n\
+         edge $-1 $8 0 $8 1 $6 $9 forward #\n\
+         vertex $-1 $7 $10 #\n\
+         straight-curve $-1 -5 -5 5 1 0 0 I I #\n\
+         point $-1 -5 -5 5 #\n\
+         End-of-ACIS-data\n"
+    }
+
+    /// Write a Solid3D with SAT data to DWG R2000, read back, verify SAT preserved.
+    #[test]
+    fn test_roundtrip_solid3d_r2000() {
+        use crate::entities::solid3d::Solid3D;
+        use crate::entities::EntityType;
+        use crate::io::dwg::DwgReader;
+
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1015;
+        let solid = Solid3D::from_sat(make_sat_sample());
+        let _ = doc.add_entity(EntityType::Solid3D(solid));
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("write R2000 should succeed");
+        assert!(bytes.len() > 200);
+
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let doc2 = reader.read().expect("read R2000 should succeed");
+
+        let solids: Vec<&Solid3D> = doc2.entities().filter_map(|e| {
+            if let EntityType::Solid3D(s) = e { Some(s) } else { None }
+        }).collect();
+        assert_eq!(solids.len(), 1, "should have exactly one Solid3D");
+        assert!(!solids[0].acis_data.is_binary, "R2000 should use SAT text");
+        assert!(solids[0].acis_data.sat_data.contains("body"), "SAT data must contain 'body'");
+        assert!(solids[0].acis_data.sat_data.contains("plane-surface"), "SAT data must contain 'plane-surface'");
+    }
+
+    /// Write a Solid3D with SAT data to DWG R2004, read back, verify SAT preserved.
+    #[test]
+    fn test_roundtrip_solid3d_r2004() {
+        use crate::entities::solid3d::Solid3D;
+        use crate::entities::EntityType;
+        use crate::io::dwg::DwgReader;
+
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1018;
+        let solid = Solid3D::from_sat(make_sat_sample());
+        let _ = doc.add_entity(EntityType::Solid3D(solid));
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("write R2004 should succeed");
+        assert!(bytes.len() > 200);
+
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let doc2 = reader.read().expect("read R2004 should succeed");
+
+        let solids: Vec<&Solid3D> = doc2.entities().filter_map(|e| {
+            if let EntityType::Solid3D(s) = e { Some(s) } else { None }
+        }).collect();
+        assert_eq!(solids.len(), 1, "should have exactly one Solid3D");
+        assert!(!solids[0].acis_data.is_binary, "R2004 should use SAT text");
+        assert!(solids[0].acis_data.sat_data.contains("body"));
+    }
+
+    /// Write a Solid3D with SAT data to DWG R2007 (SAB binary format), read back.
+    #[test]
+    fn test_roundtrip_solid3d_r2007() {
+        use crate::entities::solid3d::Solid3D;
+        use crate::entities::EntityType;
+        use crate::io::dwg::DwgReader;
+
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1021;
+        let solid = Solid3D::from_sat(make_sat_sample());
+        let _ = doc.add_entity(EntityType::Solid3D(solid));
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("write R2007 should succeed");
+        assert!(bytes.len() > 200);
+
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let doc2 = reader.read().expect("read R2007 should succeed");
+
+        let solids: Vec<&Solid3D> = doc2.entities().filter_map(|e| {
+            if let EntityType::Solid3D(s) = e { Some(s) } else { None }
+        }).collect();
+        assert_eq!(solids.len(), 1, "should have exactly one Solid3D");
+        // R2007 should use SAT text format since we provided SAT text —
+        // the version in acis_data controls what's written, not the DWG version alone.
+        assert!(solids[0].acis_data.has_data(), "should have ACIS data");
+    }
+
+    /// Write a Region with SAT data to DWG R2000, read back.
+    #[test]
+    fn test_roundtrip_region_r2000() {
+        use crate::entities::solid3d::Region;
+        use crate::entities::EntityType;
+        use crate::io::dwg::DwgReader;
+
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1015;
+        let region = Region::from_sat(make_sat_sample());
+        let _ = doc.add_entity(EntityType::Region(region));
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("write R2000 should succeed");
+
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let doc2 = reader.read().expect("read R2000 should succeed");
+
+        let regions: Vec<&Region> = doc2.entities().filter_map(|e| {
+            if let EntityType::Region(r) = e { Some(r) } else { None }
+        }).collect();
+        assert_eq!(regions.len(), 1, "should have exactly one Region");
+        assert!(regions[0].acis_data.sat_data.contains("body"));
+    }
+
+    /// Write a Body with SAT data to DWG R2004, read back.
+    #[test]
+    fn test_roundtrip_body_r2004() {
+        use crate::entities::solid3d::Body;
+        use crate::entities::EntityType;
+        use crate::io::dwg::DwgReader;
+
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1018;
+        let body = Body::from_sat(make_sat_sample());
+        let _ = doc.add_entity(EntityType::Body(body));
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("write R2004 should succeed");
+
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let doc2 = reader.read().expect("read R2004 should succeed");
+
+        let bodies: Vec<&Body> = doc2.entities().filter_map(|e| {
+            if let EntityType::Body(b) = e { Some(b) } else { None }
+        }).collect();
+        assert_eq!(bodies.len(), 1, "should have exactly one Body");
+        assert!(bodies[0].acis_data.sat_data.contains("body"));
+    }
+
+    /// Write multiple ACIS entities to a single DWG at R2010, read back all three.
+    #[test]
+    fn test_roundtrip_mixed_acis_r2010() {
+        use crate::entities::solid3d::{Solid3D, Region, Body};
+        use crate::entities::EntityType;
+        use crate::io::dwg::DwgReader;
+
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1024;
+
+        let _ = doc.add_entity(EntityType::Solid3D(Solid3D::from_sat(make_sat_sample())));
+        let _ = doc.add_entity(EntityType::Region(Region::from_sat(make_sat_sample())));
+        let _ = doc.add_entity(EntityType::Body(Body::from_sat(make_sat_sample())));
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("write R2010 should succeed");
+
+        let mut reader = DwgReader::from_stream(std::io::Cursor::new(bytes));
+        let doc2 = reader.read().expect("read R2010 should succeed");
+
+        let n_solid = doc2.entities().filter(|e| matches!(e, EntityType::Solid3D(_))).count();
+        let n_region = doc2.entities().filter(|e| matches!(e, EntityType::Region(_))).count();
+        let n_body = doc2.entities().filter(|e| matches!(e, EntityType::Body(_))).count();
+        assert_eq!(n_solid, 1, "should have 1 Solid3D");
+        assert_eq!(n_region, 1, "should have 1 Region");
+        assert_eq!(n_body, 1, "should have 1 Body");
+
+        // Verify data integrity on each
+        for e in doc2.entities() {
+            match e {
+                EntityType::Solid3D(s) => assert!(s.acis_data.sat_data.contains("body")),
+                EntityType::Region(r) => assert!(r.acis_data.sat_data.contains("body")),
+                EntityType::Body(b) => assert!(b.acis_data.sat_data.contains("body")),
+                _ => {}
+            }
+        }
+    }
 }

@@ -1405,6 +1405,17 @@ impl DwgDocumentBuilder {
                     e.acis_data.is_binary = data.is_binary;
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
+
+                    // history handle — only for ACIS version > 1 (SAB)
+                    // per LibreDWG spec.  acis_empty_bit is now read
+                    // inside read_acis_entity.
+                    if data.version > 1 {
+                        let h = reader.read_handle();
+                        if h != 0 {
+                            e.history_handle = Some(Handle::new(h));
+                        }
+                    }
+
                     let _ = document.add_entity(EntityType::Solid3D(e));
                 },
                 OBJ_REGION => {

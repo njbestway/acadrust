@@ -2084,79 +2084,64 @@ pub struct AcisEntityData {
     pub silhouettes: Vec<Silhouette>,
 }
 
-/// Decrypt SAT text encoded in a DWG stream.
-///
-/// Pre-R2007 DWG files encode SAT text with a simple byte-rotation cipher:
-/// `decoded[i] = (encoded[i] - (i & 0xFF)) & 0xFF`.
-fn decrypt_sat_data(encoded: &[u8]) -> String {
-    let mut decoded = Vec::with_capacity(encoded.len());
-    for (i, &b) in encoded.iter().enumerate() {
-        decoded.push(b.wrapping_sub((i & 0xFF) as u8));
-    }
-    String::from_utf8_lossy(&decoded).to_string()
-}
-
 /// Read modeler-geometry (ACIS) data shared by 3DSOLID, REGION, BODY.
 ///
-/// Entity-type-specific data (e.g. history handle for 3DSOLID) is NOT
-/// read here — the caller must handle that.
+/// This reads both `DECODE_3DSOLID` (acis data) and the wireframe +
+/// `acis_empty_bit` from `COMMON_3DSOLID`.  The caller must still read
+/// any version-dependent trailing fields (history_id, etc.).
 pub fn read_acis_entity(
     reader: &mut DwgMergedReader,
-    version: DwgVersion,
+    _version: DwgVersion,
 ) -> AcisEntityData {
     let acis_empty = reader.read_bit();
 
-    if acis_empty {
-        return AcisEntityData {
-            acis_empty: true,
-            sat_data: String::new(),
-            sab_data: Vec::new(),
-            is_binary: false,
-            version: 0,
-            point: Vector3::ZERO,
-            has_history: false,
-            wires: Vec::new(),
-            silhouettes: Vec::new(),
-        };
-    }
-
-    let acis_version = reader.read_bit_short();
     let mut sat_data = String::new();
     let mut sab_data = Vec::new();
-    let is_binary;
+    let mut is_binary = false;
+    let mut acis_version: i16 = 0;
 
-    if acis_version == 1 {
-        // SAT text — pre-R2007
-        // Read the total data size, then the encrypted byte block.
-        is_binary = false;
+    if !acis_empty {
+        // Unknown bit — per ODA spec / LibreDWG / ACadSharp this B
+        // is always present between acis_empty and the version BS.
+        let _unknown = reader.read_bit();
 
-        if version.r2004_plus() {
-            // R2004+: a single BL for total byte count, then raw bytes
-            let num_bytes = reader.read_bit_long().max(0) as usize;
-            if num_bytes > 0 {
-                let enc = reader.read_bytes(num_bytes);
-                sat_data = decrypt_sat_data(&enc);
-            }
-        } else {
-            // R13-R2000: read individual text lines until "End-of-…"
+        acis_version = reader.read_bit_short();
+
+        if acis_version == 1 {
+            // SAT text — all DWG versions use the same encoding:
+            // BL-sized blocks of encrypted bytes (cipher: 159 - byte)
+            // terminated by BL(0).  Per LibreDWG dwg.spec.
+            is_binary = false;
+
+            let mut all_bytes = Vec::new();
             loop {
-                let line = reader.read_variable_text();
-                if line.is_empty()
-                    || line.starts_with("End-of-ACIS-data")
-                    || line.starts_with("End-of-ASM-data")
-                {
+                let block_size = reader.read_bit_long().max(0) as usize;
+                if block_size == 0 || block_size > 50_000_000 {
                     break;
                 }
-                sat_data.push_str(&line);
-                sat_data.push('\n');
+                let block = reader.read_bytes(block_size);
+                all_bytes.extend_from_slice(&block);
             }
-        }
-    } else {
-        // SAB binary — R2007+
-        is_binary = true;
-        let total_size = reader.read_bit_long().max(0) as usize;
-        if total_size > 0 && total_size < 50_000_000 {
-            sab_data = reader.read_bytes(total_size);
+
+            // Decrypt with selective 159-substitution cipher
+            // (per LibreDWG dwg.spec: bytes <= 32 pass through, bytes > 32: 159 - byte)
+            let mut decoded = Vec::with_capacity(all_bytes.len());
+            for &b in &all_bytes {
+                if b <= 32 {
+                    decoded.push(b);
+                } else {
+                    decoded.push(159u8.wrapping_sub(b));
+                }
+            }
+            sat_data = String::from_utf8_lossy(&decoded).to_string();
+            sat_data = crate::entities::solid3d::AcisData::strip_sat_terminator(&sat_data);
+        } else {
+            // SAB binary — R2007+
+            is_binary = true;
+            let total_size = reader.read_bit_long().max(0) as usize;
+            if total_size > 0 && total_size < 50_000_000 {
+                sab_data = reader.read_bytes(total_size);
+            }
         }
     }
 
@@ -2169,61 +2154,13 @@ pub fn read_acis_entity(
         point = reader.read_3bit_double();
         let num_isolines = safe_count(reader.read_bit_long());
         for _ in 0..num_isolines {
-            let acis_index = reader.read_bit_long();
-            let wire_type_raw = reader.read_byte();
-            let selection_marker = reader.read_bit_long();
-            let color_val = reader.read_bit_long();
-            let num_pts = safe_count(reader.read_bit_long());
-            let mut pts = Vec::with_capacity(num_pts as usize);
-            for _ in 0..num_pts {
-                pts.push(reader.read_3bit_double());
-            }
-            let has_transform = reader.read_bit();
-            let (mut x_axis, mut y_axis, mut z_axis) =
-                (Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z);
-            let mut translation = Vector3::ZERO;
-            let mut scale = 1.0;
-            let (mut has_rotation, mut has_reflection, mut has_shear) =
-                (false, false, false);
-            if has_transform {
-                x_axis = reader.read_3bit_double();
-                y_axis = reader.read_3bit_double();
-                z_axis = reader.read_3bit_double();
-                translation = reader.read_3bit_double();
-                scale = reader.read_bit_double();
-                has_rotation = reader.read_bit();
-                has_reflection = reader.read_bit();
-                has_shear = reader.read_bit();
-            }
-            let color = if color_val == 256 {
-                Color::ByLayer
-            } else if color_val == 0 {
-                Color::ByBlock
-            } else {
-                Color::Index(color_val as u8)
-            };
-            wires.push(Wire {
-                acis_index,
-                wire_type: WireType::from(wire_type_raw),
-                selection_marker,
-                color,
-                points: pts,
-                has_transform,
-                has_rotation,
-                has_reflection,
-                has_shear,
-                scale,
-                translation,
-                x_axis,
-                y_axis,
-                z_axis,
-            });
+            wires.push(read_wire(reader));
         }
     }
 
-    // Silhouettes (R2007+)
+    // Silhouettes (inside wireframe section per LibreDWG)
     let mut silhouettes = Vec::new();
-    if version.r2007_plus() {
+    if wireframe_present {
         let num_silhouettes = safe_count(reader.read_bit_long());
         for _ in 0..num_silhouettes {
             let viewport_id = reader.read_bit_long() as i64;
@@ -2234,55 +2171,7 @@ pub fn read_acis_entity(
             let num_wires = safe_count(reader.read_bit_long());
             let mut sil_wires = Vec::with_capacity(num_wires as usize);
             for _ in 0..num_wires {
-                let acis_index = reader.read_bit_long();
-                let wire_type_raw = reader.read_byte();
-                let selection_marker = reader.read_bit_long();
-                let color_val = reader.read_bit_long();
-                let num_pts = safe_count(reader.read_bit_long());
-                let mut pts = Vec::with_capacity(num_pts as usize);
-                for _ in 0..num_pts {
-                    pts.push(reader.read_3bit_double());
-                }
-                let has_transform = reader.read_bit();
-                let (mut x_axis, mut y_axis, mut z_axis) =
-                    (Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z);
-                let mut translation = Vector3::ZERO;
-                let mut scale = 1.0;
-                let (mut has_rotation, mut has_reflection, mut has_shear) =
-                    (false, false, false);
-                if has_transform {
-                    x_axis = reader.read_3bit_double();
-                    y_axis = reader.read_3bit_double();
-                    z_axis = reader.read_3bit_double();
-                    translation = reader.read_3bit_double();
-                    scale = reader.read_bit_double();
-                    has_rotation = reader.read_bit();
-                    has_reflection = reader.read_bit();
-                    has_shear = reader.read_bit();
-                }
-                let color = if color_val == 256 {
-                    Color::ByLayer
-                } else if color_val == 0 {
-                    Color::ByBlock
-                } else {
-                    Color::Index(color_val as u8)
-                };
-                sil_wires.push(Wire {
-                    acis_index,
-                    wire_type: WireType::from(wire_type_raw),
-                    selection_marker,
-                    color,
-                    points: pts,
-                    has_transform,
-                    has_rotation,
-                    has_reflection,
-                    has_shear,
-                    scale,
-                    translation,
-                    x_axis,
-                    y_axis,
-                    z_axis,
-                });
+                sil_wires.push(read_wire(reader));
             }
             silhouettes.push(Silhouette {
                 viewport_id,
@@ -2295,8 +2184,11 @@ pub fn read_acis_entity(
         }
     }
 
+    // acis_empty_bit (COMMON_3DSOLID — always present)
+    let _acis_empty_bit = reader.read_bit();
+
     AcisEntityData {
-        acis_empty: false,
+        acis_empty,
         sat_data,
         sab_data,
         is_binary,
@@ -2305,6 +2197,59 @@ pub fn read_acis_entity(
         has_history: false, // caller sets this for 3DSOLID
         wires,
         silhouettes,
+    }
+}
+
+/// Read a single wire struct from the DWG stream.
+fn read_wire(reader: &mut DwgMergedReader) -> Wire {
+    let acis_index = reader.read_bit_long();
+    let wire_type_raw = reader.read_byte();
+    let selection_marker = reader.read_bit_long();
+    let color_val = reader.read_bit_long();
+    let num_pts = safe_count(reader.read_bit_long());
+    let mut pts = Vec::with_capacity(num_pts as usize);
+    for _ in 0..num_pts {
+        pts.push(reader.read_3bit_double());
+    }
+    let has_transform = reader.read_bit();
+    let (mut x_axis, mut y_axis, mut z_axis) =
+        (Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z);
+    let mut translation = Vector3::ZERO;
+    let mut scale = 1.0;
+    let (mut has_rotation, mut has_reflection, mut has_shear) =
+        (false, false, false);
+    if has_transform {
+        x_axis = reader.read_3bit_double();
+        y_axis = reader.read_3bit_double();
+        z_axis = reader.read_3bit_double();
+        translation = reader.read_3bit_double();
+        scale = reader.read_bit_double();
+        has_rotation = reader.read_bit();
+        has_reflection = reader.read_bit();
+        has_shear = reader.read_bit();
+    }
+    let color = if color_val == 256 {
+        Color::ByLayer
+    } else if color_val == 0 {
+        Color::ByBlock
+    } else {
+        Color::Index(color_val as u8)
+    };
+    Wire {
+        acis_index,
+        wire_type: WireType::from(wire_type_raw),
+        selection_marker,
+        color,
+        points: pts,
+        has_transform,
+        has_rotation,
+        has_reflection,
+        has_shear,
+        scale,
+        translation,
+        x_axis,
+        y_axis,
+        z_axis,
     }
 }
 
@@ -2443,5 +2388,117 @@ mod tests {
         assert_eq!(sp.degree, 3);
         assert_eq!(sp.knots.len(), 6);
         assert_eq!(sp.control_points.len(), 3);
+    }
+
+    #[test]
+    fn test_acis_sat_roundtrip_r2004() {
+        use crate::entities::solid3d::AcisData;
+
+        let sat = "700 0 1 0\n\
+                   @7 unknown 12 ACIS 7.0 NT 24 Wed Jan 01 00:00:00 2025 1.0 9.9999999999999995e-007 1e-010\n\
+                   body $-1 $1 $-1 $-1 #\n\
+                   lump $-1 $-1 $2 $0 #\n\
+                   shell $-1 $-1 $-1 $3 $-1 $1 #\n\
+                   face $-1 $-1 $-1 $4 $2 $5 forward single #\n\
+                   loop $-1 $-1 $6 $3 #\n\
+                   plane-surface $-1 0 0 5 0 0 1 1 0 0 forward_v I I I I #\n\
+                   coedge $-1 $6 $6 $-1 $7 forward $4 $-1 #\n\
+                   edge $-1 $8 0 $8 1 $6 $9 forward #\n\
+                   vertex $-1 $7 $10 #\n\
+                   straight-curve $-1 -5 -5 5 1 0 0 I I #\n\
+                   point $-1 -5 -5 5 #\n\
+                   End-of-ACIS-data\n";
+
+        // Write using the writer infrastructure
+        let v = DwgVersion::AC18;
+        let d = DxfVersion::AC1018;
+        let acis = AcisData::from_sat(sat);
+        let mut w = DwgMergedWriter::new(v, d);
+        // Write: acis_empty + unknown + version + encrypted blocks + wireframe + acis_empty_bit
+        w.write_bit(false); // acis_empty = false (has data)
+        w.write_bit(false); // unknown bit (per ODA/LibreDWG spec)
+        w.write_bit_short(1); // acis_version = 1 (SAT text)
+        // Encrypt SAT with selective 159-substitution cipher
+        let mut full_sat = acis.sat_data.clone();
+        full_sat.push_str("End-of-ACIS-data\n");
+        let plain = full_sat.as_bytes();
+        let mut encrypted = Vec::with_capacity(plain.len());
+        for &b in plain.iter() {
+            if b <= 32 {
+                encrypted.push(b);
+            } else {
+                encrypted.push(159u8.wrapping_sub(b));
+            }
+        }
+        w.write_bit_long(encrypted.len() as i32);
+        w.write_bytes(&encrypted);
+        w.write_bit_long(0); // terminating empty block
+        w.write_bit(false); // wireframe_present = false
+        w.write_bit(false); // acis_empty_bit
+
+        let data = w.merge();
+        let hsb = w.handle_start_bits();
+        let mut r = DwgMergedReader::new(data, d, hsb);
+
+        let result = read_acis_entity(&mut r, v);
+        assert!(!result.acis_empty);
+        assert!(!result.is_binary);
+        assert_eq!(result.version, 1);
+        assert!(result.sat_data.contains("body"));
+        assert!(result.sat_data.contains("plane-surface"));
+        assert!(result.wires.is_empty());
+    }
+
+    #[test]
+    fn test_acis_sab_roundtrip_r2007() {
+        // Test SAB binary roundtrip (version 2)
+        let v = DwgVersion::AC21;
+        let d = DxfVersion::AC1021;
+
+        let sab_data: Vec<u8> = vec![
+            0x41, 0x53, 0x4D, 0x20, // "ASM "
+            0x42, 0x69, 0x6E, 0x00, // "Bin\0"
+            0x01, 0x02, 0x03, 0x04, // some dummy data
+        ];
+
+        let mut w = DwgMergedWriter::new(v, d);
+        w.write_bit(false); // acis_empty = false
+        w.write_bit(false); // unknown bit (per ODA/LibreDWG spec)
+        w.write_bit_short(2); // acis_version = 2 (SAB binary)
+        w.write_bit_long(sab_data.len() as i32);
+        w.write_bytes(&sab_data);
+        w.write_bit(false); // wireframe_present = false
+        w.write_bit(false); // acis_empty_bit
+
+        let data = w.merge();
+        let hsb = w.handle_start_bits();
+        let mut r = DwgMergedReader::new(data, d, hsb);
+
+        let result = read_acis_entity(&mut r, v);
+        assert!(!result.acis_empty);
+        assert!(result.is_binary);
+        assert_eq!(result.version, 2);
+        assert_eq!(result.sab_data, sab_data);
+        assert!(result.sat_data.is_empty());
+    }
+
+    #[test]
+    fn test_acis_empty_roundtrip() {
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+
+        let mut w = DwgMergedWriter::new(v, d);
+        w.write_bit(true); // acis_empty = true
+        w.write_bit(false); // wireframe_present = false
+        w.write_bit(false); // acis_empty_bit
+
+        let data = w.merge();
+        let hsb = w.handle_start_bits();
+        let mut r = DwgMergedReader::new(data, d, hsb);
+
+        let result = read_acis_entity(&mut r, v);
+        assert!(result.acis_empty);
+        assert!(result.sat_data.is_empty());
+        assert!(result.sab_data.is_empty());
     }
 }

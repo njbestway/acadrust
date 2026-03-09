@@ -3231,10 +3231,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             return Ok(());
         }
 
+        // Append the terminator — internal sat_data never contains it.
+        let mut full = AcisData::strip_sat_terminator(data);
+        full.push_str("End-of-ACIS-data\n");
+
         // Version 1: apply the DXF character cipher to SAT text.
         let encoded = match acis.version {
-            AcisVersion::Version1 => AcisData::encode_sat(data),
-            _ => data.clone(),
+            AcisVersion::Version1 => AcisData::encode_sat(&full),
+            _ => full,
         };
 
         let mut any_written = false;

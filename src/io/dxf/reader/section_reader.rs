@@ -4480,6 +4480,9 @@ impl<'a> SectionReader<'a> {
             acis_data = crate::entities::solid3d::AcisData::decode_sat(&acis_data);
         }
 
+        // Normalise: strip "End-of-ACIS-data" / "End-of-ASM-data" terminator.
+        acis_data = crate::entities::solid3d::AcisData::strip_sat_terminator(&acis_data);
+
         Ok((common, uid, acis_data))
     }
 

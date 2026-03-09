@@ -278,6 +278,62 @@ fn main() {
             ))
         });
 
+        // ── ACIS entities (3DSOLID, REGION, BODY) ───────────────────
+
+        gen(version, ver_str, &dir, "3DSOLID", &mut ok, &mut fail, &mut skip, || {
+            let sat = "700 0 1 0\n\
+                       @7 unknown 12 ACIS 7.0 NT 24 Wed Jan 01 00:00:00 2025 1.0 9.9999999999999995e-007 1e-010\n\
+                       body $-1 $1 $-1 $-1 #\n\
+                       lump $-1 $-1 $2 $0 #\n\
+                       shell $-1 $-1 $-1 $3 $-1 $1 #\n\
+                       face $-1 $-1 $-1 $4 $2 $5 forward single #\n\
+                       loop $-1 $-1 $6 $3 #\n\
+                       plane-surface $-1 0 0 5 0 0 1 1 0 0 forward_v I I I I #\n\
+                       coedge $-1 $6 $6 $-1 $7 forward $4 $-1 #\n\
+                       edge $-1 $8 0 $8 1 $6 $9 forward #\n\
+                       vertex $-1 $7 $10 #\n\
+                       straight-curve $-1 -5 -5 5 1 0 0 I I #\n\
+                       point $-1 -5 -5 5 #\n\
+                       End-of-ACIS-data\n";
+            EntityType::Solid3D(Solid3D::from_sat(sat))
+        });
+
+        gen(version, ver_str, &dir, "REGION", &mut ok, &mut fail, &mut skip, || {
+            let sat = "700 0 1 0\n\
+                       @7 unknown 12 ACIS 7.0 NT 24 Wed Jan 01 00:00:00 2025 1.0 9.9999999999999995e-007 1e-010\n\
+                       body $-1 $1 $-1 $-1 #\n\
+                       lump $-1 $-1 $2 $0 #\n\
+                       shell $-1 $-1 $-1 $3 $-1 $1 #\n\
+                       face $-1 $-1 $-1 $4 $2 $5 forward single #\n\
+                       loop $-1 $-1 $6 $3 #\n\
+                       plane-surface $-1 0 0 0 0 0 1 1 0 0 forward_v I I I I #\n\
+                       coedge $-1 $6 $6 $-1 $7 forward $4 $-1 #\n\
+                       edge $-1 $8 0 $8 1 $6 $9 forward #\n\
+                       vertex $-1 $7 $10 #\n\
+                       straight-curve $-1 -5 -5 0 1 0 0 I I #\n\
+                       point $-1 -5 -5 0 #\n\
+                       End-of-ACIS-data\n";
+            EntityType::Region(Region::from_sat(sat))
+        });
+
+        gen(version, ver_str, &dir, "BODY", &mut ok, &mut fail, &mut skip, || {
+            let sat = "700 0 1 0\n\
+                       @7 unknown 12 ACIS 7.0 NT 24 Wed Jan 01 00:00:00 2025 1.0 9.9999999999999995e-007 1e-010\n\
+                       body $-1 $1 $-1 $-1 #\n\
+                       lump $-1 $-1 $2 $0 #\n\
+                       shell $-1 $-1 $-1 $3 $-1 $1 #\n\
+                       face $-1 $-1 $-1 $4 $2 $5 forward single #\n\
+                       loop $-1 $-1 $6 $3 #\n\
+                       plane-surface $-1 0 0 0 0 0 1 1 0 0 forward_v I I I I #\n\
+                       coedge $-1 $6 $6 $-1 $7 forward $4 $-1 #\n\
+                       edge $-1 $8 0 $8 1 $6 $9 forward #\n\
+                       vertex $-1 $7 $10 #\n\
+                       straight-curve $-1 -5 -5 0 1 0 0 I I #\n\
+                       point $-1 -5 -5 0 #\n\
+                       End-of-ACIS-data\n";
+            EntityType::Body(Body::from_sat(sat))
+        });
+
         // ── Version summary ─────────────────────────────────────────
 
         println!("  ── {} summary: {} OK, {} FAIL, {} SKIP", ver_str, ok, fail, skip);
