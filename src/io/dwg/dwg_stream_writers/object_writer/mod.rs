@@ -206,12 +206,14 @@ impl<'a> DwgObjectWriter<'a> {
     fn compute_model_space_extents(&self) -> Option<BoundingBox3D> {
         let ms_block = self.document.block_records.get("*Model_Space")?;
         let mut extents: Option<BoundingBox3D> = None;
-        for entity in &ms_block.entities {
-            let bbox = entity.as_entity().bounding_box();
-            extents = Some(match extents {
-                Some(existing) => existing.merge(&bbox),
-                None => bbox,
-            });
+        for eh in &ms_block.entity_handles {
+            if let Some(&idx) = self.document.entity_index.get(eh) {
+                let bbox = self.document.entities[idx].as_entity().bounding_box();
+                extents = Some(match extents {
+                    Some(existing) => existing.merge(&bbox),
+                    None => bbox,
+                });
+            }
         }
         extents
     }
@@ -1335,23 +1337,26 @@ impl<'a> DwgObjectWriter<'a> {
             self.write_block_header(br);
             self.write_block_begin(br);
 
-            // Write entities in this block
-            let entities: Vec<EntityType> = br.entities.clone();
-            let len = entities.len();
-            for (i, entity) in entities.iter().enumerate() {
-                // Set prev/next for entity linking (pre-R2004)
-                self.prev_handle = if i > 0 {
-                    Some(entities[i - 1].common().handle)
-                } else {
-                    None
-                };
-                self.next_handle = if i + 1 < len {
-                    Some(entities[i + 1].common().handle)
-                } else {
-                    None
-                };
+            // Look up entities by handle from the document
+            let handles = &br.entity_handles;
+            let len = handles.len();
+            for (i, eh) in handles.iter().enumerate() {
+                if let Some(&idx) = self.document.entity_index.get(eh) {
+                    let entity = &self.document.entities[idx];
+                    // Set prev/next for entity linking (pre-R2004)
+                    self.prev_handle = if i > 0 {
+                        Some(handles[i - 1])
+                    } else {
+                        None
+                    };
+                    self.next_handle = if i + 1 < len {
+                        Some(handles[i + 1])
+                    } else {
+                        None
+                    };
 
-                self.write_entity(entity);
+                    self.write_entity(entity);
+                }
             }
 
             self.prev_handle = None;
@@ -1363,11 +1368,7 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write a BLOCK_HEADER (block record) object.
     fn write_block_header(&mut self, record: &BlockRecord) {
-        let entity_handles: Vec<Handle> = record
-            .entities
-            .iter()
-            .map(|e| e.common().handle)
-            .collect();
+        let entity_handles = &record.entity_handles;
 
         self.write_common_non_entity_data(
             common::OBJ_BLOCK_HEADER,
@@ -1401,12 +1402,12 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_long(entity_handles.len() as i32);
         }
 
-        // Base point (from first entity if it's a Block)
+        // Base point (from Block entity if found)
         let base_pt = record
-            .entities
+            .entity_handles
             .iter()
-            .find_map(|e| {
-                if let EntityType::Block(b) = e {
+            .find_map(|eh| {
+                if let Some(EntityType::Block(b)) = self.document.entity_index.get(eh).map(|&idx| &self.document.entities[idx]) {
                     Some(b.base_point)
                 } else {
                     None
@@ -1460,7 +1461,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2004+: entity handles (hard owner)
         if self.version.r2004_plus() {
-            for h in &entity_handles {
+            for h in entity_handles {
                 self.writer
                     .write_handle(DwgReferenceType::HardOwnership, h.value());
             }
@@ -1484,10 +1485,10 @@ impl<'a> DwgObjectWriter<'a> {
     /// Write BLOCK entity (block begin).
     fn write_block_begin(&mut self, record: &BlockRecord) {
         let block = record
-            .entities
+            .entity_handles
             .iter()
-            .find_map(|e| {
-                if let EntityType::Block(b) = e {
+            .find_map(|eh| {
+                if let Some(EntityType::Block(b)) = self.document.entity_index.get(eh).map(|&idx| &self.document.entities[idx]) {
                     Some(b.clone())
                 } else {
                     None
@@ -1533,10 +1534,10 @@ impl<'a> DwgObjectWriter<'a> {
     /// Write ENDBLK entity (block end).
     fn write_block_end(&mut self, record: &BlockRecord) {
         let block_end = record
-            .entities
+            .entity_handles
             .iter()
-            .find_map(|e| {
-                if let EntityType::BlockEnd(be) = e {
+            .find_map(|eh| {
+                if let Some(EntityType::BlockEnd(be)) = self.document.entity_index.get(eh).map(|&idx| &self.document.entities[idx]) {
                     Some(be.clone())
                 } else {
                     None

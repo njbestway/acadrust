@@ -78,21 +78,10 @@ impl<W: Write> DxfStreamWriter for DxfTextWriter<W> {
     
     fn write_double(&mut self, code: i32, value: f64) -> Result<()> {
         self.write_code(code)?;
-        // Format with sufficient precision, trimming unnecessary trailing zeros
-        // but always including at least one decimal place
-        if value == value.trunc() {
-            write_crlf!(self.writer, "{:.1}", value)?;
-        } else {
-            // Use enough precision for CAD data
-            let formatted = format!("{:.15}", value);
-            let trimmed = formatted.trim_end_matches('0');
-            let trimmed = if trimmed.ends_with('.') {
-                format!("{}0", trimmed)
-            } else {
-                trimmed.to_string()
-            };
-            write_crlf!(self.writer, "{}", trimmed)?;
-        }
+        let mut formatted = format!("{:.16}", value);
+        while formatted.ends_with('0') { formatted.pop(); }
+        if formatted.ends_with('.') { formatted.push('0'); }
+        write_crlf!(self.writer, "{}", formatted)?;
         Ok(())
     }
     

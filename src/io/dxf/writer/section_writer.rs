@@ -743,7 +743,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_section_start("BLOCKS")?;
 
         for block_record in document.block_records.iter() {
-            self.write_block_definition(block_record)?;
+            self.write_block_definition(block_record, document)?;
         }
 
         self.writer.write_section_end()?;
@@ -751,7 +751,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     }
 
     /// Write a complete block definition (BLOCK...entities...ENDBLK)
-    fn write_block_definition(&mut self, block_record: &BlockRecord) -> Result<()> {
+    fn write_block_definition(&mut self, block_record: &BlockRecord, document: &CadDocument) -> Result<()> {
         let owner = block_record.handle();
         
         // Determine block flags
@@ -787,8 +787,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // - Non-active paper spaces (*Paper_Space0, *Paper_Space1, ...) write entities here
         // - Other blocks (inserts etc.) also write entities here
         if !block_record.is_model_space() && block_record.name() != "*Paper_Space" {
-            for entity in &block_record.entities {
-                self.write_entity_with_owner(entity, owner)?;
+            for eh in &block_record.entity_handles {
+                if let Some(&idx) = document.entity_index.get(eh) {
+                    self.write_entity_with_owner(&document.entities[idx], owner)?;
+                }
             }
         }
 
@@ -815,8 +817,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writing_paper_space = false;
         if let Some(model_space) = document.block_records.get("*Model_Space") {
             let owner = model_space.handle();
-            for entity in &model_space.entities {
-                self.write_entity_with_owner(entity, owner)?;
+            for eh in &model_space.entity_handles {
+                if let Some(&idx) = document.entity_index.get(eh) {
+                    self.write_entity_with_owner(&document.entities[idx], owner)?;
+                }
             }
         }
 
@@ -826,8 +830,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writing_paper_space = true;
         if let Some(paper_space) = document.block_records.get("*Paper_Space") {
             let owner = paper_space.handle();
-            for entity in &paper_space.entities {
-                self.write_entity_with_owner(entity, owner)?;
+            for eh in &paper_space.entity_handles {
+                if let Some(&idx) = document.entity_index.get(eh) {
+                    self.write_entity_with_owner(&document.entities[idx], owner)?;
+                }
             }
         }
         self.writing_paper_space = false;

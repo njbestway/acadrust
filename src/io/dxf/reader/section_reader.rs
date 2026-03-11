@@ -59,7 +59,15 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 "$DWGCODEPAGE" => {
-                    if let Some(p) = self.reader.read_pair()? { hdr.code_page = p.value_string.clone(); }
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.code_page = p.value_string.clone();
+                        // Set encoding immediately for pre-2007 files
+                        if document.version < DxfVersion::AC1021 {
+                            if let Some(enc) = crate::io::dxf::code_page::encoding_from_code_page(&hdr.code_page) {
+                                self.reader.set_encoding(enc);
+                            }
+                        }
+                    }
                 }
                 "$HANDSEED" => {
                     if let Some(p) = self.reader.read_pair()? {
@@ -558,9 +566,20 @@ impl<'a> SectionReader<'a> {
                         // Read ENDBLK properties
                         let block_end = self.read_block_end()?;
 
-                        // Find the BlockRecord and add entities + BLOCK/ENDBLK handles
+                        // Insert block entities into the document's flat entity map
+                        // and collect their handles for the block record.
+                        let mut entity_handles = Vec::with_capacity(block_entities.len());
+                        for entity in block_entities {
+                            let h = entity.common().handle;
+                            entity_handles.push(h);
+                            let idx = document.entities.len();
+                            document.entities.push(entity);
+                            document.entity_index.insert(h, idx);
+                        }
+
+                        // Find the BlockRecord and set handles
                         if let Some(block_record) = document.block_records.get_mut(&block_name) {
-                            block_record.entities = block_entities;
+                            block_record.entity_handles = entity_handles;
                             if !handle.is_null() {
                                 block_record.block_entity_handle = handle;
                             }
@@ -4920,7 +4939,7 @@ mod tests {
 
     /// Helper: create a document, write to DXF, read back.
     fn roundtrip(doc: CadDocument) -> CadDocument {
-        let writer = crate::io::dxf::writer::DxfWriter::new(doc);
+        let writer = crate::io::dxf::writer::DxfWriter::new(&doc);
         let bytes = writer.write_to_vec().expect("write_to_vec");
         let cursor = std::io::Cursor::new(bytes);
         let reader = crate::io::dxf::reader::DxfReader::from_reader(cursor).expect("from_reader");
@@ -5128,7 +5147,7 @@ mod tests {
         // normal defaults to UNIT_Z
         doc.add_entity(EntityType::Line(line));
 
-        let writer = crate::io::dxf::writer::DxfWriter::new(doc);
+        let writer = crate::io::dxf::writer::DxfWriter::new(&doc);
         let bytes = writer.write_to_vec().expect("write_to_vec");
         let content = String::from_utf8_lossy(&bytes);
         // 210 should NOT appear as a group code for default normal

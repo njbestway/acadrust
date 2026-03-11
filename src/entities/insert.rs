@@ -503,7 +503,14 @@ impl Insert {
     /// Returns an empty `Vec` when the block record is not found.
     pub fn explode_from_document(&self, document: &crate::document::CadDocument) -> Vec<EntityType> {
         match document.block_records.get(&self.block_name) {
-            Some(br) => self.explode(&br.entities),
+            Some(br) => {
+                let entities: Vec<EntityType> = br
+                    .entity_handles
+                    .iter()
+                    .filter_map(|h| document.entity_index.get(h).map(|&idx| document.entities[idx].clone()))
+                    .collect();
+                self.explode(&entities)
+            }
             None => Vec::new(),
         }
     }

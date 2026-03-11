@@ -1,7 +1,6 @@
 //! Block record table entry
 
 use super::TableEntry;
-use crate::entities::EntityType;
 use crate::types::Handle;
 
 /// Block record flags
@@ -61,8 +60,8 @@ pub struct BlockRecord {
     pub explodable: bool,
     /// Can scale uniformly
     pub scale_uniformly: bool,
-    /// Entities owned by this block
-    pub entities: Vec<EntityType>,
+    /// Handles of entities owned by this block
+    pub entity_handles: Vec<Handle>,
 }
 
 impl BlockRecord {
@@ -78,7 +77,7 @@ impl BlockRecord {
             units: 0,
             explodable: true,
             scale_uniformly: false,
-            entities: Vec::new(),
+            entity_handles: Vec::new(),
         }
     }
 
@@ -94,7 +93,7 @@ impl BlockRecord {
             units: 0,
             explodable: true,
             scale_uniformly: false,
-            entities: Vec::new(),
+            entity_handles: Vec::new(),
         }
     }
 
@@ -110,7 +109,7 @@ impl BlockRecord {
             units: 0,
             explodable: true,
             scale_uniformly: false,
-            entities: Vec::new(),
+            entity_handles: Vec::new(),
         }
     }
 

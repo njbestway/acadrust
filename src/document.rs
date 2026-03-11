@@ -900,8 +900,11 @@ pub struct CadDocument {
     /// Notifications collected during the last read/write operation
     pub notifications: crate::notification::NotificationCollection,
 
-    /// All entities in the document (indexed by handle)
-    entities: HashMap<Handle, EntityType>,
+    /// All entities in the document (contiguous storage for cache locality).
+    pub(crate) entities: Vec<EntityType>,
+
+    /// Handle → index mapping for O(1) entity lookup by handle.
+    pub(crate) entity_index: HashMap<Handle, usize>,
 
     /// All objects in the document (indexed by handle)
     pub objects: HashMap<Handle, ObjectType>,
@@ -927,7 +930,8 @@ impl CadDocument {
             ucss: Table::new(),
             classes: DxfClassCollection::new(),
             notifications: crate::notification::NotificationCollection::new(),
-            entities: HashMap::new(),
+            entities: Vec::new(),
+            entity_index: HashMap::new(),
             objects: HashMap::new(),
             // Start handle allocation above reserved table handles (0x1-0xA)
             // Table handles are well-known fixed values used by AutoCAD
@@ -1298,15 +1302,13 @@ impl CadDocument {
             entity.common_mut().owner_handle = ms_handle;
         }
 
-        // Route entity to the correct block record based on owner handle.
-        // The DWG writer reads entities from BlockRecord.entities, so each
-        // entity must be placed in the block record it belongs to.
+        // Route entity handle to the correct block record based on owner handle.
         let owner = entity.common().owner_handle;
         let mut added_to_block = false;
         if !owner.is_null() {
             for br in self.block_records.iter_mut() {
                 if br.handle == owner {
-                    br.entities.push(entity.clone());
+                    br.entity_handles.push(handle);
                     added_to_block = true;
                     break;
                 }
@@ -1315,23 +1317,26 @@ impl CadDocument {
         // Fallback: add to *Model_Space if owner didn't match any block record
         if !added_to_block {
             if let Some(ms) = self.block_records.get_mut("*Model_Space") {
-                ms.entities.push(entity.clone());
+                ms.entity_handles.push(handle);
             }
         }
 
         // Store in the flat entity map (DXF writer reads from here)
-        self.entities.insert(handle, entity);
+        let idx = self.entities.len();
+        self.entities.push(entity);
+        self.entity_index.insert(handle, idx);
         Ok(handle)
     }
 
     /// Get an entity by handle
     pub fn get_entity(&self, handle: Handle) -> Option<&EntityType> {
-        self.entities.get(&handle)
+        self.entity_index.get(&handle).map(|&idx| &self.entities[idx])
     }
 
     /// Get a mutable entity by handle
     pub fn get_entity_mut(&mut self, handle: Handle) -> Option<&mut EntityType> {
-        self.entities.get_mut(&handle)
+        let idx = *self.entity_index.get(&handle)?;
+        Some(&mut self.entities[idx])
     }
 
     /// Add an entity to the default paper space (`*Paper_Space` / "Layout1").
@@ -1427,13 +1432,13 @@ impl CadDocument {
             entity.common_mut().owner_handle = br.handle;
         }
 
-        // Route entity to the block record
+        // Route entity handle to the block record
         let owner = entity.common().owner_handle;
         let mut added_to_block = false;
         if !owner.is_null() {
             for br in self.block_records.iter_mut() {
                 if br.handle == owner {
-                    br.entities.push(entity.clone());
+                    br.entity_handles.push(handle);
                     added_to_block = true;
                     break;
                 }
@@ -1441,18 +1446,27 @@ impl CadDocument {
         }
         if !added_to_block {
             if let Some(target) = self.block_records.get_mut(block_name) {
-                target.entities.push(entity.clone());
+                target.entity_handles.push(handle);
             }
         }
 
         // Store in the flat entity map
-        self.entities.insert(handle, entity);
+        let idx = self.entities.len();
+        self.entities.push(entity);
+        self.entity_index.insert(handle, idx);
         Ok(handle)
     }
 
     /// Remove an entity by handle
     pub fn remove_entity(&mut self, handle: Handle) -> Option<EntityType> {
-        self.entities.remove(&handle)
+        let idx = self.entity_index.remove(&handle)?;
+        let entity = self.entities.swap_remove(idx);
+        // If the swap moved an element, update its index
+        if idx < self.entities.len() {
+            let moved_handle = self.entities[idx].common().handle;
+            self.entity_index.insert(moved_handle, idx);
+        }
+        Some(entity)
     }
 
     /// Add a new paper space layout to the document.
@@ -1524,9 +1538,11 @@ impl CadDocument {
         layout.viewport = overall_vp_handle;
 
         if let Some(br) = self.block_records.get_mut(&block_name) {
-            br.entities.push(EntityType::Viewport(overall_vp.clone()));
+            br.entity_handles.push(overall_vp_handle);
         }
-        self.entities.insert(overall_vp_handle, EntityType::Viewport(overall_vp));
+        let idx = self.entities.len();
+        self.entities.push(EntityType::Viewport(overall_vp));
+        self.entity_index.insert(overall_vp_handle, idx);
 
         // Register in ACAD_LAYOUT dictionary
         if let Some(ObjectType::Dictionary(dict)) =
@@ -1548,12 +1564,12 @@ impl CadDocument {
 
     /// Iterate over all entities
     pub fn entities(&self) -> impl Iterator<Item = &EntityType> {
-        self.entities.values()
+        self.entities.iter()
     }
 
     /// Iterate over all entities mutably
     pub fn entities_mut(&mut self) -> impl Iterator<Item = &mut EntityType> {
-        self.entities.values_mut()
+        self.entities.iter_mut()
     }
 
     /// Resolve handle references after reading a DXF file.
@@ -1574,7 +1590,7 @@ impl CadDocument {
         let mut max_handle: u64 = self.next_handle;
 
         // Check entities
-        for entity in self.entities.values() {
+        for entity in self.entities.iter() {
             let h = entity.common().handle.value();
             if h >= max_handle {
                 max_handle = h + 1;
@@ -1589,14 +1605,14 @@ impl CadDocument {
             }
         }
 
-        // Check block record entities
+        // Check block record handles
         for br in self.block_records.iter() {
             let h = br.handle.value();
             if h >= max_handle {
                 max_handle = h + 1;
             }
-            for entity in &br.entities {
-                let h = entity.common().handle.value();
+            for eh in &br.entity_handles {
+                let h = eh.value();
                 if h >= max_handle {
                     max_handle = h + 1;
                 }
@@ -1610,7 +1626,7 @@ impl CadDocument {
         let paper_handle = self.header.paper_space_block_handle;
 
         // Model-space entities (document.entities) — use model space as default owner
-        for entity in self.entities.values_mut() {
+        for entity in self.entities.iter_mut() {
             let common = match entity {
                 EntityType::Dimension(d) => {
                     let base = d.base_mut();
@@ -1627,19 +1643,22 @@ impl CadDocument {
             }
         }
 
-        // Block record entities — owner is the block record handle
-        for br in self.block_records.iter_mut() {
+        // Block record entities — set owner handle on entities looked up from entity map
+        for br in self.block_records.iter() {
             let br_handle = br.handle;
-            for entity in &mut br.entities {
-                let common = match entity {
-                    EntityType::Dimension(d) => {
-                        let base = d.base_mut();
-                        &mut base.common
+            for eh in &br.entity_handles {
+                if let Some(&idx) = self.entity_index.get(eh) {
+                    let entity = &mut self.entities[idx];
+                    let common = match entity {
+                        EntityType::Dimension(d) => {
+                            let base = d.base_mut();
+                            &mut base.common
+                        }
+                        _ => get_common_mut(entity),
+                    };
+                    if common.owner_handle.is_null() {
+                        common.owner_handle = br_handle;
                     }
-                    _ => get_common_mut(entity),
-                };
-                if common.owner_handle.is_null() {
-                    common.owner_handle = br_handle;
                 }
             }
         }

@@ -64,7 +64,7 @@ fn main() -> acadrust::Result<()> {
             let mut doc = CadDocument::with_version(*ver);
             doc.add_entity(EntityType::Solid3D(solid))?;
 
-            let writer = DxfWriter::new(doc);
+            let writer = DxfWriter::new(&doc);
             writer.write_to_file(&path)?;
 
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);

@@ -3027,10 +3027,12 @@ mod tests {
 
     fn make_doc_with_entity(entity: EntityType) -> CadDocument {
         let mut doc = CadDocument::new();
-        let _handle = entity.common().handle;
-        // Add entity to *Model_Space block
+        let handle = entity.common().handle;
+        let idx = doc.entities.len();
+        doc.entities.push(entity);
+        doc.entity_index.insert(handle, idx);
         if let Some(br) = doc.block_records.get_mut("*Model_Space") {
-            br.entities.push(entity);
+            br.entity_handles.push(handle);
         }
         doc
     }

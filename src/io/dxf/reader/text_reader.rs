@@ -3,7 +3,7 @@
 use super::stream_reader::{DxfCodePair, DxfStreamReader};
 use crate::error::{DxfError, Result};
 use encoding_rs::Encoding;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 /// DXF ASCII text file reader
 pub struct DxfTextReader<R: Read + Seek> {
@@ -12,6 +12,8 @@ pub struct DxfTextReader<R: Read + Seek> {
     peeked_pair: Option<DxfCodePair>,
     /// Non-UTF8 fallback encoding.  `None` means use Latin-1 (byte-to-char).
     encoding: Option<&'static Encoding>,
+    /// Reusable buffer for line reading to avoid per-line allocation.
+    line_buf: Vec<u8>,
 }
 
 impl<R: Read + Seek> DxfTextReader<R> {
@@ -22,67 +24,69 @@ impl<R: Read + Seek> DxfTextReader<R> {
             line_number: 0,
             peeked_pair: None,
             encoding: None,
+            line_buf: Vec::with_capacity(256),
         })
     }
     
-    /// Read a single line from the stream, handling non-UTF8 bytes gracefully.
-    /// Uses the configured encoding for fallback, or Latin-1 if none set.
+    /// Read a single line from the stream into a new String, handling non-UTF8
+    /// bytes gracefully.  Uses the configured encoding for fallback, or Latin-1
+    /// if none set.
     fn read_line(&mut self) -> Result<Option<String>> {
-        let mut bytes = Vec::new();
-        
-        // Read bytes until newline
-        loop {
-            let mut byte = [0u8; 1];
-            match self.reader.read(&mut byte) {
-                Ok(0) => {
-                    // EOF
-                    if bytes.is_empty() {
-                        return Ok(None);
-                    }
-                    break;
-                }
-                Ok(_) => {
-                    if byte[0] == b'\n' {
-                        break;
-                    }
-                    bytes.push(byte[0]);
-                }
-                Err(e) => return Err(e.into()),
-            }
+        let mut buf = Vec::new();
+        let bytes_read = self.reader.read_until(b'\n', &mut buf)?;
+        if bytes_read == 0 {
+            return Ok(None);
         }
-        
+
         self.line_number += 1;
-        
+
+        // Strip trailing \n and \r in-place
+        if buf.last() == Some(&b'\n') { buf.pop(); }
+        if buf.last() == Some(&b'\r') { buf.pop(); }
+
         // Try UTF-8 first, then use configured encoding or Latin-1 fallback
-        let line = match String::from_utf8(bytes.clone()) {
+        let line = match String::from_utf8(buf) {
             Ok(s) => s,
-            Err(_) => {
+            Err(e) => {
+                let bytes = e.into_bytes();
                 if let Some(enc) = self.encoding {
                     let (decoded, _, _) = enc.decode(&bytes);
                     decoded.into_owned()
                 } else {
-                    // Latin-1 is a 1:1 mapping of bytes 0-255 to Unicode code points
                     bytes.iter().map(|&b| b as char).collect()
                 }
             }
         };
-        
-        // Trim whitespace and newlines (including \r)
-        let trimmed = line.trim().to_string();
-        Ok(Some(trimmed))
+
+        Ok(Some(line))
     }
-    
+
+    /// Read a line into the reusable `line_buf` without allocating a String.
+    /// Returns `Ok(true)` if a line was read, `Ok(false)` on EOF.
+    fn read_line_raw(&mut self) -> Result<bool> {
+        self.line_buf.clear();
+        let bytes_read = self.reader.read_until(b'\n', &mut self.line_buf)?;
+        if bytes_read == 0 {
+            return Ok(false);
+        }
+        self.line_number += 1;
+        if self.line_buf.last() == Some(&b'\n') { self.line_buf.pop(); }
+        if self.line_buf.last() == Some(&b'\r') { self.line_buf.pop(); }
+        Ok(true)
+    }
+
     /// Read a code/value pair from the stream
     fn read_pair_internal(&mut self) -> Result<Option<DxfCodePair>> {
-        // Read code line
-        let code_line = match self.read_line()? {
-            Some(line) => line,
-            None => return Ok(None),
-        };
-        
-        // Parse code
-        let code = code_line.trim().parse::<i32>()
-            .map_err(|_| DxfError::Parse(format!("Invalid DXF code at line {}: '{}'", self.line_number, code_line)))?;
+        // Read code line into reusable buffer (no String allocation needed)
+        if !self.read_line_raw()? {
+            return Ok(None);
+        }
+
+        // Parse code directly from byte buffer
+        let code_str = std::str::from_utf8(&self.line_buf)
+            .map_err(|_| DxfError::Parse(format!("Invalid UTF-8 in code at line {}", self.line_number)))?;
+        let code = code_str.trim().parse::<i32>()
+            .map_err(|_| DxfError::Parse(format!("Invalid DXF code at line {}: '{}'", self.line_number, code_str)))?;
         
         // Read value line
         let value_line = match self.read_line()? {

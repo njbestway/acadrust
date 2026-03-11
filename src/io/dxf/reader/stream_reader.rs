@@ -4,6 +4,20 @@ use crate::error::Result;
 use crate::io::dxf::{DxfCode, GroupCodeValueType};
 use crate::types::Vector3;
 
+/// Typed value of a DXF code pair
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CodePairValue {
+    /// No typed value (string-only codes)
+    None,
+    /// Integer value (for Int16/Int32/Int64/Byte group codes)
+    Int(i64),
+    /// Floating-point value (for Double group codes)
+    Double(f64),
+    /// Boolean value (for Bool group codes)
+    Bool(bool),
+}
+
 /// A DXF code/value pair
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -13,22 +27,12 @@ pub struct DxfCodePair {
 
     /// The DXF code enum
     pub dxf_code: DxfCode,
-
-    /// The value type
-    #[allow(dead_code)]
-    pub value_type: GroupCodeValueType,
     
     /// String representation of the value
     pub value_string: String,
     
-    /// Integer value (if applicable)
-    pub value_int: Option<i64>,
-    
-    /// Floating-point value (if applicable)
-    pub value_double: Option<f64>,
-    
-    /// Boolean value (if applicable)
-    pub value_bool: Option<bool>,
+    /// Typed value (integer, double, or boolean)
+    typed_value: CodePairValue,
 }
 
 impl DxfCodePair {
@@ -38,35 +42,33 @@ impl DxfCodePair {
         let value_type = GroupCodeValueType::from_code(dxf_code);
         
         // Parse value based on type
-        let value_int = match value_type {
+        let typed_value = match value_type {
             GroupCodeValueType::Int16 | GroupCodeValueType::Int32 | GroupCodeValueType::Int64 | GroupCodeValueType::Byte => {
-                value_string.trim().parse::<i64>().ok()
+                match value_string.trim().parse::<i64>() {
+                    Ok(v) => CodePairValue::Int(v),
+                    Err(_) => CodePairValue::None,
+                }
             }
-            _ => None,
-        };
-        
-        let value_double = match value_type {
             GroupCodeValueType::Double => {
-                value_string.trim().parse::<f64>().ok()
+                match value_string.trim().parse::<f64>() {
+                    Ok(v) => CodePairValue::Double(v),
+                    Err(_) => CodePairValue::None,
+                }
             }
-            _ => None,
-        };
-        
-        let value_bool = match value_type {
             GroupCodeValueType::Bool => {
-                value_string.trim().parse::<i32>().ok().map(|v| v != 0)
+                match value_string.trim().parse::<i32>() {
+                    Ok(v) => CodePairValue::Bool(v != 0),
+                    Err(_) => CodePairValue::None,
+                }
             }
-            _ => None,
+            _ => CodePairValue::None,
         };
         
         Self {
             code,
             dxf_code,
-            value_type,
             value_string,
-            value_int,
-            value_double,
-            value_bool,
+            typed_value,
         }
     }
     
@@ -79,28 +81,43 @@ impl DxfCodePair {
     /// Get value as integer
     #[allow(dead_code)]
     pub fn as_int(&self) -> Option<i64> {
-        self.value_int
+        match self.typed_value {
+            CodePairValue::Int(v) => Some(v),
+            _ => None,
+        }
     }
 
     /// Get value as i16
     pub fn as_i16(&self) -> Option<i16> {
-        self.value_int.and_then(|v| i16::try_from(v).ok())
+        match self.typed_value {
+            CodePairValue::Int(v) => i16::try_from(v).ok(),
+            _ => None,
+        }
     }
 
     /// Get value as i32
     #[allow(dead_code)]
     pub fn as_i32(&self) -> Option<i32> {
-        self.value_int.and_then(|v| i32::try_from(v).ok())
+        match self.typed_value {
+            CodePairValue::Int(v) => i32::try_from(v).ok(),
+            _ => None,
+        }
     }
     
     /// Get value as double
     pub fn as_double(&self) -> Option<f64> {
-        self.value_double
+        match self.typed_value {
+            CodePairValue::Double(v) => Some(v),
+            _ => None,
+        }
     }
     
     /// Get value as boolean
     pub fn as_bool(&self) -> Option<bool> {
-        self.value_bool
+        match self.typed_value {
+            CodePairValue::Bool(v) => Some(v),
+            _ => None,
+        }
     }
     
     /// Get value as handle (hex string to u64)

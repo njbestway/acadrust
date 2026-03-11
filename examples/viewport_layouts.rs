@@ -77,7 +77,7 @@ fn main() -> acadrust::Result<()> {
 
     // ── Write the DXF file ────────────────────────────────────────────
     let path = "target/viewport_layouts.dxf";
-    let writer = DxfWriter::new(doc);
+    let writer = DxfWriter::new(&doc);
     writer.write_to_file(path)?;
 
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);

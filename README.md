@@ -24,7 +24,7 @@ fn main() -> acadrust::Result<()> {
     println!("{} entities", doc.entities().count());
 
     // Write
-    let writer = DxfWriter::new(doc);
+    let writer = DxfWriter::new(&doc);
     writer.write_to_file("output.dxf")?;
     Ok(())
 }
@@ -110,7 +110,7 @@ fn main() -> acadrust::Result<()> {
     vp2.id = 1;
     doc.add_entity_to_layout(EntityType::Viewport(vp2), "Layout2")?;
 
-    DxfWriter::new(doc).write_to_file("layouts.dxf")?;
+    DxfWriter::new(&doc).write_to_file("layouts.dxf")?;
     Ok(())
 }
 ```

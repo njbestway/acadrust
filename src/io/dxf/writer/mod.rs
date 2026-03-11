@@ -18,15 +18,15 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 /// DXF file writer
-pub struct DxfWriter {
-    document: CadDocument,
+pub struct DxfWriter<'a> {
+    document: &'a CadDocument,
     /// Whether to write binary DXF format
     pub binary: bool,
 }
 
-impl DxfWriter {
+impl<'a> DxfWriter<'a> {
     /// Create a new DXF writer for ASCII output
-    pub fn new(document: CadDocument) -> Self {
+    pub fn new(document: &'a CadDocument) -> Self {
         Self {
             document,
             binary: false,
@@ -34,7 +34,7 @@ impl DxfWriter {
     }
 
     /// Create a new DXF writer for binary output
-    pub fn new_binary(document: CadDocument) -> Self {
+    pub fn new_binary(document: &'a CadDocument) -> Self {
         Self {
             document,
             binary: true,
@@ -158,14 +158,13 @@ fn count_extra_handles(document: &CadDocument) -> u64 {
 
 /// Convenience function to write a document to a file
 pub fn write_dxf<P: AsRef<Path>>(document: &CadDocument, path: P) -> Result<()> {
-    // Clone the document for writing
-    let writer = DxfWriter::new(document.clone());
+    let writer = DxfWriter::new(document);
     writer.write_to_file(path)
 }
 
 /// Convenience function to write a document to a binary DXF file
 pub fn write_binary_dxf<P: AsRef<Path>>(document: &CadDocument, path: P) -> Result<()> {
-    let writer = DxfWriter::new_binary(document.clone());
+    let writer = DxfWriter::new_binary(document);
     writer.write_to_file(path)
 }
 

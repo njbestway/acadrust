@@ -139,7 +139,7 @@ fn main() -> acadrust::Result<()> {
 
     // ── Write the restored document to DXF ──
     let output_path = "target/serde_roundtrip.dxf";
-    DxfWriter::new(restored.clone()).write_to_file(output_path)?;
+    DxfWriter::new(&restored).write_to_file(output_path)?;
     let file_size = std::fs::metadata(output_path).unwrap().len();
     println!("Written to {output_path}: {file_size} bytes");
 

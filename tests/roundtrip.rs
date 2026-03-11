@@ -822,7 +822,7 @@ fn compare_header_variables(
 
 /// DXF write → read roundtrip with entity count check.
 fn dxf_roundtrip(doc: CadDocument) -> CadDocument {
-    let writer = DxfWriter::new(doc);
+    let writer = DxfWriter::new(&doc);
     let bytes = writer.write_to_vec().expect("DXF write failed");
     let reader = DxfReader::from_reader(Cursor::new(bytes)).expect("DXF reader init failed");
     reader.read().expect("DXF read failed")
@@ -1419,7 +1419,7 @@ fn cross_format_dxf_to_dwg_to_dxf() {
     let (orig_doc, expected) = build_rich_document(DxfVersion::AC1032);
 
     // Write DXF → Read back
-    let dxf_bytes = DxfWriter::new(orig_doc.clone()).write_to_vec().unwrap();
+    let dxf_bytes = DxfWriter::new(&orig_doc).write_to_vec().unwrap();
     let doc_from_dxf = DxfReader::from_reader(Cursor::new(dxf_bytes))
         .unwrap()
         .read()
@@ -1455,7 +1455,7 @@ fn cross_format_dxf_to_dwg_to_dxf() {
 
     // Write DXF again → Read back
     let remaining = doc_from_dwg.entity_count();
-    let dxf_bytes2 = DxfWriter::new(doc_from_dwg).write_to_vec().unwrap();
+    let dxf_bytes2 = DxfWriter::new(&doc_from_dwg).write_to_vec().unwrap();
     let final_doc = DxfReader::from_reader(Cursor::new(dxf_bytes2))
         .unwrap()
         .read()
@@ -1482,7 +1482,7 @@ fn cross_format_dwg_to_dxf_to_dwg() {
     assert_eq!(doc_from_dwg.entity_count(), expected, "DWG read lost entities");
 
     // Write DXF → Read back
-    let dxf_bytes = DxfWriter::new(doc_from_dwg).write_to_vec().unwrap();
+    let dxf_bytes = DxfWriter::new(&doc_from_dwg).write_to_vec().unwrap();
     let doc_from_dxf = DxfReader::from_reader(Cursor::new(dxf_bytes))
         .unwrap()
         .read()
@@ -1667,7 +1667,7 @@ fn dwg_roundtrip_header_variables() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn binary_dxf_roundtrip(doc: CadDocument) -> CadDocument {
-    let writer = DxfWriter::new_binary(doc);
+    let writer = DxfWriter::new_binary(&doc);
     let bytes = writer.write_to_vec().expect("Binary DXF write failed");
     let reader =
         DxfReader::from_reader(Cursor::new(bytes)).expect("Binary DXF reader init failed");
