@@ -1594,17 +1594,21 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_insert(&mut self, insert: &Insert, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("INSERT")?;
         self.write_common_entity_data(&insert.common, owner)?;
-        self.writer.write_subclass("AcDbBlockReference")?;
+        self.writer.write_subclass(insert.subclass_marker())?;
+        // Has-attributes flag (group code 66)
+        if insert.has_attributes() {
+            self.writer.write_i16(66, 1)?;
+        }
         self.writer.write_string(2, &insert.block_name)?;
         self.writer.write_point3d(10, insert.insert_point)?;
-        if insert.x_scale != 1.0 {
-            self.writer.write_double(41, insert.x_scale)?;
+        if insert.x_scale() != 1.0 {
+            self.writer.write_double(41, insert.x_scale())?;
         }
-        if insert.y_scale != 1.0 {
-            self.writer.write_double(42, insert.y_scale)?;
+        if insert.y_scale() != 1.0 {
+            self.writer.write_double(42, insert.y_scale())?;
         }
-        if insert.z_scale != 1.0 {
-            self.writer.write_double(43, insert.z_scale)?;
+        if insert.z_scale() != 1.0 {
+            self.writer.write_double(43, insert.z_scale())?;
         }
         if insert.rotation != 0.0 {
             self.writer.write_double(50, insert.rotation.to_degrees())?;
@@ -1622,6 +1626,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(45, insert.row_spacing)?;
         }
         self.write_normal(insert.normal)?;
+
+        // Write child ATTRIB entities + SEQEND when attributes are present
+        if insert.has_attributes() {
+            let insert_handle = insert.handle();
+            for att in &insert.attributes {
+                self.write_attrib(att, insert_handle)?;
+            }
+            // SEQEND terminates the attribute sequence
+            let seqend_handle = self.allocate_handle();
+            self.writer.write_entity_type("SEQEND")?;
+            self.writer.write_handle(5, seqend_handle)?;
+            self.writer.write_handle(330, insert_handle)?;
+            self.writer.write_string(8, &insert.common.layer)?;
+        }
         Ok(())
     }
 

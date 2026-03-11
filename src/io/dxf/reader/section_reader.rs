@@ -3426,6 +3426,7 @@ impl<'a> SectionReader<'a> {
         let mut row_count = 1u16;
         let mut column_spacing = 0.0;
         let mut row_spacing = 0.0;
+        let mut has_attributes = false;
         let mut layer = String::from("0");
         let mut color = Color::ByLayer;
         let mut line_weight = LineWeight::ByLayer;
@@ -3450,6 +3451,9 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 2 => block_name = pair.value_string.clone(),
+                66 => {
+                    has_attributes = pair.as_i16() == Some(1);
+                }
                 10 | 20 | 30 => { insertion.add_coordinate(&pair); }
                 41 => {
                     if let Some(sx) = pair.as_double() {
@@ -3501,9 +3505,9 @@ impl<'a> SectionReader<'a> {
         insert.common.layer = layer;
         insert.common.color = color;
         insert.common.line_weight = line_weight;
-        insert.x_scale = x_scale;
-        insert.y_scale = y_scale;
-        insert.z_scale = z_scale;
+        insert.set_x_scale(x_scale);
+        insert.set_y_scale(y_scale);
+        insert.set_z_scale(z_scale);
         insert.rotation = rotation;
         insert.column_count = column_count;
         insert.row_count = row_count;
@@ -3518,6 +3522,41 @@ impl<'a> SectionReader<'a> {
         insert.common.linetype_scale = common.linetype_scale;
         if let Some(n) = normal.get_point() {
             insert.normal = n;
+        }
+
+        // Collect trailing ATTRIB entities (terminated by SEQEND)
+        if has_attributes {
+            loop {
+                // Peek at the next entity type
+                if let Some(pair) = self.reader.read_pair()? {
+                    if pair.code == 0 {
+                        let entity_name = pair.value_string.trim().to_uppercase();
+                        match entity_name.as_str() {
+                            "ATTRIB" => {
+                                if let Some(att) = self.read_attrib()? {
+                                    insert.attributes.push(att);
+                                }
+                            }
+                            "SEQEND" => {
+                                // Consume SEQEND contents and stop
+                                self.skip_entity()?;
+                                break;
+                            }
+                            _ => {
+                                // Unexpected entity – push back and stop
+                                self.reader.push_back(pair);
+                                break;
+                            }
+                        }
+                    } else {
+                        // Not a code-0 pair; shouldn't happen, push back
+                        self.reader.push_back(pair);
+                        break;
+                    }
+                } else {
+                    break; // EOF
+                }
+            }
         }
 
         Ok(Some(insert))

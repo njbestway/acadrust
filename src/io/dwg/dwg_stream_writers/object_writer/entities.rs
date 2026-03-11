@@ -477,16 +477,16 @@ impl<'a> DwgObjectWriter<'a> {
 
         if self.version.r13_14_only() {
             // R13-R14: X/Y/Z Scale as separate BD values
-            self.writer.write_bit_double(e.x_scale);
-            self.writer.write_bit_double(e.y_scale);
-            self.writer.write_bit_double(e.z_scale);
+            self.writer.write_bit_double(e.x_scale());
+            self.writer.write_bit_double(e.y_scale());
+            self.writer.write_bit_double(e.z_scale());
         }
 
         if self.version.r2000_plus() {
             // R2000+: Data flags BB + conditional scale data
-            let sx = e.x_scale;
-            let sy = e.y_scale;
-            let sz = e.z_scale;
+            let sx = e.x_scale();
+            let sy = e.y_scale();
+            let sz = e.z_scale();
 
             if sx == 1.0 && sy == 1.0 && sz == 1.0 {
                 // 11 - scale is (1.0, 1.0, 1.0), no data stored
@@ -513,8 +513,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(e.rotation);
         // Extrusion 3BD 210
         self.writer.write_3bit_double(e.normal);
-        // Has ATTRIBs B 66 — no attributes in our model
-        self.writer.write_bit(false);
+        // Has ATTRIBs B 66
+        self.writer.write_bit(e.has_attributes());
 
         // Block header ref (hard pointer)
         let block_handle = self

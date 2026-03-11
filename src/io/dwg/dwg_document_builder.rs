@@ -780,9 +780,9 @@ impl DwgDocumentBuilder {
                     let block_name = maps.block_name(data.block_handle);
                     let mut e = Insert::new(block_name, data.insert_point);
                     e.common = entity_common;
-                    e.x_scale = data.x_scale;
-                    e.y_scale = data.y_scale;
-                    e.z_scale = data.z_scale;
+                    e.set_x_scale(data.x_scale);
+                    e.set_y_scale(data.y_scale);
+                    e.set_z_scale(data.z_scale);
                     e.rotation = data.rotation;
                     e.normal = data.normal;
                     let _ = document.add_entity(EntityType::Insert(e));
