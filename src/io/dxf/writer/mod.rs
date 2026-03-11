@@ -69,7 +69,10 @@ impl<'a> DxfWriter<'a> {
 
     /// Write to a byte vector (useful for testing)
     pub fn write_to_vec(&self) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
+        // Pre-allocate based on entity count: ~512 bytes per entity is a reasonable estimate
+        let entity_count = self.document.entities().count();
+        let estimated = (entity_count + 64) * 512;
+        let mut buffer = Vec::with_capacity(estimated);
         self.write_to_writer(&mut buffer)?;
         Ok(buffer)
     }
