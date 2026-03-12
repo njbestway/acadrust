@@ -901,10 +901,10 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2007+
         if self.version.r2007_plus() {
-            // Grid flags BS 60
-            self.writer.write_bit_short(0);
+            // Grid flags BS 60 — adaptive grid enabled
+            self.writer.write_bit_short(2);
             // Grid major BS 61
-            self.writer.write_bit_short(0);
+            self.writer.write_bit_short(5);
         }
 
         // Common: External reference block handle (hard pointer)

@@ -1155,7 +1155,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2007+: Grid Major BS 61
         if self.version.r2007_plus() {
-            self.writer.write_bit_short(0);
+            self.writer.write_bit_short(if e.grid_major > 0 { e.grid_major } else { 5 });
         }
 
         // Status/UCS data (written for all versions)
