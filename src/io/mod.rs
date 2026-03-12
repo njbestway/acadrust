@@ -11,6 +11,9 @@
 pub mod dxf;
 pub mod dwg;
 
+#[cfg(feature = "import")]
+pub mod import;
+
 pub use dxf::{DxfReader, DxfWriter};
 pub use dwg::{DwgReader, DwgWriter};
 

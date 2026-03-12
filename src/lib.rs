@@ -167,6 +167,13 @@ pub use entities::acis::{SatDocument, SatHeader, SatVersion, SatRecord, SatPoint
 pub use entities::acis::{SatParser, SatWriter, SabWriter, SabReader};
 pub use entities::acis::primitives;
 
+// Re-export import types (when `import` feature is enabled)
+#[cfg(feature = "import")]
+pub use io::import::{
+    ColladaImporter, FbxImporter, GltfImporter, ImportConfig, ImportFormat, ObjImporter,
+    StlImporter, import_file,
+};
+
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

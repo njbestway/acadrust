@@ -73,6 +73,11 @@ pub enum DxfError {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    /// Error importing external CAD format (STL, COLLADA, STEP, IGES)
+    #[cfg(feature = "import")]
+    #[error("Import error: {0}")]
+    ImportError(String),
+
     /// Generic error with custom message
     #[error("{0}")]
     Custom(String),
