@@ -27,7 +27,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! acadrust = { version = "0.2.7", features = ["serde"] }
+//! acadrust = { version = "0.3.0", features = ["serde"] }
 //! ```
 //!
 //! ### Serialize an entity to JSON
@@ -65,7 +65,7 @@
 //!
 //! // Read
 //! let doc = DxfReader::from_file("input.dxf")?.read()?;
-//! println!("Entities: {}", doc.entities().len());
+//! println!("Entities: {}", doc.entities().count());
 //!
 //! // Write
 //! DxfWriter::new(&doc).write_to_file("output.dxf")?;
@@ -75,16 +75,19 @@
 //! ## Quick Start — DWG
 //!
 //! ```rust,ignore
-//! use acadrust::{CadDocument, DwgReader, DwgWriter};
+//! use acadrust::{CadDocument, DwgWriter};
+//! use acadrust::io::dwg::DwgReader;
 //! use acadrust::entities::*;
-//! use acadrust::types::Vector3;
+//! use acadrust::types::{Color, Vector3};
 //!
 //! // Read
-//! let doc = DwgReader::from_file("input.dwg")?.read()?;
+//! let mut reader = DwgReader::from_file("input.dwg")?;
+//! let doc = reader.read()?;
 //!
 //! // Create and write
 //! let mut doc = CadDocument::new();
-//! let line = Line::from_coords(0.0, 0.0, 0.0, 100.0, 50.0, 0.0);
+//! let mut line = Line::from_coords(0.0, 0.0, 0.0, 100.0, 50.0, 0.0);
+//! line.common.color = Color::RED;
 //! doc.add_entity(EntityType::Line(line))?;
 //! DwgWriter::write_to_file("output.dwg", &doc)?;
 //! # Ok::<(), acadrust::error::DxfError>(())

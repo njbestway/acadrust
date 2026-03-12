@@ -12,7 +12,7 @@ Inspired by [ACadSharp](https://github.com/DomCR/ACadSharp). Supports DXF (ASCII
 
 ```toml
 [dependencies]
-acadrust = "0.2.10"
+acadrust = "0.3.0"
 ```
 
 ```rust
@@ -66,6 +66,11 @@ fn main() -> acadrust::Result<()> {
     let mut reader = DwgReader::from_file("drawing.dwg")?;
     let doc = reader.read()?;
 
+    // Iterate entities
+    for entity in doc.entities() {
+        println!("{:?}", entity);
+    }
+
     // Create & Write DWG
     let mut doc = CadDocument::new();
     let mut line = Line::from_coords(0.0, 0.0, 0.0, 100.0, 50.0, 0.0);
@@ -89,22 +94,24 @@ fn main() -> acadrust::Result<()> {
     let mut doc = CadDocument::with_version(DxfVersion::AC1027);
 
     // Add geometry to model space
-    let line = acadrust::entities::Line {
-        start: Vector3::new(0.0, 0.0, 0.0),
-        end: Vector3::new(100.0, 100.0, 0.0),
-        ..Default::default()
-    };
+    let line = acadrust::entities::Line::from_coords(0.0, 0.0, 0.0, 100.0, 100.0, 0.0);
     doc.add_entity(EntityType::Line(line))?;
 
-    // Add viewport to default Layout1
-    let mut vp = Viewport::new();
-    vp.id = 1;
-    vp.center = Vector3::new(148.5, 105.0, 0.0);
-    vp.width = 297.0;
-    vp.height = 210.0;
-    doc.add_paper_space_entity(EntityType::Viewport(vp))?;
+    // Overall viewport (ID=1) for default Layout1
+    let mut overall_vp = Viewport::new();
+    overall_vp.id = 1;
+    overall_vp.center = Vector3::new(148.5, 105.0, 0.0);
+    doc.add_paper_space_entity(EntityType::Viewport(overall_vp))?;
 
-    // Create additional layouts
+    // Detail viewport using builder pattern
+    let vp1 = Viewport::new()
+        .with_center(Vector3::new(148.5, 105.0, 0.0))
+        .with_view_target(Vector3::new(50.0, 50.0, 0.0))
+        .with_scale(1.0)
+        .with_locked();
+    doc.add_paper_space_entity(EntityType::Viewport(vp1))?;
+
+    // Create a second layout with its own viewport
     doc.add_layout("Layout2")?;
     let mut vp2 = Viewport::with_size(Vector3::new(200.0, 150.0, 0.0), 400.0, 300.0);
     vp2.id = 1;
@@ -139,6 +146,34 @@ Full API docs: [docs.rs/acadrust](https://docs.rs/acadrust)
 ---
 
 ## Changelog
+
+### 0.3.0
+
+- **ACI color support** — Full 256-entry AutoCAD Color Index (ACI) to RGB lookup table, `Color::rgb()` resolves index colors, `Color::approximate_index()` finds nearest ACI match for true colors
+
+- **Hatch edge fix** — Corrected hatch edge reading/writing issues
+
+- **LwPolyline bulge fix** — Fixed bulge value handling in parser and writer
+
+- **Performance optimizations** — Zero-allocation number formatting with `itoa`/`ryu`, buffered I/O, reduced memory allocations throughout DXF read/write pipeline. Parsing/writing speed are dramatically increased.
+
+- **Table entry deduplication** — `add_or_replace` for table entries eliminates handle collisions during read
+
+#### Breaking API change
+
+- **`BlockRecord` entity storage** — `BlockRecord` now stores `entity_handles: Vec<Handle>` instead of owning entities directly. All entities live in flat storage inside `CadDocument` with O(1) handle-based lookup. If you accessed block entities directly, use `doc.get_entity(handle)` instead:
+  ```rust
+  // Before (0.2.x): iterating block entities directly
+  // for entity in &block_record.entities { ... }
+
+  // After (0.3.0): resolve handles through the document
+  for &handle in &block_record.entity_handles {
+      if let Some(entity) = doc.get_entity(handle) {
+          // use entity
+      }
+  }
+  ```
+  The `CadDocument` public API (`add_entity()`, `entities()`, `get_entity()`, `get_entity_mut()`) is unchanged.
 
 ### 0.2.10
 
