@@ -1,8 +1,8 @@
 //! DXF binary reader
 
-use super::stream_reader::{DxfCodePair, DxfStreamReader};
+use super::stream_reader::{CodePairValue, DxfCodePair, DxfStreamReader};
 use crate::error::{DxfError, Result};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 /// Sentinel for binary DXF files
 pub const BINARY_SENTINEL: &[u8] = b"AutoCAD Binary DXF\r\n\x1a\x00";
@@ -10,7 +10,6 @@ pub const BINARY_SENTINEL: &[u8] = b"AutoCAD Binary DXF\r\n\x1a\x00";
 /// DXF binary file reader
 pub struct DxfBinaryReader<R: Read + Seek> {
     reader: BufReader<R>,
-    position: u64,
     peeked_pair: Option<DxfCodePair>,
     /// True for pre-AC1012 format (single-byte group codes)
     /// False for AC1012+ format (two-byte group codes)
@@ -45,7 +44,6 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
         
         Ok(Self {
             reader,
-            position: BINARY_SENTINEL.len() as u64,
             peeked_pair: None,
             use_single_byte_codes,
             str_buf: Vec::with_capacity(256),
@@ -62,13 +60,11 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e.into()),
             }
-            self.position += 1;
             
             if code_byte[0] == 255 {
                 // Extended code: next 2 bytes are the actual code
                 let mut ext_code = [0u8; 2];
                 self.reader.read_exact(&mut ext_code)?;
-                self.position += 2;
                 i16::from_le_bytes(ext_code) as i32
             } else {
                 code_byte[0] as i32
@@ -81,120 +77,96 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e.into()),
             }
-            self.position += 2;
             i16::from_le_bytes(code_bytes) as i32
         };
         
-        // Read value based on code type
-        let value = self.read_value_for_code(code)?;
-        
-        Ok(Some(DxfCodePair::new(code, value)))
+        // Read value based on code type and construct typed pair
+        self.read_pair_for_code(code)
     }
     
-    /// Read a value from the binary stream based on the group code
-    fn read_value_for_code(&mut self, code: i32) -> Result<String> {
+    /// Read a null-terminated string from the binary stream, reusing str_buf.
+    fn read_null_terminated_string(&mut self) -> Result<String> {
+        self.str_buf.clear();
+        self.reader.read_until(0, &mut self.str_buf)?;
+        // read_until includes the delimiter in the buffer
+        if self.str_buf.last() == Some(&0) {
+            self.str_buf.pop();
+        }
+        // Try UTF-8 first (borrow check), then fall back to lossy conversion
+        let s = match std::str::from_utf8(&self.str_buf) {
+            Ok(s) => s.to_owned(),
+            Err(_) => String::from_utf8_lossy(&self.str_buf).into_owned(),
+        };
+        self.str_buf.clear(); // keep the allocation for reuse
+        Ok(s)
+    }
+
+    /// Read a code/value pair from the binary stream for a given group code.
+    /// For numeric types, constructs DxfCodePair with pre-computed typed values
+    /// to avoid redundant string→number parsing in DxfCodePair::new().
+    fn read_pair_for_code(&mut self, code: i32) -> Result<Option<DxfCodePair>> {
         use crate::io::dxf::GroupCodeValueType;
         
         let value_type = GroupCodeValueType::from_raw_code(code);
         
-        match value_type {
+        let pair = match value_type {
             GroupCodeValueType::String => {
-                // Null-terminated string — reuse buffer
-                self.str_buf.clear();
-                loop {
-                    let mut byte = [0u8; 1];
-                    self.reader.read_exact(&mut byte)?;
-                    self.position += 1;
-                    
-                    if byte[0] == 0 {
-                        break;
-                    }
-                    self.str_buf.push(byte[0]);
-                }
-                
-                // Try UTF-8 first (zero-copy take), then fall back to lossy conversion
-                match String::from_utf8(std::mem::take(&mut self.str_buf)) {
-                    Ok(s) => {
-                        // Give the buffer back for next use
-                        self.str_buf = Vec::with_capacity(256);
-                        Ok(s)
-                    }
-                    Err(e) => {
-                        let bytes = e.into_bytes();
-                        let result = String::from_utf8_lossy(&bytes).into_owned();
-                        self.str_buf = bytes; // reclaim allocation
-                        Ok(result)
-                    }
-                }
+                let s = self.read_null_terminated_string()?;
+                DxfCodePair::new(code, s)
             }
             
             GroupCodeValueType::Double => {
-                // 8-byte double
                 let mut bytes = [0u8; 8];
                 self.reader.read_exact(&mut bytes)?;
-                self.position += 8;
-                
                 let value = f64::from_le_bytes(bytes);
-                // Use ryu for zero-allocation float-to-string
                 let mut buf = ryu::Buffer::new();
-                Ok(buf.format(value).to_owned())
+                let value_string = buf.format(value).to_owned();
+                DxfCodePair::new_typed(code, value_string, CodePairValue::Double(value))
             }
             
             GroupCodeValueType::Int16 | GroupCodeValueType::Byte => {
-                // 2-byte integer
                 let mut bytes = [0u8; 2];
                 self.reader.read_exact(&mut bytes)?;
-                self.position += 2;
-                
                 let value = i16::from_le_bytes(bytes);
                 let mut buf = itoa::Buffer::new();
-                Ok(buf.format(value).to_owned())
+                let value_string = buf.format(value).to_owned();
+                DxfCodePair::new_typed(code, value_string, CodePairValue::Int(value as i64))
             }
             
             GroupCodeValueType::Int32 => {
-                // 4-byte integer
                 let mut bytes = [0u8; 4];
                 self.reader.read_exact(&mut bytes)?;
-                self.position += 4;
-                
                 let value = i32::from_le_bytes(bytes);
                 let mut buf = itoa::Buffer::new();
-                Ok(buf.format(value).to_owned())
+                let value_string = buf.format(value).to_owned();
+                DxfCodePair::new_typed(code, value_string, CodePairValue::Int(value as i64))
             }
             
             GroupCodeValueType::Int64 => {
-                // 8-byte integer
                 let mut bytes = [0u8; 8];
                 self.reader.read_exact(&mut bytes)?;
-                self.position += 8;
-                
                 let value = i64::from_le_bytes(bytes);
                 let mut buf = itoa::Buffer::new();
-                Ok(buf.format(value).to_owned())
+                let value_string = buf.format(value).to_owned();
+                DxfCodePair::new_typed(code, value_string, CodePairValue::Int(value))
             }
             
             GroupCodeValueType::Bool => {
-                // 1-byte boolean
                 let mut byte = [0u8; 1];
                 self.reader.read_exact(&mut byte)?;
-                self.position += 1;
-                
-                Ok((if byte[0] != 0 { "1" } else { "0" }).to_owned())
+                let value = byte[0] != 0;
+                let value_string = if value { "1" } else { "0" }.to_owned();
+                DxfCodePair::new_typed(code, value_string, CodePairValue::Bool(value))
             }
             
             GroupCodeValueType::BinaryData => {
-                // Length-prefixed binary chunk: 1-byte length + N raw bytes
                 let mut len_byte = [0u8; 1];
                 self.reader.read_exact(&mut len_byte)?;
-                self.position += 1;
-                
                 let length = len_byte[0] as usize;
                 let mut data = vec![0u8; length];
                 if length > 0 {
                     self.reader.read_exact(&mut data)?;
-                    self.position += length as u64;
                 }
-                
                 // Convert raw bytes to uppercase hex string using lookup table
                 const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
                 let mut hex = String::with_capacity(length * 2);
@@ -202,38 +174,16 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
                     hex.push(HEX_CHARS[(b >> 4) as usize] as char);
                     hex.push(HEX_CHARS[(b & 0x0F) as usize] as char);
                 }
-                Ok(hex)
+                DxfCodePair::new(code, hex)
             }
 
             GroupCodeValueType::Handle | _ => {
-                // Null-terminated string — reuse buffer
-                self.str_buf.clear();
-                loop {
-                    let mut byte = [0u8; 1];
-                    self.reader.read_exact(&mut byte)?;
-                    self.position += 1;
-                    
-                    if byte[0] == 0 {
-                        break;
-                    }
-                    self.str_buf.push(byte[0]);
-                }
-                
-                // Handle values are ASCII hex digits, always valid UTF-8
-                match String::from_utf8(std::mem::take(&mut self.str_buf)) {
-                    Ok(s) => {
-                        self.str_buf = Vec::with_capacity(256);
-                        Ok(s)
-                    }
-                    Err(e) => {
-                        let bytes = e.into_bytes();
-                        let result = String::from_utf8_lossy(&bytes).into_owned();
-                        self.str_buf = bytes;
-                        Ok(result)
-                    }
-                }
+                let s = self.read_null_terminated_string()?;
+                DxfCodePair::new(code, s)
             }
-        }
+        };
+        
+        Ok(Some(pair))
     }
 }
 
@@ -269,7 +219,6 @@ impl<R: Read + Seek> DxfStreamReader for DxfBinaryReader<R> {
     
     fn reset(&mut self) -> Result<()> {
         self.reader.seek(SeekFrom::Start(0))?;
-        self.position = 0;
         self.peeked_pair = None;
         
         // Re-verify sentinel using stack array
@@ -285,7 +234,6 @@ impl<R: Read + Seek> DxfStreamReader for DxfBinaryReader<R> {
         self.reader.read_exact(&mut probe)?;
         self.reader.seek(SeekFrom::Start(BINARY_SENTINEL.len() as u64))?;
         
-        self.position = BINARY_SENTINEL.len() as u64;
         Ok(())
     }
 }

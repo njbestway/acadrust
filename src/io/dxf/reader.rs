@@ -45,7 +45,7 @@ pub struct DxfReader {
 impl DxfReader {
     /// Create a new DXF reader from any reader
     pub fn from_reader<R: Read + Seek + 'static>(reader: R) -> Result<Self> {
-        let mut buf_reader = BufReader::new(reader);
+        let mut buf_reader = BufReader::with_capacity(64 * 1024, reader);
 
         // Estimate entity count from stream size (~300 bytes per entity on average)
         let stream_size = buf_reader.seek(std::io::SeekFrom::End(0)).unwrap_or(0);
@@ -74,7 +74,7 @@ impl DxfReader {
     /// Create a new DXF reader from a file path
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
-        let mut buf_reader = BufReader::new(file);
+        let mut buf_reader = BufReader::with_capacity(64 * 1024, file);
 
         // Estimate entity count from stream size (~300 bytes per entity on average)
         let stream_size = buf_reader.seek(std::io::SeekFrom::End(0)).unwrap_or(0);

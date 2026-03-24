@@ -72,6 +72,18 @@ impl DxfCodePair {
         }
     }
     
+    /// Create a code/value pair with a pre-computed typed value.
+    /// Skips string→typed parsing, used by the binary DXF reader.
+    pub(crate) fn new_typed(code: i32, value_string: String, typed_value: CodePairValue) -> Self {
+        let dxf_code = DxfCode::from_i32(code);
+        Self {
+            code,
+            dxf_code,
+            value_string,
+            typed_value,
+        }
+    }
+
     /// Get value as string
     #[allow(dead_code)]
     pub fn as_string(&self) -> &str {

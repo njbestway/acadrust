@@ -1293,7 +1293,7 @@ impl<'a> SectionReader<'a> {
                 90 => { if let Some(v) = pair.as_i32() { obj.face_modifier = v; } }
                 91 => { if let Some(v) = pair.as_i32() { obj.edge_model = v; } }
                 92 => { if let Some(v) = pair.as_i32() { obj.edge_style = v; } }
-                291 => obj.internal_use_only = pair.value_string.trim() == "1",
+                291 => obj.internal_use_only = pair.as_bool().unwrap_or(false),
                 _ => {}
             }
         }
@@ -1374,7 +1374,7 @@ impl<'a> SectionReader<'a> {
             match pair.code {
                 5 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { obj.handle = Handle::new(h); } }
                 330 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { obj.owner = Handle::new(h); } }
-                280 => obj.hard_owner = pair.value_string.trim() == "1",
+                280 => obj.hard_owner = pair.as_i16().map(|v| v != 0).unwrap_or(false),
                 281 => { if let Some(v) = pair.as_i16() { obj.duplicate_cloning = v; } }
                 3 => { current_key = Some(pair.value_string.clone()); }
                 340 => {
