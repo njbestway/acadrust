@@ -776,9 +776,7 @@ impl Entity for PolyfaceMesh {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for v in &mut self.vertices {
-            v.location = v.location + offset;
-        }
+        super::translate::translate_polyface_mesh(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -786,21 +784,11 @@ impl Entity for PolyfaceMesh {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all vertices
-        for v in &mut self.vertices {
-            v.location = transform.apply(v.location);
-        }
-        
-        // Transform normal
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_polyface_mesh(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        // Mirror reverses face winding order
-        for face in &mut self.faces {
-            face.reverse();
-        }
+        super::mirror::mirror_polyface_mesh(self, transform);
     }
 }
 

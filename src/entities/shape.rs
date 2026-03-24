@@ -378,7 +378,7 @@ impl Entity for Shape {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
+        super::translate::translate_shape(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -386,29 +386,11 @@ impl Entity for Shape {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform insertion point
-        self.insertion_point = transform.apply(self.insertion_point);
-        
-        // Scale the size
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.size *= scale_factor;
-        
-        // Transform normal
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_shape(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        // Mirror the rotation by reflecting the direction vector
-        let dir = Vector3::new(self.rotation.cos(), self.rotation.sin(), 0.0);
-        let mirrored_dir = transform.apply_rotation(dir);
-        self.rotation = mirrored_dir.y.atan2(mirrored_dir.x);
-        // Negate the relative X scale to flip the shape horizontally
-        self.relative_x_scale = -self.relative_x_scale;
-        // Mirror flips the oblique angle direction
-        self.oblique_angle = -self.oblique_angle;
+        super::mirror::mirror_shape(self, transform);
     }
 }
 

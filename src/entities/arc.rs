@@ -181,7 +181,7 @@ impl Entity for Arc {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.center = self.center + offset;
+        super::translate::translate_arc(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -189,43 +189,11 @@ impl Entity for Arc {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform center point
-        self.center = transform.apply(self.center);
-        
-        // Extract scale factor from transform
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        
-        // Scale the radius
-        self.radius *= scale_factor;
-        
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
-        
-        // Note: start_angle and end_angle remain the same for rotation around normal
-        // For general 3D transforms, angle recalculation would be needed
+        super::transform::transform_arc(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        // Save original endpoints before transforming
-        let start_pt = self.start_point();
-        let end_pt = self.end_point();
-        
-        // Apply the geometric transform (center, radius, normal)
-        self.apply_transform(transform);
-        
-        // Mirror the original endpoints and recalculate angles
-        // Mirror reverses arc direction → swap start/end
-        let mirrored_start = transform.apply(end_pt);
-        let mirrored_end = transform.apply(start_pt);
-        
-        self.start_angle = crate::types::normalize_angle(
-            (mirrored_start.y - self.center.y).atan2(mirrored_start.x - self.center.x),
-        );
-        self.end_angle = crate::types::normalize_angle(
-            (mirrored_end.y - self.center.y).atan2(mirrored_end.x - self.center.x),
-        );
+        super::mirror::mirror_arc(self, transform);
     }
 }
 

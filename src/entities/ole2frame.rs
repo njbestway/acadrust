@@ -91,12 +91,10 @@ impl Entity for Ole2Frame {
             .unwrap_or_else(|| BoundingBox3D::from_point(self.upper_left_corner))
     }
     fn translate(&mut self, offset: Vector3) {
-        self.upper_left_corner = self.upper_left_corner + offset;
-        self.lower_right_corner = self.lower_right_corner + offset;
+        super::translate::translate_ole2frame(self, offset);
     }
     fn entity_type(&self) -> &'static str { "OLE2FRAME" }
     fn apply_transform(&mut self, transform: &Transform) {
-        self.upper_left_corner = transform.apply(self.upper_left_corner);
-        self.lower_right_corner = transform.apply(self.lower_right_corner);
+        super::transform::transform_ole2frame(self, transform);
     }
 }

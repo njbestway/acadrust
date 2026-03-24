@@ -126,9 +126,7 @@ impl Entity for Block {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.base_point.x += offset.x;
-        self.base_point.y += offset.y;
-        self.base_point.z += offset.z;
+        super::translate::translate_block(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -136,7 +134,7 @@ impl Entity for Block {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        self.base_point = transform.apply(self.base_point);
+        super::transform::transform_block(self, transform);
     }
 }
 
@@ -196,7 +194,7 @@ impl Entity for BlockEnd {
     }
 
     fn translate(&mut self, _offset: Vector3) {
-        // BlockEnd has no geometry to translate
+        super::translate::translate_block_end(self, _offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -204,7 +202,7 @@ impl Entity for BlockEnd {
     }
     
     fn apply_transform(&mut self, _transform: &crate::types::Transform) {
-        // BlockEnd is a marker entity with no geometry to transform
+        super::transform::transform_block_end(self, _transform);
     }
 }
 

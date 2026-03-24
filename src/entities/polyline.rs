@@ -380,9 +380,7 @@ impl Entity for Polyline2D {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for vertex in &mut self.vertices {
-            vertex.location = vertex.location + offset;
-        }
+        super::translate::translate_polyline2d(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -390,20 +388,11 @@ impl Entity for Polyline2D {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all vertex locations
-        for vertex in &mut self.vertices {
-            vertex.location = transform.apply(vertex.location);
-        }
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_polyline2d(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        // Mirror reverses arc direction — negate all vertex bulge values
-        for vertex in &mut self.vertices {
-            vertex.bulge = -vertex.bulge;
-        }
+        super::mirror::mirror_polyline2d(self, transform);
     }
 }
 
@@ -466,9 +455,7 @@ impl Entity for Polyline {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for vertex in &mut self.vertices {
-            vertex.location = vertex.location + offset;
-        }
+        super::translate::translate_polyline(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -476,10 +463,7 @@ impl Entity for Polyline {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all vertex locations
-        for vertex in &mut self.vertices {
-            vertex.location = transform.apply(vertex.location);
-        }
+        super::transform::transform_polyline(self, transform);
     }
 }
 

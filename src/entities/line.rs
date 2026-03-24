@@ -125,8 +125,7 @@ impl Entity for Line {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.start = self.start + offset;
-        self.end = self.end + offset;
+        super::translate::translate_line(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -134,10 +133,7 @@ impl Entity for Line {
     }
     
     fn apply_transform(&mut self, transform: &Transform) {
-        self.start = transform.apply(self.start);
-        self.end = transform.apply(self.end);
-        // Transform the normal vector (rotation only, no translation)
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_line(self, transform);
     }
 }
 

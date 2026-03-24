@@ -673,26 +673,7 @@ impl Entity for Solid3D {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        // Translate point of reference
-        self.point_of_reference = self.point_of_reference + offset;
-
-        // Translate all wireframe points
-        for wire in &mut self.wires {
-            for pt in &mut wire.points {
-                *pt = *pt + offset;
-            }
-            wire.translation = wire.translation + offset;
-        }
-
-        // Translate silhouette targets
-        for silhouette in &mut self.silhouettes {
-            silhouette.target = silhouette.target + offset;
-            for wire in &mut silhouette.wires {
-                for pt in &mut wire.points {
-                    *pt = *pt + offset;
-                }
-            }
-        }
+        super::translate::translate_solid3d(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -700,28 +681,7 @@ impl Entity for Solid3D {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform point of reference
-        self.point_of_reference = transform.apply(self.point_of_reference);
-        
-        // Transform all wireframe points
-        for wire in &mut self.wires {
-            for pt in &mut wire.points {
-                *pt = transform.apply(*pt);
-            }
-            wire.translation = transform.apply(wire.translation);
-        }
-        
-        // Transform silhouette data
-        for silhouette in &mut self.silhouettes {
-            silhouette.target = transform.apply(silhouette.target);
-            silhouette.view_direction = transform.apply_rotation(silhouette.view_direction).normalize();
-            silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
-            for wire in &mut silhouette.wires {
-                for pt in &mut wire.points {
-                    *pt = transform.apply(*pt);
-                }
-            }
-        }
+        super::transform::transform_solid3d(self, transform);
     }
 }
 
@@ -874,12 +834,7 @@ impl Entity for Region {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.point_of_reference = self.point_of_reference + offset;
-        for wire in &mut self.wires {
-            for pt in &mut wire.points {
-                *pt = *pt + offset;
-            }
-        }
+        super::translate::translate_region(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -887,15 +842,7 @@ impl Entity for Region {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform point of reference
-        self.point_of_reference = transform.apply(self.point_of_reference);
-        
-        // Transform all wireframe points
-        for wire in &mut self.wires {
-            for pt in &mut wire.points {
-                *pt = transform.apply(*pt);
-            }
-        }
+        super::transform::transform_region(self, transform);
     }
 }
 
@@ -1048,12 +995,7 @@ impl Entity for Body {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.point_of_reference = self.point_of_reference + offset;
-        for wire in &mut self.wires {
-            for pt in &mut wire.points {
-                *pt = *pt + offset;
-            }
-        }
+        super::translate::translate_body(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -1061,15 +1003,7 @@ impl Entity for Body {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform point of reference
-        self.point_of_reference = transform.apply(self.point_of_reference);
-        
-        // Transform all wireframe points
-        for wire in &mut self.wires {
-            for pt in &mut wire.points {
-                *pt = transform.apply(*pt);
-            }
-        }
+        super::transform::transform_body(self, transform);
     }
 }
 

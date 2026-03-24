@@ -1334,7 +1334,7 @@ impl Entity for Table {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
+        super::translate::translate_table(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -1342,24 +1342,7 @@ impl Entity for Table {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform insertion point
-        self.insertion_point = transform.apply(self.insertion_point);
-        
-        // Transform direction vectors
-        self.horizontal_direction = transform.apply_rotation(self.horizontal_direction).normalize();
-        self.normal = transform.apply_rotation(self.normal).normalize();
-        
-        // Scale column widths and row heights
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        
-        for col in &mut self.columns {
-            col.width *= scale_factor;
-        }
-        for row in &mut self.rows {
-            row.height *= scale_factor;
-        }
+        super::transform::transform_table(self, transform);
     }
 }
 

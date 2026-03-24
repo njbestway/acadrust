@@ -473,8 +473,7 @@ impl Entity for AttributeDefinition {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
-        self.alignment_point = self.alignment_point + offset;
+        super::translate::translate_attribute_definition(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -482,18 +481,7 @@ impl Entity for AttributeDefinition {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform both insertion and alignment points
-        self.insertion_point = transform.apply(self.insertion_point);
-        self.alignment_point = transform.apply(self.alignment_point);
-        
-        // Transform normal
-        self.normal = transform.apply_rotation(self.normal).normalize();
-        
-        // Scale text height
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.height *= scale_factor;
+        super::transform::transform_attribute_definition(self, transform);
     }
 }
 

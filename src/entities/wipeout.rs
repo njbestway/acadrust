@@ -564,7 +564,7 @@ impl Entity for Wipeout {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
+        super::translate::translate_wipeout(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -572,19 +572,7 @@ impl Entity for Wipeout {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform insertion point
-        self.insertion_point = transform.apply(self.insertion_point);
-        
-        // Transform U and V vectors (direction with scale)
-        self.u_vector = transform.apply_rotation(self.u_vector);
-        self.v_vector = transform.apply_rotation(self.v_vector);
-        
-        // Scale is embedded in u_vector and v_vector lengths
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.u_vector = self.u_vector * scale_factor;
-        self.v_vector = self.v_vector * scale_factor;
+        super::transform::transform_wipeout(self, transform);
     }
 }
 

@@ -666,10 +666,7 @@ impl Entity for MLine {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.start_point = self.start_point + offset;
-        for vertex in &mut self.vertices {
-            vertex.position = vertex.position + offset;
-        }
+        super::translate::translate_mline(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -677,18 +674,7 @@ impl Entity for MLine {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform start point
-        self.start_point = transform.apply(self.start_point);
-        
-        // Transform all vertex positions and directions
-        for vertex in &mut self.vertices {
-            vertex.position = transform.apply(vertex.position);
-            vertex.direction = transform.apply_rotation(vertex.direction).normalize();
-            vertex.miter = transform.apply_rotation(vertex.miter).normalize();
-        }
-        
-        // Transform normal
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_mline(self, transform);
     }
 }
 

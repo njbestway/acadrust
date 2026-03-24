@@ -1339,6 +1339,27 @@ impl CadDocument {
         Some(&mut self.entities[idx])
     }
 
+    /// Explode an entity into simpler primitives, allocating valid handles.
+    ///
+    /// Each resulting entity receives a unique handle from the document's
+    /// handle allocator and inherits the original entity's owner handle.
+    /// The caller can then add the returned entities to the document via
+    /// [`add_entity`](Self::add_entity) or use them directly.
+    ///
+    /// Returns an empty `Vec` for atomic entities that cannot be decomposed.
+    pub fn explode_entity(&mut self, entity: &EntityType) -> Vec<EntityType> {
+        let mut parts = entity.explode();
+        let owner = entity.common().owner_handle;
+        for part in &mut parts {
+            let h = self.allocate_handle();
+            part.as_entity_mut().set_handle(h);
+            if !owner.is_null() && part.common().owner_handle.is_null() {
+                part.common_mut().owner_handle = owner;
+            }
+        }
+        parts
+    }
+
     /// Add an entity to the default paper space (`*Paper_Space` / "Layout1").
     ///
     /// This sets the entity's owner to the `*Paper_Space` block record and

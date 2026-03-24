@@ -138,7 +138,7 @@ impl Entity for Ellipse {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.center = self.center + offset;
+        super::translate::translate_ellipse(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -146,30 +146,11 @@ impl Entity for Ellipse {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform center point
-        self.center = transform.apply(self.center);
-        
-        // Transform major axis (direction and magnitude)
-        self.major_axis = transform.apply_rotation(self.major_axis);
-        
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
-        
-        // Note: minor_axis_ratio stays the same for uniform scaling
-        // For non-uniform scaling, the ellipse might need to be recalculated
+        super::transform::transform_ellipse(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        
-        // Mirror reverses the parametric direction of the ellipse.
-        // For a full ellipse (0..2π) no parameter change is needed.
-        if !self.is_full() {
-            let new_start = -self.end_parameter;
-            let new_end = -self.start_parameter;
-            self.start_parameter = new_start;
-            self.end_parameter = new_end;
-        }
+        super::mirror::mirror_ellipse(self, transform);
     }
 }
 

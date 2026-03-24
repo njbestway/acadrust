@@ -132,7 +132,7 @@ impl Entity for Circle {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.center = self.center + offset;
+        super::translate::translate_circle(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -140,20 +140,7 @@ impl Entity for Circle {
     }
     
     fn apply_transform(&mut self, transform: &Transform) {
-        // Transform center point
-        self.center = transform.apply(self.center);
-        
-        // For scaling, we need to extract the scale factor
-        // Apply to a unit vector to determine scale
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        
-        // Scale the radius (uses uniform scaling assumption)
-        self.radius *= scale_factor;
-        
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_circle(self, transform);
     }
 }
 

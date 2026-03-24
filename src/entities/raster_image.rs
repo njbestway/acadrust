@@ -596,7 +596,7 @@ impl Entity for RasterImage {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
+        super::translate::translate_raster_image(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -604,19 +604,7 @@ impl Entity for RasterImage {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform insertion point
-        self.insertion_point = transform.apply(self.insertion_point);
-        
-        // Transform U and V vectors
-        self.u_vector = transform.apply_rotation(self.u_vector);
-        self.v_vector = transform.apply_rotation(self.v_vector);
-        
-        // Scale vectors
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.u_vector = self.u_vector * scale_factor;
-        self.v_vector = self.v_vector * scale_factor;
+        super::transform::transform_raster_image(self, transform);
     }
 }
 

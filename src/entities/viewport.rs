@@ -610,7 +610,7 @@ impl Entity for Viewport {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.center = self.center + offset;
+        super::translate::translate_viewport(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -618,24 +618,7 @@ impl Entity for Viewport {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform center point
-        self.center = transform.apply(self.center);
-        
-        // Scale width and height
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.width *= scale_factor;
-        self.height *= scale_factor;
-        
-        // Transform view direction and UCS axes
-        self.view_direction = transform.apply_rotation(self.view_direction).normalize();
-        self.ucs_x_axis = transform.apply_rotation(self.ucs_x_axis).normalize();
-        self.ucs_y_axis = transform.apply_rotation(self.ucs_y_axis).normalize();
-        
-        // Transform UCS origin and view target
-        self.ucs_origin = transform.apply(self.ucs_origin);
-        self.view_target = transform.apply(self.view_target);
+        super::transform::transform_viewport(self, transform);
     }
 }
 

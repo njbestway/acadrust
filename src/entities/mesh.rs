@@ -705,9 +705,7 @@ impl Entity for Mesh {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for vertex in &mut self.vertices {
-            *vertex = *vertex + offset;
-        }
+        super::translate::translate_mesh(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -715,18 +713,11 @@ impl Entity for Mesh {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all vertices
-        for vertex in &mut self.vertices {
-            *vertex = transform.apply(*vertex);
-        }
+        super::transform::transform_mesh(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        // Mirror reverses face winding order — flip normals to maintain correct orientation
-        for face in &mut self.faces {
-            face.reverse();
-        }
+        super::mirror::mirror_mesh(self, transform);
     }
 }
 

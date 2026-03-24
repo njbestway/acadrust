@@ -183,11 +183,7 @@ impl Entity for LwPolyline {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for vertex in &mut self.vertices {
-            vertex.location.x += offset.x;
-            vertex.location.y += offset.y;
-        }
-        self.elevation += offset.z;
+        super::translate::translate_lwpolyline(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -195,29 +191,11 @@ impl Entity for LwPolyline {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all vertex locations
-        for vertex in &mut self.vertices {
-            let pt3d = Vector3::new(vertex.location.x, vertex.location.y, self.elevation);
-            let transformed = transform.apply(pt3d);
-            vertex.location.x = transformed.x;
-            vertex.location.y = transformed.y;
-        }
-        // Update elevation from the last transformed point
-        if !self.vertices.is_empty() {
-            let pt3d = Vector3::new(0.0, 0.0, self.elevation);
-            self.elevation = transform.apply(pt3d).z;
-        }
-        
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_lwpolyline(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        // Mirror reverses arc direction — negate all bulge values
-        for vertex in &mut self.vertices {
-            vertex.bulge = -vertex.bulge;
-        }
+        super::mirror::mirror_lwpolyline(self, transform);
     }
 }
 

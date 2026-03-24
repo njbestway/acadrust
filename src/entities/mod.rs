@@ -51,6 +51,10 @@ pub mod seqend;
 pub mod ole2frame;
 pub mod polygon_mesh;
 pub mod unknown_entity;
+pub mod explode;
+pub mod translate;
+pub mod transform;
+pub mod mirror;
 
 pub use point::Point;
 pub use line::Line;

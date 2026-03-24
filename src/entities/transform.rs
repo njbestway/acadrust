@@ -1,0 +1,910 @@
+//! Centralized `apply_transform` implementations for all entity types.
+//!
+//! Each entity's transformation logic is defined here as a standalone
+//! function, and [`EntityType`] exposes a convenience dispatch method.
+
+use super::*;
+use crate::types::{Matrix3, Transform, Vector2, Vector3};
+
+// ── Point ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_point(e: &mut Point, transform: &Transform) {
+    e.location = transform.apply(e.location);
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Line ─────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_line(e: &mut Line, transform: &Transform) {
+    e.start = transform.apply(e.start);
+    e.end = transform.apply(e.end);
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Circle ───────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_circle(e: &mut Circle, transform: &Transform) {
+    e.center = transform.apply(e.center);
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.radius *= scale_factor;
+
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Arc ──────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_arc(e: &mut Arc, transform: &Transform) {
+    e.center = transform.apply(e.center);
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.radius *= scale_factor;
+
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Ellipse ──────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_ellipse(e: &mut Ellipse, transform: &Transform) {
+    e.center = transform.apply(e.center);
+    e.major_axis = transform.apply_rotation(e.major_axis);
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Polyline (3D heavy) ──────────────────────────────────────────────────────
+
+pub(crate) fn transform_polyline(e: &mut Polyline, transform: &Transform) {
+    for vertex in &mut e.vertices {
+        vertex.location = transform.apply(vertex.location);
+    }
+}
+
+// ── Polyline2D ───────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_polyline2d(e: &mut Polyline2D, transform: &Transform) {
+    for vertex in &mut e.vertices {
+        vertex.location = transform.apply(vertex.location);
+    }
+}
+
+// ── Polyline3D ───────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_polyline3d(e: &mut Polyline3D, transform: &Transform) {
+    for v in &mut e.vertices {
+        v.position = transform.apply(v.position);
+    }
+}
+
+// ── LwPolyline ───────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_lwpolyline(e: &mut LwPolyline, transform: &Transform) {
+    for vertex in &mut e.vertices {
+        let pt3d = Vector3::new(vertex.location.x, vertex.location.y, e.elevation);
+        let transformed = transform.apply(pt3d);
+        vertex.location.x = transformed.x;
+        vertex.location.y = transformed.y;
+    }
+    if !e.vertices.is_empty() {
+        let pt3d = Vector3::new(0.0, 0.0, e.elevation);
+        e.elevation = transform.apply(pt3d).z;
+    }
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Text ─────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_text(e: &mut Text, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    if let Some(ref mut align) = e.alignment_point {
+        *align = transform.apply(*align);
+    }
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.height *= scale_factor;
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── MText ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_mtext(e: &mut MText, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.height *= scale_factor;
+    e.rectangle_width *= scale_factor;
+    if let Some(ref mut h) = e.rectangle_height {
+        *h *= scale_factor;
+    }
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Spline ───────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_spline(e: &mut Spline, transform: &Transform) {
+    for point in &mut e.control_points {
+        *point = transform.apply(*point);
+    }
+    for point in &mut e.fit_points {
+        *point = transform.apply(*point);
+    }
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Dimension ────────────────────────────────────────────────────────────────
+
+// Dimension uses the default Entity trait implementation (extract translation).
+
+// ── Hatch ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
+    let old_normal = e.normal;
+    let old_elevation = e.elevation;
+
+    let new_normal = transform.apply_rotation(old_normal).normalize();
+
+    let old_ocs_to_wcs = Matrix3::arbitrary_axis(old_normal);
+    let new_wcs_to_ocs = Matrix3::arbitrary_axis(new_normal).transpose();
+
+    let origin_wcs = old_ocs_to_wcs * Vector3::new(0.0, 0.0, old_elevation);
+    let new_origin_wcs = transform.apply(origin_wcs);
+    let new_origin_ocs = new_wcs_to_ocs * new_origin_wcs;
+    let new_elevation = new_origin_ocs.z;
+
+    let ocs_x_wcs = old_ocs_to_wcs * Vector3::UNIT_X;
+    let ocs_y_wcs = old_ocs_to_wcs * Vector3::UNIT_Y;
+
+    let trans_ocs_x_wcs = transform.apply_rotation(ocs_x_wcs);
+    let trans_ocs_y_wcs = transform.apply_rotation(ocs_y_wcs);
+
+    let scale_x = trans_ocs_x_wcs.length();
+    let scale_y = trans_ocs_y_wcs.length();
+
+    let is_uniform =
+        (scale_x - scale_y).abs() < 1e-10 && trans_ocs_x_wcs.dot(&trans_ocs_y_wcs).abs() < 1e-10;
+
+    let x_in_new_ocs = new_wcs_to_ocs * trans_ocs_x_wcs;
+    let y_in_new_ocs = new_wcs_to_ocs * trans_ocs_y_wcs;
+    let is_flipped =
+        (x_in_new_ocs.x * y_in_new_ocs.y - x_in_new_ocs.y * y_in_new_ocs.x) < 0.0;
+
+    let transform_ocs_point = |p: Vector2| -> Vector2 {
+        let p_wcs = old_ocs_to_wcs * Vector3::new(p.x, p.y, old_elevation);
+        let p_new_wcs = transform.apply(p_wcs);
+        let p_new_ocs = new_wcs_to_ocs * p_new_wcs;
+        Vector2::new(p_new_ocs.x, p_new_ocs.y)
+    };
+
+    let transform_ocs_angle = |angle_rad: f64| -> f64 {
+        let p_ocs = Vector2::new(angle_rad.cos(), angle_rad.sin());
+        let p_wcs_dir = old_ocs_to_wcs * Vector3::new(p_ocs.x, p_ocs.y, 0.0);
+        let transformed_wcs_dir = transform.apply_rotation(p_wcs_dir);
+        let transformed_ocs_dir = new_wcs_to_ocs * transformed_wcs_dir;
+        let mut new_angle_rad = transformed_ocs_dir.y.atan2(transformed_ocs_dir.x);
+        if new_angle_rad < 0.0 {
+            new_angle_rad += 2.0 * std::f64::consts::PI;
+        }
+        new_angle_rad
+    };
+
+    for path in &mut e.paths {
+        for edge in &mut path.edges {
+            match edge {
+                BoundaryEdge::Line(line) => {
+                    line.start = transform_ocs_point(line.start);
+                    line.end = transform_ocs_point(line.end);
+                }
+                BoundaryEdge::CircularArc(arc) => {
+                    let new_start = transform_ocs_angle(arc.start_angle);
+                    let new_end = transform_ocs_angle(arc.end_angle);
+                    let center = transform_ocs_point(arc.center);
+
+                    if is_uniform {
+                        arc.center = center;
+                        arc.radius *= scale_x;
+                        if is_flipped {
+                            arc.counter_clockwise = !arc.counter_clockwise;
+                        }
+                        arc.start_angle = new_start;
+                        arc.end_angle = new_end;
+                    } else {
+                        let major_axis_wcs = trans_ocs_x_wcs * arc.radius;
+                        let major_axis_ocs_3d = new_wcs_to_ocs * major_axis_wcs;
+                        let major_axis_endpoint =
+                            Vector2::new(major_axis_ocs_3d.x, major_axis_ocs_3d.y);
+
+                        let mut ellipse = EllipticArcEdge {
+                            center,
+                            major_axis_endpoint,
+                            minor_axis_ratio: scale_y / scale_x,
+                            start_angle: arc.start_angle,
+                            end_angle: arc.end_angle,
+                            counter_clockwise: arc.counter_clockwise,
+                        };
+                        if is_flipped {
+                            ellipse.counter_clockwise = !ellipse.counter_clockwise;
+                        }
+
+                        if ellipse.minor_axis_ratio > 1.0 {
+                            let old_major = ellipse.major_axis_endpoint;
+                            let old_major_len = old_major.length();
+                            let new_major_len = old_major_len * ellipse.minor_axis_ratio;
+                            let new_major_dir =
+                                Vector2::new(-old_major.y, old_major.x).normalize();
+                            ellipse.major_axis_endpoint = new_major_dir * new_major_len;
+                            ellipse.minor_axis_ratio = 1.0 / ellipse.minor_axis_ratio;
+                            ellipse.start_angle -= std::f64::consts::FRAC_PI_2;
+                            ellipse.end_angle -= std::f64::consts::FRAC_PI_2;
+                        }
+
+                        *edge = BoundaryEdge::EllipticArc(ellipse);
+                    }
+                }
+                BoundaryEdge::EllipticArc(ellipse) => {
+                    let center = transform_ocs_point(ellipse.center);
+
+                    let old_major_wcs = old_ocs_to_wcs
+                        * Vector3::new(
+                            ellipse.major_axis_endpoint.x,
+                            ellipse.major_axis_endpoint.y,
+                            0.0,
+                        );
+                    let old_major_len = ellipse.major_axis_endpoint.length();
+                    let old_minor_len = old_major_len * ellipse.minor_axis_ratio;
+                    let old_minor_ocs_dir = Vector2::new(
+                        -ellipse.major_axis_endpoint.y,
+                        ellipse.major_axis_endpoint.x,
+                    )
+                    .normalize();
+                    let old_minor_wcs = old_ocs_to_wcs
+                        * Vector3::new(
+                            old_minor_ocs_dir.x * old_minor_len,
+                            old_minor_ocs_dir.y * old_minor_len,
+                            0.0,
+                        );
+
+                    let new_major_wcs = transform.apply_rotation(old_major_wcs);
+                    let new_minor_wcs = transform.apply_rotation(old_minor_wcs);
+
+                    let new_major_ocs_3d = new_wcs_to_ocs * new_major_wcs;
+                    let new_minor_ocs_3d = new_wcs_to_ocs * new_minor_wcs;
+
+                    let new_major_ocs = Vector2::new(new_major_ocs_3d.x, new_major_ocs_3d.y);
+                    let new_minor_ocs = Vector2::new(new_minor_ocs_3d.x, new_minor_ocs_3d.y);
+
+                    let new_major_len = new_major_ocs.length();
+                    let new_minor_len = new_minor_ocs.length();
+
+                    ellipse.center = center;
+                    if is_flipped {
+                        ellipse.counter_clockwise = !ellipse.counter_clockwise;
+                    }
+
+                    if new_minor_len > new_major_len + 1e-12 {
+                        ellipse.major_axis_endpoint = new_minor_ocs;
+                        ellipse.minor_axis_ratio = new_major_len / new_minor_len;
+                        ellipse.start_angle -= std::f64::consts::FRAC_PI_2;
+                        ellipse.end_angle -= std::f64::consts::FRAC_PI_2;
+                    } else {
+                        ellipse.major_axis_endpoint = new_major_ocs;
+                        ellipse.minor_axis_ratio = if new_major_len > 1e-12 {
+                            new_minor_len / new_major_len
+                        } else {
+                            1.0
+                        };
+                    }
+                }
+                BoundaryEdge::Spline(spline) => {
+                    for cp in &mut spline.control_points {
+                        let p_wcs =
+                            old_ocs_to_wcs * Vector3::new(cp.x, cp.y, old_elevation);
+                        let p_new_wcs = transform.apply(p_wcs);
+                        let p_new_ocs = new_wcs_to_ocs * p_new_wcs;
+                        cp.x = p_new_ocs.x;
+                        cp.y = p_new_ocs.y;
+                    }
+                    for fp in &mut spline.fit_points {
+                        *fp = transform_ocs_point(*fp);
+                    }
+                    let trans_dir = |d: Vector2| -> Vector2 {
+                        let d_wcs = old_ocs_to_wcs * Vector3::new(d.x, d.y, 0.0);
+                        let d_new_wcs = transform.apply_rotation(d_wcs);
+                        let d_new_ocs = new_wcs_to_ocs * d_new_wcs;
+                        Vector2::new(d_new_ocs.x, d_new_ocs.y)
+                    };
+                    spline.start_tangent = trans_dir(spline.start_tangent);
+                    spline.end_tangent = trans_dir(spline.end_tangent);
+                }
+                BoundaryEdge::Polyline(poly) => {
+                    for v in &mut poly.vertices {
+                        let t = transform_ocs_point(Vector2::new(v.x, v.y));
+                        v.x = t.x;
+                        v.y = t.y;
+                        if is_flipped {
+                            v.z = -v.z;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for seed in &mut e.seed_points {
+        *seed = transform_ocs_point(*seed);
+    }
+
+    let p_dir = Vector2::new(e.pattern_angle.cos(), e.pattern_angle.sin());
+    let p_wcs_dir = old_ocs_to_wcs * Vector3::new(p_dir.x, p_dir.y, 0.0);
+    let transformed_p_wcs_dir = transform.apply_rotation(p_wcs_dir);
+    let transformed_p_ocs_dir = new_wcs_to_ocs * transformed_p_wcs_dir;
+    e.pattern_angle = transformed_p_ocs_dir.y.atan2(transformed_p_ocs_dir.x);
+    e.pattern_scale *= scale_x;
+
+    for line in &mut e.pattern.lines {
+        let l_dir = Vector2::new(line.angle.cos(), line.angle.sin());
+        let l_wcs_dir = old_ocs_to_wcs * Vector3::new(l_dir.x, l_dir.y, 0.0);
+        let transformed_l_wcs_dir = transform.apply_rotation(l_wcs_dir);
+        let transformed_l_ocs_dir = new_wcs_to_ocs * transformed_l_wcs_dir;
+        line.angle = transformed_l_ocs_dir.y.atan2(transformed_l_ocs_dir.x);
+
+        line.base_point = transform_ocs_point(line.base_point);
+
+        let off_wcs = old_ocs_to_wcs * Vector3::new(line.offset.x, line.offset.y, 0.0);
+        let transformed_off_wcs = transform.apply_rotation(off_wcs);
+        let transformed_off_ocs = new_wcs_to_ocs * transformed_off_wcs;
+        line.offset = Vector2::new(transformed_off_ocs.x, transformed_off_ocs.y);
+
+        for dash in &mut line.dash_lengths {
+            *dash *= scale_x;
+        }
+    }
+
+    if e.gradient_color.enabled {
+        let g_dir = Vector2::new(
+            e.gradient_color.angle.cos(),
+            e.gradient_color.angle.sin(),
+        );
+        let g_wcs_dir = old_ocs_to_wcs * Vector3::new(g_dir.x, g_dir.y, 0.0);
+        let transformed_g_wcs_dir = transform.apply_rotation(g_wcs_dir);
+        let transformed_g_ocs_dir = new_wcs_to_ocs * transformed_g_wcs_dir;
+        e.gradient_color.angle = transformed_g_ocs_dir.y.atan2(transformed_g_ocs_dir.x);
+    }
+
+    e.normal = new_normal;
+    e.elevation = new_elevation;
+}
+
+// ── Solid ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_solid(e: &mut Solid, transform: &Transform) {
+    e.first_corner = transform.apply(e.first_corner);
+    e.second_corner = transform.apply(e.second_corner);
+    e.third_corner = transform.apply(e.third_corner);
+    e.fourth_corner = transform.apply(e.fourth_corner);
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Face3D ───────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_face3d(e: &mut Face3D, transform: &Transform) {
+    e.first_corner = transform.apply(e.first_corner);
+    e.second_corner = transform.apply(e.second_corner);
+    e.third_corner = transform.apply(e.third_corner);
+    e.fourth_corner = transform.apply(e.fourth_corner);
+}
+
+// ── Insert ───────────────────────────────────────────────────────────────────
+
+/// Minimum absolute value accepted for insert scale factors.
+const SCALE_EPSILON: f64 = 1e-12;
+
+/// Transform a normal vector using inverse-transpose of the upper 3×3
+/// matrix, which is the geometrically correct approach for normals under
+/// non-uniform scale. Falls back to the original normal if the matrix is
+/// singular.
+pub(crate) fn transform_normal(transform: &Transform, normal: Vector3) -> Vector3 {
+    let m4 = transform.matrix;
+    let upper3x3 = Matrix3::from_rows(
+        [m4.m[0][0], m4.m[0][1], m4.m[0][2]],
+        [m4.m[1][0], m4.m[1][1], m4.m[1][2]],
+        [m4.m[2][0], m4.m[2][1], m4.m[2][2]],
+    );
+    if let Some(inv) = upper3x3.inverse() {
+        let inv_t = inv.transpose();
+        let transformed = inv_t.transform_point(normal);
+        let len = transformed.length();
+        if len < 1e-10 {
+            normal
+        } else {
+            transformed * (1.0 / len)
+        }
+    } else {
+        normal
+    }
+}
+
+pub(crate) fn transform_insert(e: &mut Insert, transform: &Transform) {
+    let new_position = transform.apply(e.insert_point);
+    let new_normal = transform_normal(transform, e.normal);
+
+    let trans_ow =
+        Matrix3::arbitrary_axis(e.normal) * Matrix3::rotation_z(e.rotation);
+
+    let trans_wo_base = Matrix3::arbitrary_axis(new_normal);
+    let trans_wo = trans_wo_base.transpose();
+
+    let m4 = transform.matrix;
+    let transformation = Matrix3::from_rows(
+        [m4.m[0][0], m4.m[0][1], m4.m[0][2]],
+        [m4.m[1][0], m4.m[1][1], m4.m[1][2]],
+        [m4.m[2][0], m4.m[2][1], m4.m[2][2]],
+    );
+
+    let v = trans_wo * (transformation * (trans_ow * Vector3::UNIT_X));
+    let new_rotation = v.y.atan2(v.x);
+
+    let trans_wo_rot = Matrix3::rotation_z(new_rotation).transpose() * trans_wo;
+    let s = trans_wo_rot
+        * (transformation
+            * (trans_ow * Vector3::new(e.x_scale(), e.y_scale(), e.z_scale())));
+
+    let clamp = |val: f64| -> f64 {
+        if val.abs() < SCALE_EPSILON {
+            SCALE_EPSILON
+        } else {
+            val
+        }
+    };
+
+    e.normal = new_normal;
+    e.insert_point = new_position;
+    e.set_x_scale(clamp(s.x));
+    e.set_y_scale(clamp(s.y));
+    e.set_z_scale(clamp(s.z));
+    e.rotation = new_rotation;
+
+    for att in &mut e.attributes {
+        att.apply_transform(transform);
+    }
+}
+
+// ── Block ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_block(e: &mut Block, transform: &Transform) {
+    e.base_point = transform.apply(e.base_point);
+}
+
+// ── BlockEnd ─────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_block_end(_e: &mut BlockEnd, _transform: &Transform) {
+    // No geometry
+}
+
+// ── Ray ──────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_ray(e: &mut Ray, transform: &Transform) {
+    e.base_point = transform.apply(e.base_point);
+    e.direction = transform.apply_rotation(e.direction).normalize();
+}
+
+// ── XLine ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_xline(e: &mut XLine, transform: &Transform) {
+    e.base_point = transform.apply(e.base_point);
+    e.direction = transform.apply_rotation(e.direction).normalize();
+}
+
+// ── Viewport ─────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_viewport(e: &mut Viewport, transform: &Transform) {
+    e.center = transform.apply(e.center);
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.width *= scale_factor;
+    e.height *= scale_factor;
+
+    e.view_direction = transform.apply_rotation(e.view_direction).normalize();
+    e.ucs_x_axis = transform.apply_rotation(e.ucs_x_axis).normalize();
+    e.ucs_y_axis = transform.apply_rotation(e.ucs_y_axis).normalize();
+
+    e.ucs_origin = transform.apply(e.ucs_origin);
+    e.view_target = transform.apply(e.view_target);
+}
+
+// ── AttributeDefinition ──────────────────────────────────────────────────────
+
+pub(crate) fn transform_attribute_definition(
+    e: &mut AttributeDefinition,
+    transform: &Transform,
+) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    e.alignment_point = transform.apply(e.alignment_point);
+    e.normal = transform.apply_rotation(e.normal).normalize();
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.height *= scale_factor;
+}
+
+// ── AttributeEntity ──────────────────────────────────────────────────────────
+
+pub(crate) fn transform_attribute_entity(e: &mut AttributeEntity, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    e.alignment_point = transform.apply(e.alignment_point);
+    e.normal = transform.apply_rotation(e.normal).normalize();
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.height *= scale_factor;
+}
+
+// ── Leader ───────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_leader(e: &mut Leader, transform: &Transform) {
+    for vertex in &mut e.vertices {
+        *vertex = transform.apply(*vertex);
+    }
+    e.block_offset = transform.apply(e.block_offset);
+    e.annotation_offset = transform.apply(e.annotation_offset);
+    e.horizontal_direction = transform.apply_rotation(e.horizontal_direction).normalize();
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── MultiLeader ──────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_multileader(e: &mut MultiLeader, transform: &Transform) {
+    e.context.content_base_point = transform.apply(e.context.content_base_point);
+    e.context.text_location = transform.apply(e.context.text_location);
+    e.context.block_content_location = transform.apply(e.context.block_content_location);
+    e.context.base_point = transform.apply(e.context.base_point);
+
+    e.context.text_normal = transform.apply_rotation(e.context.text_normal).normalize();
+    e.context.text_direction = transform.apply_rotation(e.context.text_direction).normalize();
+    e.context.base_direction = transform.apply_rotation(e.context.base_direction).normalize();
+    e.context.base_vertical = transform.apply_rotation(e.context.base_vertical).normalize();
+
+    for root in &mut e.context.leader_roots {
+        root.connection_point = transform.apply(root.connection_point);
+        for bp in &mut root.break_points {
+            bp.start_point = transform.apply(bp.start_point);
+            bp.end_point = transform.apply(bp.end_point);
+        }
+        for line in &mut root.lines {
+            for point in &mut line.points {
+                *point = transform.apply(*point);
+            }
+            for bp in &mut line.break_points {
+                bp.start_point = transform.apply(bp.start_point);
+                bp.end_point = transform.apply(bp.end_point);
+            }
+        }
+    }
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.arrowhead_size *= scale_factor;
+    e.text_height *= scale_factor;
+    e.dogleg_length *= scale_factor;
+    e.context.arrowhead_size *= scale_factor;
+    e.context.text_height *= scale_factor;
+    e.context.landing_gap *= scale_factor;
+}
+
+// ── MLine ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_mline(e: &mut MLine, transform: &Transform) {
+    e.start_point = transform.apply(e.start_point);
+    for vertex in &mut e.vertices {
+        vertex.position = transform.apply(vertex.position);
+        vertex.direction = transform.apply_rotation(vertex.direction).normalize();
+        vertex.miter = transform.apply_rotation(vertex.miter).normalize();
+    }
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Mesh ─────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_mesh(e: &mut Mesh, transform: &Transform) {
+    for vertex in &mut e.vertices {
+        *vertex = transform.apply(*vertex);
+    }
+}
+
+// ── RasterImage ──────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_raster_image(e: &mut RasterImage, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    e.u_vector = transform.apply_rotation(e.u_vector);
+    e.v_vector = transform.apply_rotation(e.v_vector);
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.u_vector = e.u_vector * scale_factor;
+    e.v_vector = e.v_vector * scale_factor;
+}
+
+// ── Solid3D ──────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_solid3d(e: &mut Solid3D, transform: &Transform) {
+    e.point_of_reference = transform.apply(e.point_of_reference);
+    for wire in &mut e.wires {
+        for pt in &mut wire.points {
+            *pt = transform.apply(*pt);
+        }
+        wire.translation = transform.apply(wire.translation);
+    }
+    for silhouette in &mut e.silhouettes {
+        silhouette.target = transform.apply(silhouette.target);
+        silhouette.view_direction =
+            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
+        for wire in &mut silhouette.wires {
+            for pt in &mut wire.points {
+                *pt = transform.apply(*pt);
+            }
+        }
+    }
+}
+
+// ── Region ───────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_region(e: &mut Region, transform: &Transform) {
+    e.point_of_reference = transform.apply(e.point_of_reference);
+    for wire in &mut e.wires {
+        for pt in &mut wire.points {
+            *pt = transform.apply(*pt);
+        }
+    }
+}
+
+// ── Body ─────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_body(e: &mut Body, transform: &Transform) {
+    e.point_of_reference = transform.apply(e.point_of_reference);
+    for wire in &mut e.wires {
+        for pt in &mut wire.points {
+            *pt = transform.apply(*pt);
+        }
+    }
+}
+
+// ── Table ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_table(e: &mut Table, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    e.horizontal_direction = transform.apply_rotation(e.horizontal_direction).normalize();
+    e.normal = transform.apply_rotation(e.normal).normalize();
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    for col in &mut e.columns {
+        col.width *= scale_factor;
+    }
+    for row in &mut e.rows {
+        row.height *= scale_factor;
+    }
+}
+
+// ── Tolerance ────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_tolerance(e: &mut Tolerance, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    e.direction = transform.apply_rotation(e.direction).normalize();
+    e.normal = transform.apply_rotation(e.normal).normalize();
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.text_height *= scale_factor;
+    e.dimension_gap *= scale_factor;
+}
+
+// ── PolyfaceMesh ─────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_polyface_mesh(e: &mut PolyfaceMesh, transform: &Transform) {
+    for v in &mut e.vertices {
+        v.location = transform.apply(v.location);
+    }
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Wipeout ──────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_wipeout(e: &mut Wipeout, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    e.u_vector = transform.apply_rotation(e.u_vector);
+    e.v_vector = transform.apply_rotation(e.v_vector);
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.u_vector = e.u_vector * scale_factor;
+    e.v_vector = e.v_vector * scale_factor;
+}
+
+// ── Shape ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_shape(e: &mut Shape, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.size *= scale_factor;
+    e.normal = transform.apply_rotation(e.normal).normalize();
+}
+
+// ── Underlay ─────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_underlay(e: &mut Underlay, transform: &Transform) {
+    e.insertion_point = transform.apply(e.insertion_point);
+    e.normal = transform.apply_rotation(e.normal).normalize();
+
+    let unit_x = Vector3::new(1.0, 0.0, 0.0);
+    let transformed_unit = transform.apply_rotation(unit_x);
+    let scale_factor = transformed_unit.length();
+    e.x_scale *= scale_factor;
+    e.y_scale *= scale_factor;
+    e.z_scale *= scale_factor;
+}
+
+// ── Seqend ───────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_seqend(_e: &mut Seqend, _transform: &Transform) {
+    // No geometry
+}
+
+// ── Ole2Frame ────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_ole2frame(e: &mut Ole2Frame, transform: &Transform) {
+    e.upper_left_corner = transform.apply(e.upper_left_corner);
+    e.lower_right_corner = transform.apply(e.lower_right_corner);
+}
+
+// ── PolygonMesh ──────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_polygon_mesh(e: &mut PolygonMeshEntity, transform: &Transform) {
+    for v in &mut e.vertices {
+        v.location = transform.apply(v.location);
+    }
+}
+
+// ── UnknownEntity ────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_unknown(_e: &mut UnknownEntity, _transform: &Transform) {
+    // No geometry
+}
+
+// ── EntityType dispatch ──────────────────────────────────────────────────────
+
+impl EntityType {
+    /// Apply a general transform to this entity.
+    ///
+    /// Dispatches to the appropriate per-entity implementation.
+    /// This is equivalent to calling `entity.as_entity_mut().apply_transform(t)`.
+    pub fn apply_transform(&mut self, transform: &Transform) {
+        match self {
+            EntityType::Point(e) => transform_point(e, transform),
+            EntityType::Line(e) => transform_line(e, transform),
+            EntityType::Circle(e) => transform_circle(e, transform),
+            EntityType::Arc(e) => transform_arc(e, transform),
+            EntityType::Ellipse(e) => transform_ellipse(e, transform),
+            EntityType::Polyline(e) => transform_polyline(e, transform),
+            EntityType::Polyline2D(e) => transform_polyline2d(e, transform),
+            EntityType::Polyline3D(e) => transform_polyline3d(e, transform),
+            EntityType::LwPolyline(e) => transform_lwpolyline(e, transform),
+            EntityType::Text(e) => transform_text(e, transform),
+            EntityType::MText(e) => transform_mtext(e, transform),
+            EntityType::Spline(e) => transform_spline(e, transform),
+            EntityType::Dimension(_) => {
+                // Dimension uses the default Entity trait implementation
+                let origin = Vector3::ZERO;
+                let translated = transform.apply(origin);
+                self.as_entity_mut().translate(translated);
+            }
+            EntityType::Hatch(e) => transform_hatch(e, transform),
+            EntityType::Solid(e) => transform_solid(e, transform),
+            EntityType::Face3D(e) => transform_face3d(e, transform),
+            EntityType::Insert(e) => transform_insert(e, transform),
+            EntityType::Block(e) => transform_block(e, transform),
+            EntityType::BlockEnd(e) => transform_block_end(e, transform),
+            EntityType::Ray(e) => transform_ray(e, transform),
+            EntityType::XLine(e) => transform_xline(e, transform),
+            EntityType::Viewport(e) => transform_viewport(e, transform),
+            EntityType::AttributeDefinition(e) => transform_attribute_definition(e, transform),
+            EntityType::AttributeEntity(e) => transform_attribute_entity(e, transform),
+            EntityType::Leader(e) => transform_leader(e, transform),
+            EntityType::MultiLeader(e) => transform_multileader(e, transform),
+            EntityType::MLine(e) => transform_mline(e, transform),
+            EntityType::Mesh(e) => transform_mesh(e, transform),
+            EntityType::RasterImage(e) => transform_raster_image(e, transform),
+            EntityType::Solid3D(e) => transform_solid3d(e, transform),
+            EntityType::Region(e) => transform_region(e, transform),
+            EntityType::Body(e) => transform_body(e, transform),
+            EntityType::Table(e) => transform_table(e, transform),
+            EntityType::Tolerance(e) => transform_tolerance(e, transform),
+            EntityType::PolyfaceMesh(e) => transform_polyface_mesh(e, transform),
+            EntityType::Wipeout(e) => transform_wipeout(e, transform),
+            EntityType::Shape(e) => transform_shape(e, transform),
+            EntityType::Underlay(e) => transform_underlay(e, transform),
+            EntityType::Seqend(e) => transform_seqend(e, transform),
+            EntityType::Ole2Frame(e) => transform_ole2frame(e, transform),
+            EntityType::PolygonMesh(e) => transform_polygon_mesh(e, transform),
+            EntityType::Unknown(e) => transform_unknown(e, transform),
+        }
+    }
+
+    /// Apply rotation around an axis.
+    pub fn apply_rotation(&mut self, axis: Vector3, angle: f64) {
+        self.apply_transform(&Transform::from_rotation(axis, angle));
+    }
+
+    /// Apply uniform scaling.
+    pub fn apply_scaling(&mut self, scale: f64) {
+        self.apply_transform(&Transform::from_scale(scale));
+    }
+
+    /// Apply non-uniform scaling.
+    pub fn apply_scaling_xyz(&mut self, scale: Vector3) {
+        self.apply_transform(&Transform::from_scaling(scale));
+    }
+
+    /// Apply scaling with a specific origin point.
+    pub fn apply_scaling_with_origin(&mut self, scale: Vector3, origin: Vector3) {
+        self.apply_transform(&Transform::from_scaling_with_origin(scale, origin));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Vector3;
+
+    #[test]
+    fn test_transform_line() {
+        let mut line = Line::from_points(
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+        );
+        let t = Transform::from_scale(2.0);
+        transform_line(&mut line, &t);
+        assert!((line.start.x - 2.0).abs() < 1e-10);
+        assert!((line.end.x - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_transform_circle_scales_radius() {
+        let mut circle = Circle::new();
+        circle.center = Vector3::ZERO;
+        circle.radius = 5.0;
+        let t = Transform::from_scale(3.0);
+        transform_circle(&mut circle, &t);
+        assert!((circle.radius - 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_transform_entity_type_dispatch() {
+        let mut entity = EntityType::Circle({
+            let mut c = Circle::new();
+            c.radius = 5.0;
+            c
+        });
+        entity.apply_transform(&Transform::from_scale(2.0));
+        if let EntityType::Circle(c) = &entity {
+            assert!((c.radius - 10.0).abs() < 1e-10);
+        } else {
+            panic!("Expected Circle");
+        }
+    }
+}

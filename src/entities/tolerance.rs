@@ -374,7 +374,7 @@ impl Entity for Tolerance {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
+        super::translate::translate_tolerance(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -382,19 +382,7 @@ impl Entity for Tolerance {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform insertion point
-        self.insertion_point = transform.apply(self.insertion_point);
-        
-        // Transform direction and normal vectors
-        self.direction = transform.apply_rotation(self.direction).normalize();
-        self.normal = transform.apply_rotation(self.normal).normalize();
-        
-        // Scale text height
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.text_height *= scale_factor;
-        self.dimension_gap *= scale_factor;
+        super::transform::transform_tolerance(self, transform);
     }
 }
 

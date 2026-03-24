@@ -156,10 +156,7 @@ impl Entity for Solid {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.first_corner = self.first_corner + offset;
-        self.second_corner = self.second_corner + offset;
-        self.third_corner = self.third_corner + offset;
-        self.fourth_corner = self.fourth_corner + offset;
+        super::translate::translate_solid(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -167,20 +164,11 @@ impl Entity for Solid {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all corner points
-        self.first_corner = transform.apply(self.first_corner);
-        self.second_corner = transform.apply(self.second_corner);
-        self.third_corner = transform.apply(self.third_corner);
-        self.fourth_corner = transform.apply(self.fourth_corner);
-        
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_solid(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        // Mirror reverses winding order — swap second and fourth corners
-        std::mem::swap(&mut self.second_corner, &mut self.fourth_corner);
+        super::mirror::mirror_solid(self, transform);
     }
 }
 

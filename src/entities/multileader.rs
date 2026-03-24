@@ -1203,25 +1203,7 @@ impl Entity for MultiLeader {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        // Translate content location
-        self.context.content_base_point.x += offset.x;
-        self.context.content_base_point.y += offset.y;
-        self.context.content_base_point.z += offset.z;
-        
-        // Translate all leader line points
-        for root in &mut self.context.leader_roots {
-            root.connection_point.x += offset.x;
-            root.connection_point.y += offset.y;
-            root.connection_point.z += offset.z;
-            
-            for line in &mut root.lines {
-                for pt in &mut line.points {
-                    pt.x += offset.x;
-                    pt.y += offset.y;
-                    pt.z += offset.z;
-                }
-            }
-        }
+        super::translate::translate_multileader(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -1229,46 +1211,7 @@ impl Entity for MultiLeader {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform context points
-        self.context.content_base_point = transform.apply(self.context.content_base_point);
-        self.context.text_location = transform.apply(self.context.text_location);
-        self.context.block_content_location = transform.apply(self.context.block_content_location);
-        self.context.base_point = transform.apply(self.context.base_point);
-        
-        // Transform direction vectors
-        self.context.text_normal = transform.apply_rotation(self.context.text_normal).normalize();
-        self.context.text_direction = transform.apply_rotation(self.context.text_direction).normalize();
-        self.context.base_direction = transform.apply_rotation(self.context.base_direction).normalize();
-        self.context.base_vertical = transform.apply_rotation(self.context.base_vertical).normalize();
-        
-        // Transform all leader roots and lines
-        for root in &mut self.context.leader_roots {
-            root.connection_point = transform.apply(root.connection_point);
-            for bp in &mut root.break_points {
-                bp.start_point = transform.apply(bp.start_point);
-                bp.end_point = transform.apply(bp.end_point);
-            }
-            for line in &mut root.lines {
-                for point in &mut line.points {
-                    *point = transform.apply(*point);
-                }
-                for bp in &mut line.break_points {
-                    bp.start_point = transform.apply(bp.start_point);
-                    bp.end_point = transform.apply(bp.end_point);
-                }
-            }
-        }
-        
-        // Scale arrowhead and text sizes
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.arrowhead_size *= scale_factor;
-        self.text_height *= scale_factor;
-        self.dogleg_length *= scale_factor;
-        self.context.arrowhead_size *= scale_factor;
-        self.context.text_height *= scale_factor;
-        self.context.landing_gap *= scale_factor;
+        super::transform::transform_multileader(self, transform);
     }
 }
 

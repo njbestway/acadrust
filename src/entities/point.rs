@@ -102,7 +102,7 @@ impl Entity for Point {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.location = self.location + offset;
+        super::translate::translate_point(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -110,9 +110,7 @@ impl Entity for Point {
     }
     
     fn apply_transform(&mut self, transform: &Transform) {
-        self.location = transform.apply(self.location);
-        // Transform the normal vector (rotation only, no translation)
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_point(self, transform);
     }
 }
 

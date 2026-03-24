@@ -536,7 +536,7 @@ impl Entity for Underlay {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
+        super::translate::translate_underlay(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -544,19 +544,7 @@ impl Entity for Underlay {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform insertion point
-        self.insertion_point = transform.apply(self.insertion_point);
-        
-        // Transform normal
-        self.normal = transform.apply_rotation(self.normal).normalize();
-        
-        // Update scale factors
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.x_scale *= scale_factor;
-        self.y_scale *= scale_factor;
-        self.z_scale *= scale_factor;
+        super::transform::transform_underlay(self, transform);
     }
 }
 

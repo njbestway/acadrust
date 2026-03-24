@@ -175,10 +175,7 @@ impl Entity for Text {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insertion_point = self.insertion_point + offset;
-        if let Some(ref mut align) = self.alignment_point {
-            *align = *align + offset;
-        }
+        super::translate::translate_text(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -186,33 +183,11 @@ impl Entity for Text {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform insertion point
-        self.insertion_point = transform.apply(self.insertion_point);
-        
-        // Transform alignment point if present
-        if let Some(ref mut align) = self.alignment_point {
-            *align = transform.apply(*align);
-        }
-        
-        // Extract scale factor and apply to height
-        let unit_x = Vector3::new(1.0, 0.0, 0.0);
-        let transformed_unit = transform.apply_rotation(unit_x);
-        let scale_factor = transformed_unit.length();
-        self.height *= scale_factor;
-        
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_text(self, transform);
     }
     
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
-        self.apply_transform(transform);
-        // Mirror the rotation angle: reflect the text direction vector and
-        // recalculate the angle from the mirrored direction.
-        let dir = Vector3::new(self.rotation.cos(), self.rotation.sin(), 0.0);
-        let mirrored_dir = transform.apply_rotation(dir);
-        self.rotation = mirrored_dir.y.atan2(mirrored_dir.x);
-        // Mirror flips the oblique angle direction
-        self.oblique_angle = -self.oblique_angle;
+        super::mirror::mirror_text(self, transform);
     }
 }
 

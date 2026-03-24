@@ -416,11 +416,7 @@ impl Entity for Leader {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for vertex in &mut self.vertices {
-            *vertex = *vertex + offset;
-        }
-        self.block_offset = self.block_offset + offset;
-        self.annotation_offset = self.annotation_offset + offset;
+        super::translate::translate_leader(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -428,16 +424,7 @@ impl Entity for Leader {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all vertices
-        for vertex in &mut self.vertices {
-            *vertex = transform.apply(*vertex);
-        }
-        // Transform offsets
-        self.block_offset = transform.apply(self.block_offset);
-        self.annotation_offset = transform.apply(self.annotation_offset);
-        // Transform direction vectors
-        self.horizontal_direction = transform.apply_rotation(self.horizontal_direction).normalize();
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_leader(self, transform);
     }
 }
 

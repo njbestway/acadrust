@@ -397,9 +397,7 @@ impl Entity for Polyline3D {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for vertex in &mut self.vertices {
-            vertex.position = vertex.position + offset;
-        }
+        super::translate::translate_polyline3d(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -407,12 +405,7 @@ impl Entity for Polyline3D {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all vertex positions
-        for vertex in &mut self.vertices {
-            vertex.position = transform.apply(vertex.position);
-        }
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_polyline3d(self, transform);
     }
 }
 

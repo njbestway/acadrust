@@ -194,7 +194,7 @@ impl Entity for Ray {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.base_point = self.base_point + offset;
+        super::translate::translate_ray(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -202,11 +202,7 @@ impl Entity for Ray {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform the base point
-        self.base_point = transform.apply(self.base_point);
-        
-        // Transform and normalize the direction
-        self.direction = transform.apply_rotation(self.direction).normalize();
+        super::transform::transform_ray(self, transform);
     }
 }
 

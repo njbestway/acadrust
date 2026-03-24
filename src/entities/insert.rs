@@ -572,72 +572,15 @@ impl Entity for Insert {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        self.insert_point = self.insert_point + offset;
+        super::translate::translate_insert(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
         if self.is_minsert() { "MINSERT" } else { "INSERT" }
     }
 
-    /// Apply a general transform to the insert entity, modifying its properties accordingly.
-    /// 1. Transform the insertion point.
-    /// 2. Compute the new normal via the transform's rotation portion.
-    /// 3. Re-derive rotation angle and scale factors by projecting through
-    ///    OCS→WCS and back, matching the C# `ApplyTransform` logic.
-    /// 4. Forward the same transform to every child attribute.
     fn apply_transform(&mut self, transform: &Transform) {
-        // 1. New insertion point
-        let new_position = transform.apply(self.insert_point);
-
-        // 2. New normal
-        let new_normal = Self::transform_normal(transform, self.normal);
-
-        // 3. Re-derive rotation & scale
-        //    OCS matrices for old and new normals
-        let trans_ow = Matrix3::arbitrary_axis(self.normal)
-            * Matrix3::rotation_z(self.rotation);
-
-        let trans_wo_base = Matrix3::arbitrary_axis(new_normal);
-        let trans_wo = trans_wo_base.transpose();
-
-        // Extract 3×3 rotation/scale from the 4×4 transform
-        let m4 = transform.matrix;
-        let transformation = Matrix3::from_rows(
-            [m4.m[0][0], m4.m[0][1], m4.m[0][2]],
-            [m4.m[1][0], m4.m[1][1], m4.m[1][2]],
-            [m4.m[2][0], m4.m[2][1], m4.m[2][2]],
-        );
-
-        // Compute new rotation angle
-        let v = trans_wo * (transformation * (trans_ow * Vector3::UNIT_X));
-        let new_rotation = v.y.atan2(v.x);
-
-        // Compute new scale
-        let trans_wo_rot = Matrix3::rotation_z(new_rotation).transpose() * trans_wo;
-        let s = trans_wo_rot
-            * (transformation
-                * (trans_ow * Vector3::new(self.x_scale, self.y_scale, self.z_scale)));
-
-        let clamp = |val: f64| -> f64 {
-            if val.abs() < SCALE_EPSILON {
-                SCALE_EPSILON
-            } else {
-                val
-            }
-        };
-
-        // 4. Apply results
-        self.normal = new_normal;
-        self.insert_point = new_position;
-        self.set_x_scale(clamp(s.x));
-        self.set_y_scale(clamp(s.y));
-        self.set_z_scale(clamp(s.z));
-        self.rotation = new_rotation;
-
-        // 5. Propagate to child attributes
-        for att in &mut self.attributes {
-            att.apply_transform(transform);
-        }
+        super::transform::transform_insert(self, transform);
     }
 }
 

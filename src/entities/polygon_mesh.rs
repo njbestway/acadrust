@@ -171,15 +171,10 @@ impl Entity for PolygonMesh {
         BoundingBox3D::from_points(&points).unwrap_or_else(|| BoundingBox3D::from_point(Vector3::ZERO))
     }
     fn translate(&mut self, offset: Vector3) {
-        for v in &mut self.vertices {
-            v.location = v.location + offset;
-        }
+        super::translate::translate_polygon_mesh(self, offset);
     }
     fn entity_type(&self) -> &'static str { "POLYLINE" }
     fn apply_transform(&mut self, transform: &Transform) {
-        for v in &mut self.vertices {
-            v.location = transform.apply(v.location);
-        }
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_polygon_mesh(self, transform);
     }
 }

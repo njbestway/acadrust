@@ -698,50 +698,7 @@ impl super::Entity for Dimension {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        match self {
-            Dimension::Aligned(d) => {
-                d.definition_point = d.definition_point + offset;
-                d.base.text_middle_point = d.base.text_middle_point + offset;
-                d.first_point = d.first_point + offset;
-                d.second_point = d.second_point + offset;
-            }
-            Dimension::Linear(d) => {
-                d.definition_point = d.definition_point + offset;
-                d.base.text_middle_point = d.base.text_middle_point + offset;
-                d.first_point = d.first_point + offset;
-                d.second_point = d.second_point + offset;
-            }
-            Dimension::Radius(d) => {
-                d.definition_point = d.definition_point + offset;
-                d.base.text_middle_point = d.base.text_middle_point + offset;
-                d.angle_vertex = d.angle_vertex + offset;
-            }
-            Dimension::Diameter(d) => {
-                d.definition_point = d.definition_point + offset;
-                d.base.text_middle_point = d.base.text_middle_point + offset;
-                d.angle_vertex = d.angle_vertex + offset;
-            }
-            Dimension::Angular2Ln(d) => {
-                d.definition_point = d.definition_point + offset;
-                d.base.text_middle_point = d.base.text_middle_point + offset;
-                d.angle_vertex = d.angle_vertex + offset;
-                d.first_point = d.first_point + offset;
-                d.second_point = d.second_point + offset;
-            }
-            Dimension::Angular3Pt(d) => {
-                d.definition_point = d.definition_point + offset;
-                d.base.text_middle_point = d.base.text_middle_point + offset;
-                d.angle_vertex = d.angle_vertex + offset;
-                d.first_point = d.first_point + offset;
-                d.second_point = d.second_point + offset;
-            }
-            Dimension::Ordinate(d) => {
-                d.definition_point = d.definition_point + offset;
-                d.base.text_middle_point = d.base.text_middle_point + offset;
-                d.feature_location = d.feature_location + offset;
-                d.leader_endpoint = d.leader_endpoint + offset;
-            }
-        }
+        super::translate::translate_dimension(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {

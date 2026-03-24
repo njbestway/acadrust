@@ -81,7 +81,7 @@ impl Entity for UnknownEntity {
     fn is_invisible(&self) -> bool { self.common.invisible }
     fn set_invisible(&mut self, invisible: bool) { self.common.invisible = invisible; }
     fn bounding_box(&self) -> BoundingBox3D { BoundingBox3D::from_point(Vector3::ZERO) }
-    fn translate(&mut self, _offset: Vector3) { /* no geometry */ }
+    fn translate(&mut self, _offset: Vector3) { super::translate::translate_unknown(self, _offset); }
     fn entity_type(&self) -> &'static str { "UNKNOWN" }
-    fn apply_transform(&mut self, _transform: &Transform) { /* no geometry */ }
+    fn apply_transform(&mut self, _transform: &Transform) { super::transform::transform_unknown(self, _transform); }
 }

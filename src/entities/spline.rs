@@ -207,12 +207,7 @@ impl Entity for Spline {
     }
 
     fn translate(&mut self, offset: Vector3) {
-        for point in &mut self.control_points {
-            *point = *point + offset;
-        }
-        for point in &mut self.fit_points {
-            *point = *point + offset;
-        }
+        super::translate::translate_spline(self, offset);
     }
 
     fn entity_type(&self) -> &'static str {
@@ -220,16 +215,7 @@ impl Entity for Spline {
     }
     
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
-        // Transform all control points
-        for point in &mut self.control_points {
-            *point = transform.apply(*point);
-        }
-        // Transform all fit points
-        for point in &mut self.fit_points {
-            *point = transform.apply(*point);
-        }
-        // Transform the normal vector
-        self.normal = transform.apply_rotation(self.normal).normalize();
+        super::transform::transform_spline(self, transform);
     }
 }
 
