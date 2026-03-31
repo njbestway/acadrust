@@ -424,6 +424,8 @@ pub fn read_lwpolyline(reader: &mut DwgMergedReader, version: DwgVersion) -> LwP
 
     let num_pts = safe_count(reader.read_bit_long());
     let num_bulges = if has_bulges { safe_count(reader.read_bit_long()) } else { 0 };
+    let has_vertex_ids = (flag & 0x400) != 0;
+    let num_vertex_ids = if has_vertex_ids { safe_count(reader.read_bit_long()) } else { 0 };
     let num_widths = if has_widths { safe_count(reader.read_bit_long()) } else { 0 };
 
     // Read vertex positions
@@ -457,6 +459,13 @@ pub fn read_lwpolyline(reader: &mut DwgMergedReader, version: DwgVersion) -> LwP
         }
     }
 
+    // Read vertex IDs (R2010+, flag 0x400)
+    if has_vertex_ids {
+        for _ in 0..num_vertex_ids {
+            let _vertex_id = reader.read_bit_long();
+        }
+    }
+
     // Read widths
     let mut start_widths = vec![0.0f64; num_pts as usize];
     let mut end_widths = vec![0.0f64; num_pts as usize];
@@ -466,14 +475,6 @@ pub fn read_lwpolyline(reader: &mut DwgMergedReader, version: DwgVersion) -> LwP
                 start_widths[i] = reader.read_bit_double();
                 end_widths[i] = reader.read_bit_double();
             }
-        }
-    }
-
-    // R2010+: consume vertex IDs if present
-    if version.r2010_plus() {
-        let num_vertex_ids = safe_count(reader.read_bit_long());
-        for _ in 0..num_vertex_ids {
-            let _vertex_id = reader.read_bit_long();
         }
     }
 

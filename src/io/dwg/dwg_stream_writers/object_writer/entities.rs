@@ -553,6 +553,7 @@ impl<'a> DwgObjectWriter<'a> {
         if has_elevation    { flag |= 0x8; }
         if has_bulges       { flag |= 0x10; }
         if has_widths       { flag |= 0x20; }
+        if e.plinegen       { flag |= 0x100; }
         if e.is_closed      { flag |= 0x200; }
 
         self.writer.write_bit_short(flag);
@@ -615,11 +616,6 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_double(v.start_width);
                 self.writer.write_bit_double(v.end_width);
             }
-        }
-
-        // R2010+: vertex IDs (none for now)
-        if self.version.r2010_plus() {
-            self.writer.write_bit_long(0); // num_vertex_ids = 0
         }
 
         self.register_object(e.common.handle);

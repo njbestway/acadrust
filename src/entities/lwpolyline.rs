@@ -56,6 +56,8 @@ pub struct LwPolyline {
     pub vertices: Vec<LwVertex>,
     /// Is the polyline closed?
     pub is_closed: bool,
+    /// Use PLINEGEN linetype generation pattern across vertices
+    pub plinegen: bool,
     /// Constant width (if all segments have same width)
     pub constant_width: f64,
     /// Elevation (Z coordinate)
@@ -73,6 +75,7 @@ impl LwPolyline {
             common: EntityCommon::new(),
             vertices: Vec::new(),
             is_closed: false,
+            plinegen: false,
             constant_width: 0.0,
             elevation: 0.0,
             thickness: 0.0,

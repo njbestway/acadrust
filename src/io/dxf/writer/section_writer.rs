@@ -1185,6 +1185,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if lwpoly.is_closed {
             flags |= 1;
         }
+        if lwpoly.plinegen {
+            flags |= 128;
+        }
         self.writer.write_i16(70, flags)?;
 
         self.writer.write_double(38, lwpoly.elevation)?;

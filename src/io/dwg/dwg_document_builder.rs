@@ -804,6 +804,7 @@ impl DwgDocumentBuilder {
                     e.constant_width = data.constant_width;
                     e.normal = data.normal;
                     e.is_closed = (data.flag & 0x200) != 0;
+                    e.plinegen = (data.flag & 0x100) != 0;
                     let _ = document.add_entity(EntityType::LwPolyline(e));
                 },
                 OBJ_SPLINE => {

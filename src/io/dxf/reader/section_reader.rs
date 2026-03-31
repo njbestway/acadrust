@@ -2625,6 +2625,7 @@ impl<'a> SectionReader<'a> {
                 70 => {
                     if let Some(flags) = pair.as_i16() {
                         lwpolyline.is_closed = (flags & 1) != 0;
+                        lwpolyline.plinegen = (flags & 128) != 0;
                     }
                 }
                 38 => {
