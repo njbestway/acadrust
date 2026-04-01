@@ -179,6 +179,7 @@ pub struct MultiLeaderStyleData {
     pub text_attachment_direction: i16,
     pub text_top_attachment: i16,
     pub text_bottom_attachment: i16,
+    pub unknown_flag_298: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -459,7 +460,7 @@ pub fn read_mlinestyle(reader: &mut DwgMergedReader, version: DwgVersion, dxf_ve
     MLineStyleData { name, description, flags, fill_color, start_angle, end_angle, elements }
 }
 
-pub fn read_multileader_style(reader: &mut DwgMergedReader, version: DwgVersion) -> MultiLeaderStyleData {
+pub fn read_multileader_style(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: crate::types::DxfVersion) -> MultiLeaderStyleData {
     // R2010+: Version (BS, expected 2)
     if version.r2010_plus() {
         let _style_version = reader.read_bit_short();
@@ -516,6 +517,11 @@ pub fn read_multileader_style(reader: &mut DwgMergedReader, version: DwgVersion)
         text_bottom_attachment = reader.read_bit_short();
     }
 
+    let mut unknown_flag_298 = false;
+    if dxf_version >= crate::types::DxfVersion::AC1027 {
+        unknown_flag_298 = reader.read_bit();
+    }
+
     MultiLeaderStyleData {
         content_type, multileader_draw_order, leader_draw_order,
         max_leader_points, first_segment_angle, second_segment_angle,
@@ -530,6 +536,7 @@ pub fn read_multileader_style(reader: &mut DwgMergedReader, version: DwgVersion)
         enable_block_scale, block_content_rotation, enable_block_rotation,
         block_content_connection, scale_factor, property_changed, is_annotative,
         break_gap_size, text_attachment_direction, text_top_attachment, text_bottom_attachment,
+        unknown_flag_298,
     }
 }
 
@@ -571,12 +578,12 @@ pub fn read_sort_entities_table(reader: &mut DwgMergedReader) -> SortEntitiesTab
 }
 
 pub fn read_xrecord(reader: &mut DwgMergedReader) -> XRecordData {
-    let cloning_flags = reader.read_bit_short();
     let data_size = safe_count(reader.read_bit_long());
     let mut raw_data = Vec::with_capacity(data_size as usize);
     for _ in 0..data_size {
         raw_data.push(reader.read_byte());
     }
+    let cloning_flags = reader.read_bit_short();
     XRecordData { cloning_flags, data_size, raw_data }
 }
 
@@ -698,8 +705,8 @@ mod tests {
         let v = DwgVersion::AC15;
         let d = DxfVersion::AC1015;
         let mut r = make_reader(v, d, |w| {
-            w.write_bit_short(0); // cloning flags
-            w.write_bit_long(0); // data size
+            w.write_bit_long(0); // data size (comes first per spec)
+            w.write_bit_short(0); // cloning flags (comes after data)
         });
         let xr = read_xrecord(&mut r);
         assert_eq!(xr.cloning_flags, 0);

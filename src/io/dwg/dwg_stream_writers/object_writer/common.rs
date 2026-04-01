@@ -492,8 +492,14 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // ── HANDLE: Owner handle (soft pointer) ──
+        // Check for owner override (e.g. for ATTRIB extension dictionaries
+        // whose parent entity was re-allocated with a new handle)
+        let effective_owner = self.owner_overrides
+            .get(&handle)
+            .copied()
+            .unwrap_or(owner_handle);
         self.writer
-            .write_handle(DwgReferenceType::SoftPointer, owner_handle.value());
+            .write_handle(DwgReferenceType::SoftPointer, effective_owner.value());
 
         // ── writeReactorsAndDictionaryHandle portion ──
 
@@ -595,29 +601,30 @@ impl<'a> DwgObjectWriter<'a> {
     /// Returns the 2-bit entity-mode value (per ODA spec §19.4.4):
     /// - 0 = owned (owner handle present) — VERTEX, ATTRIB, SEQEND,
     ///       or entity inside a named block
-    /// - 1 = paper-space entity (BB 01 → *Paper_Space)
+    /// - 1 = paper-space entity (BB 01 → any *Paper_Space block)
     /// - 2 = model-space entity (BB 10 → *Model_Space)
+    ///
+    /// AutoCAD uses entmode=1 for entities in ALL paper-space blocks,
+    /// not just the canonical `*Paper_Space`.  Additional layouts like
+    /// `*Paper_Space0`, `*Paper_Space1`, … also get entmode=1.  The
+    /// correct owner is determined by the BLOCK_HEADER's entity_handles
+    /// list, not by the entity's owner handle (which is omitted for
+    /// entmode != 0).
     fn get_entity_mode(&self, owner_handle: &Handle) -> u8 {
-        // Check if owner is model-space or paper-space block record
-        let ms_handle = self
-            .document
-            .block_records
-            .get("*Model_Space")
-            .map(|br| br.handle);
-        let ps_handle = self
-            .document
-            .block_records
-            .get("*Paper_Space")
-            .map(|br| br.handle);
-
-        if let Some(ms) = ms_handle {
-            if *owner_handle == ms {
-                return 2; // model space (BB 10)
-            }
-        }
-        if let Some(ps) = ps_handle {
-            if *owner_handle == ps {
-                return 1; // paper space (BB 01)
+        for br in self.document.block_records.iter() {
+            if br.handle == *owner_handle {
+                let upper = br.name.to_ascii_uppercase();
+                if upper == "*MODEL_SPACE" {
+                    return 2; // model space (BB 10)
+                }
+                if upper == "*PAPER_SPACE"
+                    || (upper.starts_with("*PAPER_SPACE")
+                        && upper.len() > 12
+                        && upper[12..].bytes().all(|b| b.is_ascii_digit()))
+                {
+                    return 1; // paper space (BB 01)
+                }
+                return 0; // named block → owned
             }
         }
         0

@@ -62,6 +62,8 @@ pub struct Layer {
     pub is_plottable: bool,
     /// Material handle
     pub material: Handle,
+    /// External reference block record handle (for xref-dependent layers)
+    pub xref_block_record_handle: Handle,
 }
 
 impl Layer {
@@ -77,6 +79,7 @@ impl Layer {
             plot_style: String::new(),
             is_plottable: true,
             material: Handle::NULL,
+            xref_block_record_handle: Handle::NULL,
         }
     }
 
@@ -92,6 +95,7 @@ impl Layer {
             plot_style: String::new(),
             is_plottable: true,
             material: Handle::NULL,
+            xref_block_record_handle: Handle::NULL,
         }
     }
 

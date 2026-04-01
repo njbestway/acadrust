@@ -415,6 +415,10 @@ impl DwgDocumentBuilder {
                     if let Some(mh) = data.material_handle {
                         layer.material = Handle::from(mh);
                     }
+                    // External reference block record handle
+                    if data.xref_handle != 0 {
+                        layer.xref_block_record_handle = Handle::from(data.xref_handle);
+                    }
                     // Remove default entry if it exists, then add
                     let _ = document.layers.remove(&data.name);
                     let _ = document.layers.add(layer);
@@ -790,10 +794,19 @@ impl DwgDocumentBuilder {
         // to non-active paper spaces (*Paper_Space0, *Paper_Space1, etc.).
         if !binary_entity_owner.is_empty() {
             // 1. Fix entity owner handles from the binary source of truth
+            let mut correction_count = 0u32;
             for entity in &mut document.entities {
                 let eh = entity.common().handle;
                 if let Some(&correct_owner) = binary_entity_owner.get(&eh) {
                     if entity.common().owner_handle != correct_owner {
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "[OWNER-CORRECTION] entity {:#X} stream_owner={:#X} → corrected_owner={:#X}",
+                            eh.value(),
+                            entity.common().owner_handle.value(),
+                            correct_owner.value(),
+                        );
+                        correction_count += 1;
                         entity.common_mut().owner_handle = correct_owner;
                     }
                 }
@@ -1710,6 +1723,8 @@ impl DwgDocumentBuilder {
                     e.common = entity_common;
                     e.version = data.version;
                     e.binary_data = data.data;
+                    e.dwg_mode = data.mode;
+                    e.dwg_trailing_byte = data.trailing_byte;
                     let _ = document.add_entity(EntityType::Ole2Frame(e));
                 },
 
@@ -1993,7 +2008,7 @@ impl DwgDocumentBuilder {
                     );
                 },
                 OBJ_MLEADERSTYLE => {
-                    let data = objects::read_multileader_style(&mut reader, self.obj_reader.version());
+                    let data = objects::read_multileader_style(&mut reader, self.obj_reader.version(), self.obj_reader.dxf_version());
                     let mut obj = crate::objects::MultiLeaderStyle::new("");
                     obj.handle = Handle::from(handle);
                     obj.owner_handle = owner_handle;
@@ -2041,6 +2056,7 @@ impl DwgDocumentBuilder {
                     obj.text_attachment_direction = crate::objects::TextAttachmentDirectionType::from(data.text_attachment_direction);
                     obj.text_top_attachment = crate::objects::TextAttachmentType::from(data.text_top_attachment);
                     obj.text_bottom_attachment = crate::objects::TextAttachmentType::from(data.text_bottom_attachment);
+                    obj.unknown_flag_298 = data.unknown_flag_298;
                     document.objects.insert(
                         Handle::from(handle),
                         crate::objects::ObjectType::MultiLeaderStyle(obj),

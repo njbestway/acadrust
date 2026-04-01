@@ -49,6 +49,10 @@ pub struct Ole2Frame {
     pub is_paper_space: bool,
     /// Raw OLE binary data (code 310 chunks concatenated)
     pub binary_data: Vec<u8>,
+    /// DWG tile mode descriptor (0=model, 1=paper, 2=model in layout)
+    pub dwg_mode: i16,
+    /// DWG trailing byte (OLE type indicator)
+    pub dwg_trailing_byte: u8,
 }
 
 impl Ole2Frame {
@@ -63,6 +67,8 @@ impl Ole2Frame {
             ole_object_type: OleObjectType::Embedded,
             is_paper_space: false,
             binary_data: Vec::new(),
+            dwg_mode: 0,
+            dwg_trailing_byte: 3,
         }
     }
 }

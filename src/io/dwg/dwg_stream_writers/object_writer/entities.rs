@@ -574,6 +574,12 @@ impl<'a> DwgObjectWriter<'a> {
 
             let sub_count = attrib_handles.len() + 1; // attribs + seqend
             for (i, (att, &ah)) in e.attributes.iter().zip(attrib_handles.iter()).enumerate() {
+                // Record owner override for extension dictionary
+                if let Some(xdic) = &att.common.xdictionary_handle {
+                    if !xdic.is_null() {
+                        self.owner_overrides.insert(*xdic, ah);
+                    }
+                }
                 self.prev_handle = if i > 0 {
                     Some(attrib_handles[i - 1])
                 } else {
@@ -2281,9 +2287,9 @@ impl<'a> DwgObjectWriter<'a> {
         // Flags BS 70
         self.writer.write_bit_short(e.version as i16);
 
-        // R2000+: Mode BS
+        // R2000+: Mode BS (tile mode descriptor)
         if self.version.r2000_plus() {
-            self.writer.write_bit_short(0);
+            self.writer.write_bit_short(e.dwg_mode);
         }
 
         // Data Length BL + data bytes
@@ -2292,9 +2298,9 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer
             .write_bytes(&e.binary_data);
 
-        // R2000+: trailing byte
+        // R2000+: trailing byte (OLE type)
         if self.version.r2000_plus() {
-            self.writer.write_byte(3);
+            self.writer.write_byte(e.dwg_trailing_byte);
         }
 
         self.register_object(e.common.handle);

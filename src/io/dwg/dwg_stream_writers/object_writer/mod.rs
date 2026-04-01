@@ -28,7 +28,7 @@ use crate::entities::{EntityCommon, EntityType};
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
 use crate::io::dwg::dwg_stream_writers::DwgMergedWriter;
 use crate::io::dwg::dwg_version::DwgVersion;
-use crate::tables::BlockRecord;
+use crate::tables::{BlockRecord, TableEntry};
 use crate::types::{BoundingBox3D, DxfVersion, Handle, Vector2};
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -96,6 +96,9 @@ pub struct DwgObjectWriter<'a> {
     pub(super) sab_entries: Vec<(Handle, Vec<u8>)>,
     /// Tracks which object handles have already been written to prevent duplicates.
     pub(super) visited_objects: HashSet<Handle>,
+    /// Owner handle overrides for extension dictionaries whose parent entity
+    /// was re-allocated (e.g. ATTRIB children of INSERT).
+    pub(super) owner_overrides: std::collections::HashMap<Handle, Handle>,
 }
 
 impl<'a> DwgObjectWriter<'a> {
@@ -106,6 +109,37 @@ impl<'a> DwgObjectWriter<'a> {
         let version = DwgVersion::from_dxf_version(document.version)?;
         let dxf_version = document.version;
         let writer = DwgMergedWriter::new(version, dxf_version);
+
+        // Compute safe starting handle for allocation.
+        // document.header.handle_seed may be stale (e.g. DWG roundtrip
+        // without resolve_references), so scan all handles and use whichever
+        // value is higher.
+        let mut max_h = document.header.handle_seed;
+        for entity in document.entities() {
+            let h = entity.common().handle.value() + 1;
+            if h > max_h { max_h = h; }
+        }
+        for (handle, _) in &document.objects {
+            let h = handle.value() + 1;
+            if h > max_h { max_h = h; }
+        }
+        for br in document.block_records.iter() {
+            let h = br.handle().value() + 1;
+            if h > max_h { max_h = h; }
+        }
+        for ly in document.layers.iter() {
+            let h = ly.handle().value() + 1;
+            if h > max_h { max_h = h; }
+        }
+        for lt in document.line_types.iter() {
+            let h = lt.handle().value() + 1;
+            if h > max_h { max_h = h; }
+        }
+        for ts in document.text_styles.iter() {
+            let h = ts.handle().value() + 1;
+            if h > max_h { max_h = h; }
+        }
+
         Ok(Self {
             version,
             dxf_version,
@@ -116,10 +150,11 @@ impl<'a> DwgObjectWriter<'a> {
             object_queue: VecDeque::new(),
             prev_handle: None,
             next_handle: None,
-            next_alloc_handle: document.header.handle_seed,
+            next_alloc_handle: max_h,
             model_space_extents: None,
             sab_entries: Vec::new(),
             visited_objects: HashSet::new(),
+            owner_overrides: std::collections::HashMap::new(),
         })
     }
 
@@ -491,7 +526,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // External reference block handle
         self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+            .write_handle(DwgReferenceType::HardPointer, layer.xref_block_record_handle.value());
 
         if self.version.r2000_plus() {
             // Plotstyle handle

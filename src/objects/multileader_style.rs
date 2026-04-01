@@ -560,6 +560,10 @@ pub struct MultiLeaderStyle {
     /// Property changed flag.
     /// DXF code: 295
     pub property_changed: bool,
+
+    /// R2013+ undocumented flag.
+    /// DXF code: 298
+    pub unknown_flag_298: bool,
 }
 
 impl MultiLeaderStyle {
@@ -638,6 +642,7 @@ impl MultiLeaderStyle {
             // Flags
             is_annotative: false,
             property_changed: false,
+            unknown_flag_298: false,
         }
     }
 

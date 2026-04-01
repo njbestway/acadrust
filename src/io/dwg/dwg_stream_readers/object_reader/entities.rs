@@ -1067,6 +1067,7 @@ pub struct Ole2FrameData {
     pub version: i16,
     pub mode: i16,
     pub data: Vec<u8>,
+    pub trailing_byte: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -1628,13 +1629,12 @@ pub fn read_wipeout(reader: &mut DwgMergedReader, version: DwgVersion) -> Raster
 pub fn read_ole2frame(reader: &mut DwgMergedReader, version: DwgVersion) -> Ole2FrameData {
     let ver = reader.read_bit_short();
     let mode = if version.r2000_plus() { reader.read_bit_short() } else { 0 };
-    let data_len = safe_count(reader.read_bit_long());
-    let mut data = Vec::with_capacity(data_len as usize);
-    for _ in 0..data_len { data.push(reader.read_byte()); }
-    if version.r2000_plus() {
-        let _trailing = reader.read_byte();
-    }
-    Ole2FrameData { version: ver, mode, data }
+    // OLE binary data can be very large (embedded images/documents),
+    // so don't use safe_count (100 KB cap). Use a generous 10 MB cap instead.
+    let data_len = (reader.read_bit_long().max(0) as usize).min(10_000_000);
+    let data = reader.read_bytes(data_len);
+    let trailing_byte = if version.r2000_plus() { reader.read_byte() } else { 3 };
+    Ole2FrameData { version: ver, mode, data, trailing_byte }
 }
 
 pub fn read_attribute_definition(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> AttributeCommonData {

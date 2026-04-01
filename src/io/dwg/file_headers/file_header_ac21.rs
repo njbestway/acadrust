@@ -66,12 +66,6 @@ const PAGE_ALIGN_SIZE: usize = 0x20;
 /// Minimum system page size per spec §5.3.1.
 const MIN_SYSTEM_PAGE_SIZE: usize = 0x400;
 
-/// Space reserved for two page map system pages right after the file header.
-const PAGE_MAP_RESERVED_SIZE: usize = 2 * MIN_SYSTEM_PAGE_SIZE; // 0x800
-
-/// Total reserved size at the start: metadata + file header + page map pages.
-const TOTAL_RESERVED_SIZE: usize = RESERVED_HEADER_SIZE + PAGE_MAP_RESERVED_SIZE; // 0xC80
-
 /// Check data size at end of file header page (5 × u64 = 40 = 0x28 bytes).
 const CHECK_DATA_SIZE: usize = 0x28;
 
@@ -386,13 +380,15 @@ pub struct DwgFileHeaderWriterAC21 {
 impl DwgFileHeaderWriterAC21 {
     /// Create a new AC21 file header writer and reserve space.
     ///
-    /// Reserves 0xC80 bytes at the start:
+    /// Reserves 0x480 bytes at the start:
     /// - 0x80 bytes: metadata placeholder
     /// - 0x400 bytes: file header placeholder
-    /// - 0x800 bytes: page map pages (2 × 0x400)
+    ///
+    /// Data pages start immediately after. Page maps are written at the
+    /// end of the file with a dynamically computed size.
     pub fn new<W: Write + Seek>(version: DxfVersion, output: &mut W) -> Result<Self, DxfError> {
-        // Reserve space for metadata + file header + page map pages
-        let zeroes = vec![0u8; TOTAL_RESERVED_SIZE];
+        // Reserve space for metadata + file header only
+        let zeroes = vec![0u8; RESERVED_HEADER_SIZE];
         output.write_all(&zeroes)?;
 
         Ok(Self {
@@ -496,49 +492,52 @@ impl DwgFileHeaderWriterAC21 {
         let section_map_result = self.write_system_page(output, &section_map_data)?;
         let section_map2_result = self.write_system_page(output, &section_map_data)?;
 
-        // ── Step 2: Build page map ──
-        // Assign IDs for the page map pages (written at reserved positions)
+        // ── Step 2: Build and write page map at end of file ──
+        // Page map pages are appended after section maps (at the current
+        // end-of-file position).  Their size is computed dynamically to
+        // accommodate any number of data pages.
         let page_map_page_id = self.next_page_id;
         self.next_page_id += 1;
         let page_map2_page_id = self.next_page_id;
         self.next_page_id += 1;
 
-        let pm_page_size = MIN_SYSTEM_PAGE_SIZE as i64; // 0x400
+        // Compute the actual required page size for the page map.
+        let pm_raw_size_est = (self.page_records.len() + 3) * 16;
+        let pm_page_size = get_system_page_size(pm_raw_size_est as u64) as usize;
 
-        // Build page map with entries in file-offset order:
-        // [page_map, page_map_copy, data_pages..., section_map_pages...]
+        // Build the page map: data pages first (lowest file offset after
+        // header), then section map pages, then page map pages (at end).
         let page_map_data = self.build_page_map_ordered(
-            page_map_page_id, page_map2_page_id, pm_page_size,
+            page_map_page_id, page_map2_page_id, pm_page_size as i64,
         );
 
-        // ── Step 3: Write page map at reserved positions ──
+        // Write page map pages at current end-of-file position
+        let pm_abs_offset = output.seek(SeekFrom::Current(0))?;
         let page_map_result = self.write_system_page_at(
             output, &page_map_data,
-            RESERVED_HEADER_SIZE as u64,  // absolute 0x480
+            pm_abs_offset,
             page_map_page_id,
-            MIN_SYSTEM_PAGE_SIZE,
+            pm_page_size,
         )?;
+        let pm_abs_offset2 = output.seek(SeekFrom::Current(0))?;
         let _page_map2_result = self.write_system_page_at(
             output, &page_map_data,
-            (RESERVED_HEADER_SIZE + MIN_SYSTEM_PAGE_SIZE) as u64,  // absolute 0x880
+            pm_abs_offset2,
             page_map2_page_id,
-            MIN_SYSTEM_PAGE_SIZE,
+            pm_page_size,
         )?;
-
-        // Seek back to end for the file header copy
-        output.seek(SeekFrom::End(0))?;
 
         // ── Step 4: Build compressed metadata ──
         let mut metadata = Dwg21CompressedMetadata::default();
         metadata.file_size = 0; // Patched after writing header copy
 
-        // Pages map fields — page map is at relative offset 0
+        // Pages map fields — offsets relative to data start (RESERVED_HEADER_SIZE)
         metadata.pages_map_crc_compressed = page_map_result.crc_compressed;
         metadata.pages_map_correction_factor = page_map_result.correction_factor;
         metadata.pages_map_crc_seed = self.crc_seed;
-        metadata.pages_map_offset = 0; // Page map is at data start
+        metadata.pages_map_offset = pm_abs_offset - RESERVED_HEADER_SIZE as u64;
         metadata.pages_map_id = page_map_page_id as u64;
-        metadata.map2_offset = MIN_SYSTEM_PAGE_SIZE as u64; // 0x400
+        metadata.map2_offset = pm_abs_offset2 - RESERVED_HEADER_SIZE as u64;
         metadata.map2_id = page_map2_page_id as u64;
         metadata.pages_map_size_compressed = page_map_result.compressed_size;
         metadata.pages_map_size_uncompressed = page_map_result.uncompressed_size;
@@ -838,15 +837,12 @@ impl DwgFileHeaderWriterAC21 {
         let (encoded, compressed_size, uncompressed_size, crc_compressed, crc_uncompressed, correction_factor)
             = self.encode_system_page(data, target_size);
 
-        assert!(
-            encoded.len() <= target_size,
-            "RS-encoded page map ({} bytes) exceeds target size ({} bytes)",
-            encoded.len(), target_size,
-        );
+        // Use the larger of encoded size and target size
+        let actual_page_size = align32(encoded.len()).max(target_size);
 
         output.seek(SeekFrom::Start(abs_position))?;
         output.write_all(&encoded)?;
-        let padding = target_size - encoded.len();
+        let padding = actual_page_size - encoded.len();
         if padding > 0 {
             output.write_all(&vec![0u8; padding])?;
         }
@@ -938,9 +934,8 @@ impl DwgFileHeaderWriterAC21 {
     /// Build the page map data (spec §5.2 page map format).
     ///
     /// Entries are ordered by file position:
-    /// 1. Page map pages (at offsets 0 and 0x400 relative to data start)
-    /// 2. Data pages (from self.page_records, in write order)
-    /// 3. Section map pages (also in self.page_records, after data pages)
+    /// 1. Data pages + section map pages (from self.page_records, in write order)
+    /// 2. Page map pages (written last, at end of file)
     ///
     /// Each entry is (size: i64, id: i64).
     fn build_page_map_ordered(
@@ -953,17 +948,17 @@ impl DwgFileHeaderWriterAC21 {
         let capacity = (self.page_records.len() + 3) * 16;
         let mut stream = Vec::with_capacity(capacity);
 
-        // 1. Page map pages come first (they're at the lowest file offsets)
-        stream.extend_from_slice(&page_map_page_size.to_le_bytes());
-        stream.extend_from_slice(&page_map_id.to_le_bytes());
-        stream.extend_from_slice(&page_map_page_size.to_le_bytes());
-        stream.extend_from_slice(&page_map2_id.to_le_bytes());
-
-        // 2. Data pages + section map pages (already in file-offset order)
+        // 1. Data pages + section map pages (in file-offset order, starting at RESERVED_HEADER_SIZE)
         for record in &self.page_records {
             stream.extend_from_slice(&record.size.to_le_bytes());
             stream.extend_from_slice(&record.id.to_le_bytes());
         }
+
+        // 2. Page map pages come last (they're at the end of the file)
+        stream.extend_from_slice(&page_map_page_size.to_le_bytes());
+        stream.extend_from_slice(&page_map_id.to_le_bytes());
+        stream.extend_from_slice(&page_map_page_size.to_le_bytes());
+        stream.extend_from_slice(&page_map2_id.to_le_bytes());
 
         // 3. Null terminator (size=0, id=0) per spec §5.3
         stream.extend_from_slice(&0i64.to_le_bytes());
@@ -1361,8 +1356,8 @@ mod tests {
         let mut output = Cursor::new(Vec::new());
         let _writer = DwgFileHeaderWriterAC21::new(DxfVersion::AC1021, &mut output).unwrap();
 
-        assert_eq!(output.position(), TOTAL_RESERVED_SIZE as u64);
-        assert_eq!(output.get_ref().len(), TOTAL_RESERVED_SIZE);
+        assert_eq!(output.position(), RESERVED_HEADER_SIZE as u64);
+        assert_eq!(output.get_ref().len(), RESERVED_HEADER_SIZE);
         assert!(output.get_ref().iter().all(|&b| b == 0));
     }
 
@@ -1485,18 +1480,20 @@ mod tests {
 
         let map_data = writer.build_page_map_ordered(100, 101, 0x400);
 
-        // 2 page map entries + 1 data page entry + null terminator = 4 × 16 = 64 bytes
+        // 1 data page entry + 2 page map entries + null terminator = 4 × 16 = 64 bytes
         assert_eq!(map_data.len(), 64);
 
-        // First entry: page map page (id=100, size=0x400)
+        // First entry: the data page (id=1, comes first in file)
         let first_size = i64::from_le_bytes(map_data[0..8].try_into().unwrap());
         let first_id = i64::from_le_bytes(map_data[8..16].try_into().unwrap());
-        assert_eq!(first_size, 0x400);
-        assert_eq!(first_id, 100);
+        assert_eq!(first_id, 1);
+        assert!(first_size > 0);
 
-        // Third entry: the data page (id=1)
-        let data_id = i64::from_le_bytes(map_data[40..48].try_into().unwrap());
-        assert_eq!(data_id, 1);
+        // Second entry: page map page (id=100, size=0x400)
+        let pm_size = i64::from_le_bytes(map_data[16..24].try_into().unwrap());
+        let pm_id = i64::from_le_bytes(map_data[24..32].try_into().unwrap());
+        assert_eq!(pm_size, 0x400);
+        assert_eq!(pm_id, 100);
 
         // Null terminator (size=0, id=0)
         let term_size = i64::from_le_bytes(map_data[48..56].try_into().unwrap());

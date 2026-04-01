@@ -79,14 +79,14 @@ impl<'a> DwgObjectWriter<'a> {
         // (PLOTSTYLENAME, LAYOUT, PLOTSETTINGS, MATERIAL, COLOR, VISUALSTYLE)
         let entries: Vec<&(String, Handle)> = if self.version.r2000_plus() {
             dict.entries.iter()
-                .filter(|(_, h)| h.is_null() || self.is_writable_object(h))
+                .filter(|(_, h)| !h.is_null() && self.is_writable_object(h))
                 .collect()
         } else {
             dict.entries.iter().filter(|(name, h)| {
                 !matches!(name.as_str(),
                     "ACAD_PLOTSTYLENAME" | "ACAD_LAYOUT" | "ACAD_PLOTSETTINGS" |
                     "ACAD_MATERIAL" | "ACAD_COLOR" | "ACAD_VISUALSTYLE"
-                ) && (h.is_null() || self.is_writable_object(h))
+                ) && !h.is_null() && self.is_writable_object(h)
             }).collect()
         };
 
@@ -712,6 +712,11 @@ impl<'a> DwgObjectWriter<'a> {
                 .write_bit_short(style.text_bottom_attachment as i16);
         }
 
+        // R2013+ undocumented flag (DXF code 298)
+        if self.version.r2013_plus(self.dxf_version) {
+            self.writer.write_bit(style.unknown_flag_298);
+        }
+
         self.register_object(style.handle);
     }
 
@@ -832,10 +837,7 @@ impl<'a> DwgObjectWriter<'a> {
             &None,
         );
 
-        // Cloning flags (valid range 0..5; enum already constrains to valid values)
-        self.writer.write_bit_short(xrec.cloning_flags.to_value());
-
-        // Write raw data bytes if present (from DWG roundtrip)
+        // Write raw data bytes first (per spec: data before cloning flags)
         if !xrec.raw_data.is_empty() {
             self.writer.write_bit_long(xrec.raw_data.len() as i32);
             for &b in &xrec.raw_data {
@@ -844,6 +846,9 @@ impl<'a> DwgObjectWriter<'a> {
         } else {
             self.writer.write_bit_long(0);
         }
+
+        // R2000+: Cloning flags (valid range 0..5; enum already constrains to valid values)
+        self.writer.write_bit_short(xrec.cloning_flags.to_value());
 
         self.register_object(xrec.handle);
     }
