@@ -70,7 +70,15 @@ impl<'a> DwgObjectWriter<'a> {
                 | ObjectType::VisualStyle(_)
                 | ObjectType::Material(_)
                 | ObjectType::TableStyle(_) => false,
-                ObjectType::Unknown { raw_dwg_data, .. } => raw_dwg_data.is_some(),
+                ObjectType::Unknown { type_name, raw_dwg_data, .. } => {
+                    // Exclude types that would also be excluded if parsed into proper variants
+                    if type_name.starts_with("DWG_OBJ_106") // TABLESTYLE
+                        || type_name.starts_with("DWG_OBJ_105") // TABLECONTENT
+                    {
+                        return false;
+                    }
+                    raw_dwg_data.is_some()
+                }
                 _ => true,
             },
         }

@@ -274,8 +274,10 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Whether this version stores ACIS data externally (AcDsPrototype_1b section)
     /// rather than inline in the entity stream.
+    /// Currently disabled: always write inline because the DWG reader doesn't yet
+    /// parse the AcDsPrototype_1b section, which causes ACIS data loss on read-back.
     fn needs_acds_section(&self) -> bool {
-        self.dxf_version >= DxfVersion::AC1027
+        false // self.dxf_version >= DxfVersion::AC1027
     }
 
     /// Find the root dictionary handle by scanning document.objects.
@@ -1053,7 +1055,11 @@ impl<'a> DwgObjectWriter<'a> {
             &None,
         );
 
-        self.writer.write_variable_text(&app.name);
+        // Sanitize name: strip control chars and forbidden symbol table characters
+        let name: String = app.name.chars()
+            .filter(|c| !c.is_control() && !matches!(c, '<' | '>' | '/' | '\\' | '"' | ':' | ';' | '?' | '*' | '|' | ',' | '=' | '`'))
+            .collect();
+        self.writer.write_variable_text(&name);
         self.write_xref_dependant_bit();
 
         // Unknown byte (group 71)
@@ -1237,8 +1243,8 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r2007_plus() {
             // DIMFXL BD 49
             self.writer.write_bit_double(ds.dimfxl);
-            // DIMJOGANG BD 50
-            self.writer.write_bit_double(ds.dimjogang);
+            // DIMJOGANG BD 50 — clamp to valid range [5°..90°]
+            self.writer.write_bit_double(ds.dimjogang.clamp(0.0872665, 1.5708));
             // DIMTFILL BS 69
             self.writer.write_bit_short(ds.dimtfill);
             // DIMTFILLCLR CMC 70

@@ -11,7 +11,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use acadrust::types::DxfVersion;
-use acadrust::{DwgReader, DwgWriter};
+use acadrust::{DwgReader, DwgWriter, DxfReader, DxfWriter};
 
 const VERSIONS: &[(DxfVersion, &str)] = &[
     (DxfVersion::AC1018, "AC1018"),
@@ -87,6 +87,57 @@ fn main() {
                 }
             }
         }
+        // ── ASCII DXF roundtrip for each version ──
+        for &(ver, ver_str) in VERSIONS {
+            let out_name = format!("{}_rt_{}.dxf", stem, ver_str);
+            let out_path = dir.join(&out_name);
+
+            doc.version = ver;
+            let writer = DxfWriter::new(&doc);
+            match writer.write_to_vec() {
+                Ok(bytes) => {
+                    // Retry write in case of file locking (antivirus etc.)
+                    let mut written = false;
+                    for attempt in 0..5 {
+                        match std::fs::write(&out_path, &bytes) {
+                            Ok(_) => { written = true; break; }
+                            Err(e) if attempt < 4 => {
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                                continue;
+                            }
+                            Err(e) => {
+                                println!("  {} DXF → WRITE FAILED after retries: {}", ver_str, e);
+                                total_err += 1;
+                            }
+                        }
+                    }
+                    if !written { continue; }
+                    // Verify: re-read
+                    match DxfReader::from_reader(Cursor::new(bytes.clone())) {
+                        Ok(r2) => match r2.read() {
+                            Ok(doc2) => {
+                                let ent_count = doc2.entities().count();
+                                println!("  {} DXF → {} bytes, read-back OK ({} entities)", ver_str, bytes.len(), ent_count);
+                                total_ok += 1;
+                            }
+                            Err(e) => {
+                                println!("  {} DXF → {} bytes, READ-BACK FAILED: {}", ver_str, bytes.len(), e);
+                                total_err += 1;
+                            }
+                        },
+                        Err(e) => {
+                            println!("  {} DXF → {} bytes, READER INIT FAILED: {}", ver_str, bytes.len(), e);
+                            total_err += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("  {} DXF → WRITE FAILED: {}", ver_str, e);
+                    total_err += 1;
+                }
+            }
+        }
+
         // Restore original version
         doc.version = orig_version;
     }
