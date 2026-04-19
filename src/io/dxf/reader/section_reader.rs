@@ -569,8 +569,14 @@ impl<'a> SectionReader<'a> {
                         // Insert block entities into the document's flat entity map
                         // and collect their handles for the block record.
                         let mut entity_handles = Vec::with_capacity(block_entities.len());
-                        for entity in block_entities {
-                            let h = entity.common().handle;
+                        for mut entity in block_entities {
+                            let h = if entity.common().handle.is_null() {
+                                let new_h = document.allocate_handle();
+                                entity.as_entity_mut().set_handle(new_h);
+                                new_h
+                            } else {
+                                entity.common().handle
+                            };
                             entity_handles.push(h);
                             let idx = document.entities.len();
                             document.entities.push(entity);
