@@ -932,7 +932,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2000+: Render Mode RC 281
         if self.version.r2000_plus() {
-            self.writer.write_byte(0);
+            self.writer.write_byte(vport.render_mode.to_value() as u8);
         }
 
         // R2007+: lighting

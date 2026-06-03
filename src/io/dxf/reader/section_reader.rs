@@ -2148,6 +2148,7 @@ impl<'a> SectionReader<'a> {
                 76 => { if let Some(v) = pair.as_i16() { vport.grid_on = v != 0; } }
                 77 => { if let Some(v) = pair.as_i16() { vport.snap_style = v != 0; } }
                 78 => { if let Some(v) = pair.as_i16() { vport.snap_isopair = v; } }
+                281 => { if let Some(v) = pair.as_i16() { vport.render_mode = ViewportRenderMode::from_value(v); } }
                 _ => {}
             }
         }

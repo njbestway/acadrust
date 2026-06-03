@@ -434,6 +434,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Snap isopair
         self.writer.write_i16(78, vport.snap_isopair)?;
 
+        // Render mode / visual style
+        self.writer.write_i16(281, vport.render_mode.to_value())?;
+
         Ok(())
     }
 

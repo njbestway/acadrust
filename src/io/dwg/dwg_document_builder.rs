@@ -669,6 +669,9 @@ impl DwgDocumentBuilder {
                     vp.snap_style = data.snap_style;
                     vp.snap_isopair = data.snap_isopair;
                     vp.snap_rotation = data.snap_rotation;
+                    vp.render_mode = ViewportRenderMode::from_value(
+                        data.render_mode.unwrap_or(0) as i16,
+                    );
                     document.vports.add_allow_duplicate(vp);
                 },
                 ParsedEntry::AppId(h, data) => {

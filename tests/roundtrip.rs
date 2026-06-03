@@ -2102,3 +2102,52 @@ fn hatch_polyline_edge_roundtrip() {
         panic!("Expected Polyline edge");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  VPORT render mode (visual style) — DXF code 281 / DWG RC 281
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Distinct per-tile visual styles on duplicate `*Active` VPORT entries must
+/// survive both DXF and DWG roundtrips.
+#[test]
+fn roundtrip_vport_render_mode() {
+    use acadrust::entities::ViewportRenderMode as M;
+    use acadrust::tables::VPort;
+
+    let (mut doc, _) = build_rich_document(DxfVersion::AC1032);
+    // Replace the vport table with two tiled *Active entries carrying
+    // distinct visual styles (the model-tile scenario).
+    doc.vports.clear();
+    let mut a = VPort::new("*Active");
+    a.view_height = 100.0;
+    a.render_mode = M::FlatShaded;
+    a.handle = doc.allocate_handle();
+    let mut b = VPort::new("*Active");
+    b.view_height = 200.0;
+    b.render_mode = M::GouraudShadedWithEdges;
+    b.handle = doc.allocate_handle();
+    doc.vports.add_allow_duplicate(a);
+    doc.vports.add_allow_duplicate(b);
+
+    let modes = |d: &CadDocument| -> Vec<M> {
+        d.vports
+            .iter()
+            .filter(|v| v.name == "*Active")
+            .map(|v| v.render_mode)
+            .collect()
+    };
+
+    let dxf = modes(&dxf_roundtrip(doc.clone()));
+    assert!(dxf.contains(&M::FlatShaded), "DXF lost FlatShaded: {dxf:?}");
+    assert!(
+        dxf.contains(&M::GouraudShadedWithEdges),
+        "DXF lost GouraudShadedWithEdges: {dxf:?}"
+    );
+
+    let dwg = modes(&dwg_roundtrip(&doc));
+    assert!(dwg.contains(&M::FlatShaded), "DWG lost FlatShaded: {dwg:?}");
+    assert!(
+        dwg.contains(&M::GouraudShadedWithEdges),
+        "DWG lost GouraudShadedWithEdges: {dwg:?}"
+    );
+}
