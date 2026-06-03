@@ -1071,6 +1071,11 @@ impl CadDocument {
         acad.set_handle(self.allocate_handle());
         self.app_ids.add(acad).ok();
 
+        // Application ID under which annotative styles store their flag (XDATA).
+        let mut annotative = AppId::new("AcadAnnotative");
+        annotative.set_handle(self.allocate_handle());
+        self.app_ids.add(annotative).ok();
+
         // Add standard viewport
         let mut active_vport = VPort::active();
         active_vport.set_handle(self.allocate_handle());

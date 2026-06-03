@@ -549,14 +549,21 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         Ok(())
     }
 
-    /// Persist the annotative flag as XDATA under the `ACAD_ANNOTATIVE`
-    /// application. Only written when the record is annotative; its absence on
-    /// read means non-annotative.
+    /// Persist the annotative flag the standard way: XDATA under the
+    /// `AcadAnnotative` application, in the form
+    /// `AnnotativeData { <version=1> <flag> }`. Written only when the record
+    /// is annotative; its absence on read means non-annotative. This matches
+    /// how AutoCAD stores annotative on STYLE / DIMSTYLE / TABLESTYLE records.
     fn write_annotative_xdata(&mut self, annotative: bool) -> Result<()> {
-        if annotative {
-            self.writer.write_string(1001, "ACAD_ANNOTATIVE")?;
-            self.writer.write_i16(1070, 1)?;
+        if !annotative {
+            return Ok(());
         }
+        self.writer.write_string(1001, "AcadAnnotative")?;
+        self.writer.write_string(1000, "AnnotativeData")?;
+        self.writer.write_string(1002, "{")?;
+        self.writer.write_i16(1070, 1)?;
+        self.writer.write_i16(1070, 1)?;
+        self.writer.write_string(1002, "}")?;
         Ok(())
     }
 
@@ -2891,7 +2898,6 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Break gap size
         self.writer.write_double(143, style.break_gap_size)?;
-        self.write_annotative_xdata(style.is_annotative)?;
 
         Ok(())
     }

@@ -189,7 +189,8 @@ pub struct DimStyle {
     /// Obsolete DIMUNIT (code 270)
     pub dimunit: i16,
     /// Annotative: dimensions using this style scale with the annotation scale.
-    /// Persisted via the record's extension-dictionary `AnnotativeData` XRECORD.
+    /// Persisted as XDATA under the `AcadAnnotative` application:
+    /// `AnnotativeData { 1 <flag> }`.
     pub annotative: bool,
 }
 

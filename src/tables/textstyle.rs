@@ -56,7 +56,8 @@ pub struct TextStyle {
     /// Whether this style is xref-dependent
     pub xref_dependent: bool,
     /// Annotative: entities using this style scale with the annotation scale.
-    /// Persisted via the record's extension-dictionary `AnnotativeData` XRECORD.
+    /// Persisted as XDATA under the `AcadAnnotative` application:
+    /// `AnnotativeData { 1 <flag> }`.
     pub annotative: bool,
 }
 

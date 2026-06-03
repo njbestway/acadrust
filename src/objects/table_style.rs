@@ -485,7 +485,8 @@ pub struct TableStyle {
     /// Title row cell style.
     pub title_row_style: RowCellStyle,
     /// Annotative: tables using this style scale with the annotation scale.
-    /// Persisted via the record's extension-dictionary `AnnotativeData` XRECORD.
+    /// Persisted as XDATA under the `AcadAnnotative` application:
+    /// `AnnotativeData { 1 <flag> }`.
     pub annotative: bool,
 }
 
