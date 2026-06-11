@@ -368,6 +368,19 @@ impl SatRecord {
         self.tokens.get(index).and_then(|t| t.as_pointer())
     }
 
+    /// Pointer by ordinal: the `index`-th pointer token, skipping interleaved
+    /// scalar tokens. Most accessors use absolute positions (`token_pointer`)
+    /// because ACIS keeps parameters in fixed slots, but a few records gained
+    /// an extra scalar field in ASM (ShapeManager, AutoCAD 2013+) — e.g. a
+    /// vertex's tolerance int between its edge and point — where ordinal
+    /// indexing stays correct for both ACIS and ASM.
+    pub fn nth_pointer(&self, index: usize) -> Option<SatPointer> {
+        self.tokens
+            .iter()
+            .filter_map(|t| t.as_pointer())
+            .nth(index)
+    }
+
     /// Returns the string value at the given token position.
     pub fn token_string(&self, index: usize) -> Option<&str> {
         self.tokens.get(index).and_then(|t| match t {
@@ -803,12 +816,16 @@ impl<'a> SatVertex<'a> {
 
     /// Pointer to the edge.
     pub fn edge(&self) -> SatPointer {
-        self.record.token_pointer(1).unwrap_or(SatPointer::NULL)
+        self.record.nth_pointer(1).unwrap_or(SatPointer::NULL)
     }
 
     /// Pointer to the point geometry.
+    ///
+    /// Uses pointer-ordinal indexing so the ASM (AutoCAD 2013+) vertex layout
+    /// `$attr $edge <tolerance:int> $point` resolves the same as the classic
+    /// ACIS `$attr $edge $point`.
     pub fn point(&self) -> SatPointer {
-        self.record.token_pointer(2).unwrap_or(SatPointer::NULL)
+        self.record.nth_pointer(2).unwrap_or(SatPointer::NULL)
     }
 }
 
