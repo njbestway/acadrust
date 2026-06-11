@@ -360,7 +360,29 @@ impl SatRecord {
 
     /// Returns the float value of the token at the given position.
     pub fn token_float(&self, index: usize) -> Option<f64> {
-        self.tokens.get(index).and_then(|t| t.as_float())
+        // Coordinate-aware flat-float indexing. SAT text stores a point/vector
+        // as three separate float tokens, so the geometry accessors read
+        // px,py,pz / nx,ny,nz at consecutive indices. SAB/ASM (AutoCAD 2013+)
+        // packs each coordinate triple into ONE Position/Direction token, so
+        // expand those into three consecutive float slots here. Records with
+        // no Position tokens (all SAT, most SAB scalars) index 1:1 as before.
+        let mut slot = 0usize;
+        for t in &self.tokens {
+            if let SatToken::Position(x, y, z) = t {
+                for &c in &[*x, *y, *z] {
+                    if slot == index {
+                        return Some(c);
+                    }
+                    slot += 1;
+                }
+            } else {
+                if slot == index {
+                    return t.as_float();
+                }
+                slot += 1;
+            }
+        }
+        None
     }
 
     /// Returns the pointer at the given token position.
