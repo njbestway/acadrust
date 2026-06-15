@@ -831,10 +831,12 @@ pub struct SpatialFilterData {
 /// Read the AcDbSpatialFilter object body (after common non-entity data).
 ///
 /// Field order (ODA spec): point count (BS), `count` boundary points (2RD),
-/// boundary plane normal (3BD), clip bound origin (3BD), display-enabled bit,
-/// front-clip bit + optional distance (BD), back-clip bit + optional distance
-/// (BD), then the inverse-block and clip-bound transforms as 12 doubles each
-/// (BD). The two transforms use the same column-major layout as DXF code 40.
+/// boundary plane normal (3BD), clip bound origin (3BD), display-enabled flag
+/// (BS), front-clip flag (BS) + optional distance (BD), back-clip flag (BS) +
+/// optional distance (BD), then the inverse-block and clip-bound transforms as
+/// 12 doubles each (BD). The three flags mirror DXF codes 71/72/73 (i16), so
+/// they are bit-shorts, not single bits. The transforms use the same
+/// column-major layout as DXF code 40.
 pub fn read_spatial_filter(reader: &mut DwgMergedReader) -> SpatialFilterData {
     let mut d = SpatialFilterData::default();
     let num = safe_count(reader.read_bit_short() as i32);
@@ -843,11 +845,11 @@ pub fn read_spatial_filter(reader: &mut DwgMergedReader) -> SpatialFilterData {
     }
     d.extrusion = reader.read_3bit_double();
     d.clip_bound_origin = reader.read_3bit_double();
-    d.display_enabled = reader.read_bit();
-    if reader.read_bit() {
+    d.display_enabled = reader.read_bit_short() != 0;
+    if reader.read_bit_short() != 0 {
         d.front_clip = Some(reader.read_bit_double());
     }
-    if reader.read_bit() {
+    if reader.read_bit_short() != 0 {
         d.back_clip = Some(reader.read_bit_double());
     }
     for i in 0..12 {
@@ -961,10 +963,10 @@ mod tests {
             w.write_2raw_double(Vector2::new(5.0, 5.0));
             w.write_3bit_double(Vector3::new(0.0, 0.0, 1.0)); // extrusion
             w.write_3bit_double(Vector3::new(0.0, 0.0, 0.0)); // clip bound origin
-            w.write_bit(true); // display enabled
-            w.write_bit(true); // front clip on
+            w.write_bit_short(1); // display enabled
+            w.write_bit_short(1); // front clip on
             w.write_bit_double(2.5); // front clip dist
-            w.write_bit(false); // back clip off
+            w.write_bit_short(0); // back clip off
             for i in 0..12 { w.write_bit_double(i as f64); } // inverse block transform
             for i in 0..12 { w.write_bit_double((i + 100) as f64); } // clip bound transform
         });

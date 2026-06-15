@@ -17,13 +17,14 @@ use crate::types::{DxfVersion, Handle};
 use super::common;
 use super::DwgObjectWriter;
 
-/// Flatten a [`Matrix4`](crate::types::Matrix4) into 12 doubles holding its 4×3
-/// part in column-major order (4 columns of 3 rows); the bottom row is dropped.
-fn matrix_to_column_major(m: &crate::types::Matrix4) -> [f64; 12] {
+/// Flatten a [`Matrix4`](crate::types::Matrix4) into 12 doubles holding its 3×4
+/// part in row-major order (3 rows of 4); the bottom row is dropped. DWG stores
+/// the spatial-filter transforms row-major.
+fn matrix_to_row_major(m: &crate::types::Matrix4) -> [f64; 12] {
     let mut out = [0.0; 12];
     let mut i = 0;
-    for col in 0..4 {
-        for row in 0..3 {
+    for row in 0..3 {
+        for col in 0..4 {
             out[i] = m.m[row][col];
             i += 1;
         }
@@ -918,19 +919,19 @@ impl<'a> DwgObjectWriter<'a> {
         }
         self.writer.write_3bit_double(sf.normal);
         self.writer.write_3bit_double(sf.origin);
-        self.writer.write_bit(sf.display_enabled);
-        self.writer.write_bit(sf.front_clip.is_some());
+        self.writer.write_bit_short(sf.display_enabled as i16);
+        self.writer.write_bit_short(sf.front_clip.is_some() as i16);
         if let Some(d) = sf.front_clip {
             self.writer.write_bit_double(d);
         }
-        self.writer.write_bit(sf.back_clip.is_some());
+        self.writer.write_bit_short(sf.back_clip.is_some() as i16);
         if let Some(d) = sf.back_clip {
             self.writer.write_bit_double(d);
         }
-        for v in matrix_to_column_major(&sf.inverse_block_transform) {
+        for v in matrix_to_row_major(&sf.inverse_block_transform) {
             self.writer.write_bit_double(v);
         }
-        for v in matrix_to_column_major(&sf.clip_bound_transform) {
+        for v in matrix_to_row_major(&sf.clip_bound_transform) {
             self.writer.write_bit_double(v);
         }
 

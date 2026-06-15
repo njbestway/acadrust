@@ -2437,9 +2437,9 @@ impl DwgDocumentBuilder {
                     obj.front_clip = data.front_clip;
                     obj.back_clip = data.back_clip;
                     obj.inverse_block_transform =
-                        matrix_from_column_major(&data.inverse_block_transform);
+                        matrix_from_row_major(&data.inverse_block_transform);
                     obj.clip_bound_transform =
-                        matrix_from_column_major(&data.clip_bound_transform);
+                        matrix_from_row_major(&data.clip_bound_transform);
                     document.objects.insert(
                         Handle::from(handle),
                         crate::objects::ObjectType::SpatialFilter(obj),
@@ -2545,14 +2545,16 @@ impl DwgDocumentBuilder {
     }
 }
 
-/// Build a [`Matrix4`](crate::types::Matrix4) from 12 doubles holding a 4×3
-/// transform in column-major order (4 columns of 3 rows); bottom row implied.
-fn matrix_from_column_major(v: &[f64; 12]) -> crate::types::Matrix4 {
+/// Build a [`Matrix4`](crate::types::Matrix4) from 12 doubles holding a 3×4
+/// transform in row-major order (3 rows of 4: `[R | t]`); bottom row implied.
+/// DWG stores the spatial-filter transforms row-major (unlike DXF code 40,
+/// which is column-major).
+fn matrix_from_row_major(v: &[f64; 12]) -> crate::types::Matrix4 {
     crate::types::Matrix4 {
         m: [
-            [v[0], v[3], v[6], v[9]],
-            [v[1], v[4], v[7], v[10]],
-            [v[2], v[5], v[8], v[11]],
+            [v[0], v[1], v[2], v[3]],
+            [v[4], v[5], v[6], v[7]],
+            [v[8], v[9], v[10], v[11]],
             [0.0, 0.0, 0.0, 1.0],
         ],
     }
