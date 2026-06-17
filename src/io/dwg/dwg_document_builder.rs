@@ -2003,6 +2003,41 @@ impl DwgDocumentBuilder {
                     let _ = document.add_entity(EntityType::Body(e));
                 },
 
+                // ── ACAD_SURFACE family (ACIS-backed) ───────────────
+                OBJ_SURFACE | OBJ_PLANESURFACE | OBJ_EXTRUDEDSURFACE
+                | OBJ_LOFTEDSURFACE | OBJ_REVOLVEDSURFACE | OBJ_SWEPTSURFACE
+                | OBJ_NURBSURFACE => {
+                    let kind = match type_code {
+                        OBJ_PLANESURFACE => crate::entities::SurfaceKind::Plane,
+                        OBJ_EXTRUDEDSURFACE => crate::entities::SurfaceKind::Extruded,
+                        OBJ_LOFTEDSURFACE => crate::entities::SurfaceKind::Lofted,
+                        OBJ_REVOLVEDSURFACE => crate::entities::SurfaceKind::Revolved,
+                        OBJ_SWEPTSURFACE => crate::entities::SurfaceKind::Swept,
+                        OBJ_NURBSURFACE => crate::entities::SurfaceKind::Nurb,
+                        _ => crate::entities::SurfaceKind::Generic,
+                    };
+                    let data = entities::read_acis_entity(
+                        &mut reader, self.obj_reader.version(),
+                    );
+                    let mut e = Surface::new(kind);
+                    e.common = entity_common;
+                    e.acis_data.version = if data.is_binary {
+                        crate::entities::solid3d::AcisVersion::Version2
+                    } else {
+                        crate::entities::solid3d::AcisVersion::Version1
+                    };
+                    e.acis_data.sat_data = data.sat_data;
+                    e.acis_data.sab_data = data.sab_data;
+                    e.acis_data.is_binary = data.is_binary;
+                    e.wires = data.wires;
+                    e.silhouettes = data.silhouettes;
+                    // Preserve the raw object verbatim so DWG write-back keeps
+                    // the original surface type (no native surface encoder yet).
+                    e.dwg_handle_bits = reader.get_handle_bits();
+                    e.raw_dwg_data = Some(reader.raw_merged_data());
+                    let _ = document.add_entity(EntityType::Surface(e));
+                },
+
                 // ── Catch-all ──────────────────────────────────────
                 _ => {
                     let mut e = UnknownEntity::new(format!("DWG_TYPE_{}", type_code));
@@ -2427,6 +2462,26 @@ impl DwgDocumentBuilder {
                         crate::objects::ObjectType::GeoData(obj),
                     );
                 },
+                OBJ_SPATIALFILTER => {
+                    let data = objects::read_spatial_filter(&mut reader);
+                    let mut obj = crate::objects::SpatialFilter::new();
+                    obj.handle = Handle::from(handle);
+                    obj.owner = owner_handle;
+                    obj.boundary_points = data.points;
+                    obj.normal = data.extrusion;
+                    obj.origin = data.clip_bound_origin;
+                    obj.display_enabled = data.display_enabled;
+                    obj.front_clip = data.front_clip;
+                    obj.back_clip = data.back_clip;
+                    obj.inverse_block_transform =
+                        matrix_from_row_major(&data.inverse_block_transform);
+                    obj.clip_bound_transform =
+                        matrix_from_row_major(&data.clip_bound_transform);
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::SpatialFilter(obj),
+                    );
+                },
                 OBJ_BLOCKVISIBILITYPARAMETER => {
                     // Parse the visibility states into the side map, then still
                     // store the object verbatim as Unknown so DWG round-trip is
@@ -2527,6 +2582,21 @@ impl DwgDocumentBuilder {
     }
 }
 
+/// Build a [`Matrix4`](crate::types::Matrix4) from 12 doubles holding a 3×4
+/// transform in row-major order (3 rows of 4: `[R | t]`); bottom row implied.
+/// DWG stores the spatial-filter transforms row-major (unlike DXF code 40,
+/// which is column-major).
+fn matrix_from_row_major(v: &[f64; 12]) -> crate::types::Matrix4 {
+    crate::types::Matrix4 {
+        m: [
+            [v[0], v[1], v[2], v[3]],
+            [v[4], v[5], v[6], v[7]],
+            [v[8], v[9], v[10], v[11]],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    }
+}
+
 fn map_dimension_common(
     base: &mut crate::entities::dimension::DimensionBase,
     common: &entities::DimensionCommonData,
@@ -2535,6 +2605,8 @@ fn map_dimension_common(
     base.version = common.version_byte;
     base.normal = common.normal;
     base.text_middle_point = common.text_middle_point;
+    // Flags byte bit 0: dimension text positioned at a user-defined location.
+    base.text_user_positioned = (common.flags_byte & 0x01) != 0;
     base.text = common.text.clone();
     base.text_rotation = common.text_rotation;
     base.horizontal_direction = common.horizontal_direction;

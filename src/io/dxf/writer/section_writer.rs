@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::objects::{
     Dictionary, DictionaryVariable, DictionaryWithDefault, Group, ImageDefinition,
     ImageDefinitionReactor, Layout, MLineStyle, Material, MultiLeaderStyle,
-    ObjectType, PlotSettings, RasterVariables, Scale, SortEntitiesTable,
+    ObjectType, PlotSettings, RasterVariables, Scale, SortEntitiesTable, SpatialFilter,
     TableStyle, VisualStyle, BookColor, WipeoutVariables, XRecord,
 };
 use crate::tables::*;
@@ -1051,6 +1051,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             EntityType::Solid3D(e) => self.write_solid3d(e, owner),
             EntityType::Region(e) => self.write_region(e, owner),
             EntityType::Body(e) => self.write_body(e, owner),
+            // DXF surface export not yet supported; skip rather than emit
+            // malformed geometry.
+            EntityType::Surface(_) => Ok(()),
             EntityType::Table(e) => self.write_acad_table(e, owner),
             EntityType::Tolerance(e) => self.write_tolerance(e, owner),
             EntityType::PolyfaceMesh(e) => self.write_polyface_mesh(e, owner),
@@ -1604,6 +1607,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_string(2, &base.block_name)?;
         self.writer.write_point3d(10, base.definition_point)?;
         self.writer.write_point3d(11, base.text_middle_point)?;
+        // Bit 0x80 marks text positioned at a user-defined location.
+        let type_flags = if base.text_user_positioned {
+            type_flags | 0x80
+        } else {
+            type_flags
+        };
         self.writer.write_i16(70, type_flags)?;
         self.writer.write_double(53, base.text_rotation)?;
         self.writer.write_string(3, &base.style_name)?;
@@ -2382,7 +2391,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 ObjectType::Material(obj) => self.write_material(obj)?,
                 ObjectType::ImageDefinitionReactor(obj) => self.write_imagedef_reactor(obj)?,
                 ObjectType::GeoData(obj) => self.write_stub_handle_only("GEODATA", obj.handle, obj.owner)?,
-                ObjectType::SpatialFilter(obj) => self.write_stub_handle_only("SPATIAL_FILTER", obj.handle, obj.owner)?,
+                ObjectType::SpatialFilter(obj) => self.write_spatial_filter(obj)?,
                 ObjectType::RasterVariables(obj) => self.write_raster_variables(obj)?,
                 ObjectType::BookColor(obj) => self.write_bookcolor(obj)?,
                 ObjectType::PlaceHolder(obj) => self.write_stub_handle_only("ACDBPLACEHOLDER", obj.handle, obj.owner)?,
@@ -3113,6 +3122,48 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbRasterImageDefReactor")?;
         self.writer.write_i32(90, 2)?; // class version
         self.writer.write_handle(330, obj.image_handle)?;
+        Ok(())
+    }
+
+    /// Write a SPATIAL_FILTER object (block reference / XCLIP clip boundary).
+    ///
+    /// Inverse of [`read_spatial_filter`]. The two 4×3 transforms are emitted
+    /// as 12 code-40 doubles each, in column-major order, after the front/back
+    /// clip flags and distances.
+    fn write_spatial_filter(&mut self, obj: &SpatialFilter) -> Result<()> {
+        self.writer.write_string(0, "SPATIAL_FILTER")?;
+        self.writer.write_handle(5, obj.handle)?;
+        self.writer.write_handle(330, obj.owner)?;
+        self.writer.write_subclass("AcDbFilter")?;
+        self.writer.write_subclass("AcDbSpatialFilter")?;
+        self.writer.write_i16(70, obj.boundary_points.len() as i16)?;
+        for p in &obj.boundary_points {
+            self.writer.write_point2d(10, *p)?;
+        }
+        self.writer.write_point3d(210, obj.normal)?;
+        self.writer.write_point3d(11, obj.origin)?;
+        self.writer.write_i16(71, obj.display_enabled as i16)?;
+        self.writer.write_i16(72, obj.front_clip.is_some() as i16)?;
+        if let Some(d) = obj.front_clip {
+            self.writer.write_double(40, d)?;
+        }
+        self.writer.write_i16(73, obj.back_clip.is_some() as i16)?;
+        if let Some(d) = obj.back_clip {
+            self.writer.write_double(41, d)?;
+        }
+        self.write_matrix_column_major(&obj.inverse_block_transform)?;
+        self.write_matrix_column_major(&obj.clip_bound_transform)?;
+        Ok(())
+    }
+
+    /// Write a 4×3 transform as 12 code-40 doubles in DXF column-major order
+    /// (4 columns of 3 rows; the bottom matrix row is implied).
+    fn write_matrix_column_major(&mut self, m: &crate::types::Matrix4) -> Result<()> {
+        for col in 0..4 {
+            for row in 0..3 {
+                self.writer.write_double(40, m.m[row][col])?;
+            }
+        }
         Ok(())
     }
 

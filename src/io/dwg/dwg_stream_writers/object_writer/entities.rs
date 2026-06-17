@@ -60,6 +60,20 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Solid3D(e) => self.write_solid3d(e),
             EntityType::Region(e) => self.write_region(e),
             EntityType::Body(e) => self.write_body(e),
+            EntityType::Surface(e) => {
+                // Round-trip the surface verbatim from its preserved raw bytes
+                // (no native surface encoder yet). Without raw data we skip it,
+                // exactly like an unknown entity.
+                if let Some(ref raw_data) = e.raw_dwg_data {
+                    self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    // On R2013+ the ACIS geometry lives in the AcDsPrototype
+                    // section, not the entity record — re-queue it so the SAB
+                    // survives write-back alongside the raw entity stub.
+                    if self.needs_acds_section() {
+                        self.queue_sab_entry(&e.acis_data, e.common.handle);
+                    }
+                }
+            }
             EntityType::Table(_)
             | EntityType::Underlay(_) => {
                 // Not yet supported â€” silently skip
@@ -1443,8 +1457,9 @@ impl<'a> DwgObjectWriter<'a> {
         // Elevation BD 11 Z-coord
         self.writer.write_bit_double(base.text_middle_point.z);
 
-        // Flags byte (0 = text user-defined location)
-        self.writer.write_byte(0);
+        // Flags byte — bit 0: text positioned at a user-defined location.
+        self.writer
+            .write_byte(if base.text_user_positioned { 0x01 } else { 0 });
 
         // User text TV 1
         self.writer.write_variable_text(&base.text);
