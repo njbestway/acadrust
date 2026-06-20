@@ -1358,12 +1358,22 @@ impl SatDocument {
             rec.tokens = tokens;
             return;
         }
+        // No transform record yet — append one. Records are position-indexed,
+        // and the `End-of-ACIS-data` / `End-of-ASM-data` terminator must stay
+        // last (the parser stops there). Lift any terminator off, push the
+        // transform, then restore the terminator so it remains final;
+        // otherwise the new record sits past the terminator and is dropped on
+        // the next parse.
+        let terminator = self
+            .records
+            .iter()
+            .position(|r| r.entity_type.starts_with("End-of"))
+            .map(|p| self.records.remove(p));
         let index = self.records.len() as i32;
         let mut rec = SatRecord::new(index, "transform");
         rec.attribute = SatPointer::NULL;
         rec.tokens = tokens;
         self.records.push(rec);
-        self.header.num_records = self.records.len();
         // Wire the first body's transform pointer (4th pointer token:
         // next_body, lump, wire, transform).
         if let Some(body) = self.records.iter_mut().find(|r| r.entity_type == "body") {
@@ -1371,6 +1381,10 @@ impl SatDocument {
                 body.tokens[3] = SatToken::Pointer(SatPointer::new(index));
             }
         }
+        if let Some(term) = terminator {
+            self.records.push(term);
+        }
+        self.header.num_records = self.records.len();
     }
 
     /// Returns the number of entity records.
