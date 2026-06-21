@@ -107,14 +107,41 @@ pub(crate) fn transform_circle(e: &mut Circle, transform: &Transform) {
 // ── Arc ──────────────────────────────────────────────────────────────────────
 
 pub(crate) fn transform_arc(e: &mut Arc, transform: &Transform) {
-    e.center = transform.apply(e.center);
+    // The start/end angles are measured in the arc's plane, so a rotation or
+    // reflection must move them too — transform the actual endpoints and
+    // recompute the angles in the new plane. (Translating alone leaves the
+    // angles unchanged, as before.)
+    let ocs = Matrix3::arbitrary_axis(e.normal);
+    let endpoint = |ang: f64| {
+        let local = Vector3::new(e.radius * ang.cos(), e.radius * ang.sin(), 0.0);
+        e.center + ocs * local
+    };
+    let ws = transform.apply(endpoint(e.start_angle));
+    let we = transform.apply(endpoint(e.end_angle));
 
-    let unit_x = Vector3::new(1.0, 0.0, 0.0);
-    let transformed_unit = transform.apply_rotation(unit_x);
-    let scale_factor = transformed_unit.length();
+    let new_center = transform.apply(e.center);
+    let scale_factor = transform.apply_rotation(Vector3::new(1.0, 0.0, 0.0)).length();
+    let new_normal = transform.apply_rotation(e.normal).normalize();
+
+    let new_ocs_t = Matrix3::arbitrary_axis(new_normal).transpose();
+    let angle_of = |w: Vector3| {
+        let l = new_ocs_t * (w - new_center);
+        l.y.atan2(l.x)
+    };
+    let (a_start, a_end) = (angle_of(ws), angle_of(we));
+
+    // An arc is stored CCW from start→end. A reflection reverses orientation,
+    // so the reflected CCW arc traces CW — swap the endpoints to keep it CCW.
+    if is_reflecting(transform) {
+        e.start_angle = a_end;
+        e.end_angle = a_start;
+    } else {
+        e.start_angle = a_start;
+        e.end_angle = a_end;
+    }
+    e.center = new_center;
     e.radius *= scale_factor;
-
-    e.normal = transform.apply_rotation(e.normal).normalize();
+    e.normal = new_normal;
 }
 
 // ── Ellipse ──────────────────────────────────────────────────────────────────
