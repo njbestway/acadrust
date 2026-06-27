@@ -65,12 +65,14 @@ impl<'a> DwgObjectWriter<'a> {
                 // (no native surface encoder yet). Without raw data we skip it,
                 // exactly like an unknown entity.
                 if let Some(ref raw_data) = e.raw_dwg_data {
-                    self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
-                    // On R2013+ the ACIS geometry lives in the AcDsPrototype
-                    // section, not the entity record — re-queue it so the SAB
-                    // survives write-back alongside the raw entity stub.
-                    if self.needs_acds_section() {
-                        self.queue_sab_entry(&e.acis_data, e.common.handle);
+                    if self.raw_passthrough_compatible(e.dwg_source_version) {
+                        self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                        // On R2013+ the ACIS geometry lives in the AcDsPrototype
+                        // section, not the entity record — re-queue it so the SAB
+                        // survives write-back alongside the raw entity stub.
+                        if self.needs_acds_section() {
+                            self.queue_sab_entry(&e.acis_data, e.common.handle);
+                        }
                     }
                 }
             }
@@ -79,11 +81,13 @@ impl<'a> DwgObjectWriter<'a> {
                 // Not yet supported â€” silently skip
             }
             EntityType::Unknown(e) => {
-                // Write raw DWG data verbatim if available
+                // Write raw DWG data verbatim only when the target matches the
+                // source encoding family; otherwise drop rather than corrupt.
                 if let Some(ref raw_data) = e.raw_dwg_data {
-                    self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    if self.raw_passthrough_compatible(e.dwg_source_version) {
+                        self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    }
                 }
-                // else: no raw data â†’ silently skip (DXF-only unknown)
             }
         }
     }
@@ -450,35 +454,34 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_raw_double(e.first_corner.z);
             }
 
+            // Corners 2-4 are full 3DD (x/y/z) relative to the previous
+            // corner. z_is_zero only governs corner1.z (the RD above), NOT
+            // these default-double corners: when z is zero each z-DD is just
+            // the 2-bit "equals default" code, but it must still be present
+            // (the reader always consumes a full 3DD here).
             // 2nd corner 3DD (default = 1st corner)
             self.writer
                 .write_bit_double_with_default(e.second_corner.x, e.first_corner.x);
             self.writer
                 .write_bit_double_with_default(e.second_corner.y, e.first_corner.y);
-            if !z_is_zero {
-                self.writer
-                    .write_bit_double_with_default(e.second_corner.z, e.first_corner.z);
-            }
+            self.writer
+                .write_bit_double_with_default(e.second_corner.z, e.first_corner.z);
 
             // 3rd corner 3DD (default = 2nd corner)
             self.writer
                 .write_bit_double_with_default(e.third_corner.x, e.second_corner.x);
             self.writer
                 .write_bit_double_with_default(e.third_corner.y, e.second_corner.y);
-            if !z_is_zero {
-                self.writer
-                    .write_bit_double_with_default(e.third_corner.z, e.second_corner.z);
-            }
+            self.writer
+                .write_bit_double_with_default(e.third_corner.z, e.second_corner.z);
 
             // 4th corner 3DD (default = 3rd corner)
             self.writer
                 .write_bit_double_with_default(e.fourth_corner.x, e.third_corner.x);
             self.writer
                 .write_bit_double_with_default(e.fourth_corner.y, e.third_corner.y);
-            if !z_is_zero {
-                self.writer
-                    .write_bit_double_with_default(e.fourth_corner.z, e.third_corner.z);
-            }
+            self.writer
+                .write_bit_double_with_default(e.fourth_corner.z, e.third_corner.z);
 
             if !has_no_flags {
                 self.writer
@@ -540,8 +543,17 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2004+: owned object count when has_attribs
         let (attrib_handles, seqend_handle) = if e.has_attributes() {
-            let ahs: Vec<Handle> = (0..e.attributes.len())
-                .map(|_| self.alloc_handle())
+            // Preserve each attribute's original handle. The owning block's
+            // owned-entity list references these handles, so re-allocating them
+            // leaves dangling references (AutoCAD: eUnknownHandle on the space).
+            // Only allocate a fresh handle when one is missing (e.g. an
+            // attribute created programmatically with a null handle).
+            let ahs: Vec<Handle> = e.attributes.iter()
+                .map(|a| if a.common.handle.is_null() {
+                    self.alloc_handle()
+                } else {
+                    a.common.handle
+                })
                 .collect();
             let sh = self.alloc_handle();
 
@@ -2336,6 +2348,15 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ MultiLeader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_multileader(&mut self, e: &MultiLeader) {
+        // Prefer verbatim raw bytes (lossless) when the target matches the
+        // source encoding family — the native MLEADER context encoder is not
+        // yet byte-exact and AutoCAD rejects the re-encoded form.
+        if let Some(ref raw) = e.raw_dwg_data {
+            if self.raw_passthrough_compatible(e.dwg_source_version) {
+                self.register_raw_object(e.common.handle, raw, e.dwg_handle_bits);
+                return;
+            }
+        }
         // UNLISTED entity type â€” always use DXF class number (500+)
         let type_code = self.class_type_code("MULTILEADER", common::OBJ_MULTILEADER);
         self.entity_preamble(type_code, &e.common);

@@ -944,6 +944,17 @@ pub struct MultiLeader {
     pub enable_annotation_scale: bool,
     /// Extend leader to text.
     pub extend_leader_to_text: bool,
+    /// Raw DWG record bytes, preserved verbatim for lossless round-trip.
+    /// The MLEADER context is a large, intricate structure; until the native
+    /// encoder is byte-exact, the DWG reader captures the original record so
+    /// the writer can re-emit it verbatim (same encoding family only).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_dwg_data: Option<Vec<u8>>,
+    /// Handle-stream bit count captured alongside `raw_dwg_data`.
+    pub dwg_handle_bits: i64,
+    /// DWG version `raw_dwg_data` was read from (drop on incompatible save).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dwg_source_version: Option<crate::types::DxfVersion>,
 }
 
 impl MultiLeader {
@@ -987,6 +998,9 @@ impl MultiLeader {
             property_override_flags: MultiLeaderPropertyOverrideFlags::NONE,
             enable_annotation_scale: true,
             extend_leader_to_text: false,
+            raw_dwg_data: None,
+            dwg_handle_bits: 0,
+            dwg_source_version: None,
         }
     }
 

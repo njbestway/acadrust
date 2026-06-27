@@ -51,6 +51,9 @@ pub struct UnknownEntity {
     /// pairs, reproducing the original entity content.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub raw_dxf_codes: Option<Vec<(i32, String)>>,
+    /// DWG version `raw_dwg_data` was read from (drop on incompatible cross-version save).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dwg_source_version: Option<crate::types::DxfVersion>,
 }
 
 impl UnknownEntity {
@@ -63,6 +66,7 @@ impl UnknownEntity {
             raw_dwg_data: None,
             dwg_handle_bits: 0,
             raw_dxf_codes: None,
+            dwg_source_version: None,
         }
     }
 }

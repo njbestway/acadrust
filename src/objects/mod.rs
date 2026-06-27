@@ -329,6 +329,12 @@ pub enum ObjectType {
         raw_dwg_data: Option<Vec<u8>>,
         /// DWG handle-stream bit count (needed to reconstruct the correct split).
         raw_dwg_handle_bits: i64,
+        /// DWG version the `raw_dwg_data` bytes were read from. Verbatim
+        /// passthrough is only valid within the same encoding family; on an
+        /// incompatible cross-version save the writer drops the object instead
+        /// of emitting corrupt bytes. `None` = unknown source (e.g. DXF).
+        #[cfg_attr(feature = "serde", serde(skip))]
+        raw_dwg_version: Option<crate::types::DxfVersion>,
     },
 }
 

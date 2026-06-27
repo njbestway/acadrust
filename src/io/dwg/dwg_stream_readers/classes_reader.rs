@@ -125,7 +125,10 @@ pub fn read_classes(data: &[u8], version: DxfVersion, maintenance_version: u8) -
             let _unknown2 = reader.read_bit_long();
         }
 
-        classes.add_or_update(class);
+        // Preserve every entry in order: the DWG classes section is positional
+        // (object type = 500 + index), so deduping by dxf name would drop a
+        // legitimate duplicate-name class and shift all later class numbers.
+        classes.push_preserving(class);
     }
 
     // ── Verify end sentinel ──

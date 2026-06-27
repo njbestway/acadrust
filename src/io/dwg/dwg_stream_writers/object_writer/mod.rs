@@ -96,6 +96,11 @@ pub struct DwgObjectWriter<'a> {
     pub(super) sab_entries: Vec<(Handle, Vec<u8>)>,
     /// Tracks which object handles have already been written to prevent duplicates.
     pub(super) visited_objects: HashSet<Handle>,
+    /// Every handle actually emitted to the object map. Central guard against
+    /// writing the same handle twice (e.g. an xdictionary XRECORD reachable
+    /// from more than one path): a duplicate handle is a hard DWG integrity
+    /// error that AutoCAD's audit rejects, so register_* skips repeats.
+    pub(super) registered_handles: HashSet<u64>,
     /// Owner handle overrides for extension dictionaries whose parent entity
     /// was re-allocated (e.g. ATTRIB children of INSERT).
     pub(super) owner_overrides: std::collections::HashMap<Handle, Handle>,
@@ -183,6 +188,7 @@ impl<'a> DwgObjectWriter<'a> {
             output: Vec::with_capacity(64 * 1024),
             handle_map: Vec::with_capacity(1024),
             object_queue: VecDeque::new(),
+            registered_handles: HashSet::new(),
             prev_handle: None,
             next_handle: None,
             next_alloc_handle: max_h,
@@ -1751,18 +1757,21 @@ impl<'a> DwgObjectWriter<'a> {
             record.block_end_handle.value(),
         );
 
-        // R2000+: layout handle
-        if self.version.r2000_plus() {
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, record.layout.value());
-        }
-
-        // R2000+: insert handles (one per insert_count_byte)
+        // R2000+: insert handles come BEFORE the layout handle (ODA spec
+        // order: endblk, inserts[num_inserts], layout). Writing layout first
+        // desyncs the handle stream for any block that is referenced by an
+        // insert, making AutoCAD discard the block record (eWrongObjectType).
         if self.version.r2000_plus() {
             for &ih in &record.insert_handles {
                 self.writer
                     .write_handle(DwgReferenceType::SoftPointer, ih.value());
             }
+        }
+
+        // R2000+: layout handle
+        if self.version.r2000_plus() {
+            self.writer
+                .write_handle(DwgReferenceType::HardPointer, record.layout.value());
         }
 
         self.register_object(record.handle);

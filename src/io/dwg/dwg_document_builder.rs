@@ -1733,6 +1733,11 @@ impl DwgDocumentBuilder {
                     e.text_bottom_attachment = TextAttachmentType::from(data.text_bottom_attachment);
                     e.text_top_attachment = TextAttachmentType::from(data.text_top_attachment);
                     e.extend_leader_to_text = data.extend_leader_to_text;
+                    // Preserve the raw record for verbatim write-back (native
+                    // MLEADER encoder is not yet byte-exact).
+                    e.dwg_handle_bits = reader.get_handle_bits();
+                    e.raw_dwg_data = Some(reader.raw_merged_data());
+                    e.dwg_source_version = Some(document.version);
                     let _ = document.add_entity(EntityType::MultiLeader(e));
                 },
 
@@ -2043,6 +2048,7 @@ impl DwgDocumentBuilder {
                     // the original surface type (no native surface encoder yet).
                     e.dwg_handle_bits = reader.get_handle_bits();
                     e.raw_dwg_data = Some(reader.raw_merged_data());
+                    e.dwg_source_version = Some(document.version);
                     let _ = document.add_entity(EntityType::Surface(e));
                 },
 
@@ -2053,6 +2059,7 @@ impl DwgDocumentBuilder {
                     e.dwg_type_code = type_code;
                     e.dwg_handle_bits = reader.get_handle_bits();
                     e.raw_dwg_data = Some(reader.raw_merged_data());
+                    e.dwg_source_version = Some(document.version);
                     let _ = document.add_entity(EntityType::Unknown(e));
                 }
             }
@@ -2540,6 +2547,7 @@ impl DwgDocumentBuilder {
                             raw_dxf_codes: None,
                             raw_dwg_data: Some(raw_data),
                             raw_dwg_handle_bits: raw_handle_bits,
+                            raw_dwg_version: Some(document.version),
                         },
                     );
                 }
@@ -2561,6 +2569,7 @@ impl DwgDocumentBuilder {
                             raw_dxf_codes: None,
                             raw_dwg_data: Some(raw_data),
                             raw_dwg_handle_bits: raw_handle_bits,
+                            raw_dwg_version: Some(document.version),
                         },
                     );
                 }
@@ -2579,6 +2588,7 @@ impl DwgDocumentBuilder {
                             raw_dxf_codes: None,
                             raw_dwg_data: Some(raw_data),
                             raw_dwg_handle_bits: raw_handle_bits,
+                            raw_dwg_version: Some(document.version),
                         },
                     );
                 }

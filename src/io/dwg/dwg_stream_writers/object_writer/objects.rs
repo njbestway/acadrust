@@ -61,15 +61,35 @@ impl<'a> DwgObjectWriter<'a> {
             | ObjectType::VisualStyle(_)
             | ObjectType::Material(_)
             | ObjectType::TableStyle(_) => {}
-            ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, .. } => {
+            ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, raw_dwg_version, .. } => {
                 if let Some(ref raw) = raw_dwg_data {
-                    self.register_raw_object(*handle, raw, *raw_dwg_handle_bits);
+                    if self.raw_passthrough_compatible(*raw_dwg_version) {
+                        self.register_raw_object(*handle, raw, *raw_dwg_handle_bits);
+                    }
                 }
             }
         }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
+
+    /// Whether verbatim `raw_dwg_data` from `raw_dwg_version` can be re-emitted
+    /// to the current target. Raw bytes encode the object using the source
+    /// version's object-type encoding, stream layout and text encoding, which
+    /// differ across the R2004/R2007 and R2007/R2010 boundaries and cannot be
+    /// reframed without parsing the (unsupported) object — so passthrough is
+    /// only valid within the same encoding family. `None` (e.g. DXF) is treated
+    /// as compatible. Incompatible objects are dropped to keep the file valid.
+    pub(super) fn raw_passthrough_compatible(&self, raw_dwg_version: Option<DxfVersion>) -> bool {
+        match raw_dwg_version {
+            None => true,
+            Some(src) => {
+                let tgt = self.dxf_version;
+                (src >= DxfVersion::AC1021) == (tgt >= DxfVersion::AC1021)
+                    && (src >= DxfVersion::AC1024) == (tgt >= DxfVersion::AC1024)
+            }
+        }
+    }
 
     /// Returns `true` when the object at `handle` will actually be
     /// serialized by `write_object`.  Entries pointing to un-writable
@@ -84,14 +104,15 @@ impl<'a> DwgObjectWriter<'a> {
                 | ObjectType::VisualStyle(_)
                 | ObjectType::Material(_)
                 | ObjectType::TableStyle(_) => false,
-                ObjectType::Unknown { type_name, raw_dwg_data, .. } => {
+                ObjectType::Unknown { type_name, raw_dwg_data, raw_dwg_version, .. } => {
                     // Exclude types that would also be excluded if parsed into proper variants
                     if type_name.starts_with("DWG_OBJ_106") // TABLESTYLE
                         || type_name.starts_with("DWG_OBJ_105") // TABLECONTENT
                     {
                         return false;
                     }
-                    raw_dwg_data.is_some()
+                    // Exclude raw objects dropped on incompatible cross-version save.
+                    raw_dwg_data.is_some() && self.raw_passthrough_compatible(*raw_dwg_version)
                 }
                 _ => true,
             },
@@ -141,12 +162,14 @@ impl<'a> DwgObjectWriter<'a> {
         // Entry names + handles
         for (name, handle) in &entries {
             self.writer.write_variable_text(name);
-            let ref_type = if dict.hard_owner {
-                DwgReferenceType::HardOwnership
-            } else {
-                DwgReferenceType::SoftOwnership
-            };
-            self.writer.write_handle(ref_type, handle.value());
+            // Dictionary item handles ALWAYS use reference code 2 (soft owner),
+            // regardless of the hard-owner flag. The hard/soft distinction is
+            // carried only by the is_hardowner byte (and the DXF 350/360 group),
+            // NOT the DWG handle code. Writing code 3 here makes AutoCAD reject
+            // every entry (eWrongObjectType) and discard the whole dictionary.
+            // (libredwg dwg.spec: HANDLE_VECTOR_N(itemhandles, numitems, 2, 0).)
+            self.writer
+                .write_handle(DwgReferenceType::SoftOwnership, handle.value());
 
             // Enqueue referenced objects
             if !handle.is_null() {
@@ -201,12 +224,10 @@ impl<'a> DwgObjectWriter<'a> {
 
         for (name, handle) in &entries {
             self.writer.write_variable_text(name);
-            let ref_type = if dict.hard_owner {
-                DwgReferenceType::HardOwnership
-            } else {
-                DwgReferenceType::SoftOwnership
-            };
-            self.writer.write_handle(ref_type, handle.value());
+            // Dictionary item handles always use reference code 2 (see
+            // write_dictionary) — never code 3, which AutoCAD rejects.
+            self.writer
+                .write_handle(DwgReferenceType::SoftOwnership, handle.value());
 
             if !handle.is_null() {
                 self.object_queue.push_back(*handle);
@@ -855,11 +876,19 @@ impl<'a> DwgObjectWriter<'a> {
         // stream (owner first, then one per entry). Mirrors `read_sort_entities_
         // table`. (#146)
         for entry in &entries {
+            // Sort handles are sort-order keys, NOT object references — they use
+            // reference code 0 (Undefined/absolute), per the ODA spec
+            // (FIELD_HANDLE(sort_ents, 0, 5)). Writing them as a resolvable
+            // pointer makes AutoCAD's audit dereference them and mark the
+            // SORTENTS object ePermanentlyErased when a key has no live object.
             self.writer
-                .write_main_handle(DwgReferenceType::SoftPointer, entry.sort_handle.value());
+                .write_main_handle(DwgReferenceType::Undefined, entry.sort_handle.value());
         }
+        // block_owner is a soft pointer (code 4), not hard — matches the ODA
+        // spec FIELD_HANDLE(block_owner, 4, 0); a hard ref here makes AutoCAD
+        // reject the table (eWrongObjectType).
         self.writer
-            .write_handle(DwgReferenceType::HardPointer, table.block_owner_handle.value());
+            .write_handle(DwgReferenceType::SoftPointer, table.block_owner_handle.value());
         for entry in &entries {
             self.writer
                 .write_handle(DwgReferenceType::SoftPointer, entry.entity_handle.value());

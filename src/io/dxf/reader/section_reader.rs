@@ -1197,6 +1197,7 @@ impl<'a> SectionReader<'a> {
                             raw_dxf_codes: if raw_codes.is_empty() { None } else { Some(raw_codes) },
                             raw_dwg_data: None,
                             raw_dwg_handle_bits: 0,
+                            raw_dwg_version: None,
                         });
                     }
                 }

@@ -135,6 +135,15 @@ impl<'a> DwgObjectWriter<'a> {
     /// final output is flushed).  This is critical because the CRC-16
     /// operates on complete bytes.
     pub fn register_object(&mut self, handle: Handle) {
+        // Duplicate-handle guard: a handle must appear in the object map exactly
+        // once. If this one was already emitted (e.g. an xdictionary XRECORD
+        // reached from two paths), drop this repeat — duplicate handles are a
+        // hard integrity error AutoCAD's audit rejects.
+        if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
+            self.writer.reset();
+            return;
+        }
+
         // 1. Merge all sub-streams → single byte buffer
         //    (handle_start_bits is recorded during merge by the merged writer)
         let data = self.writer.merge();
@@ -208,6 +217,10 @@ impl<'a> DwgObjectWriter<'a> {
     /// that was between `[ModularShort(size)]` and `[CRC16]` in the
     /// original file.  We re-frame it with a fresh MS prefix and CRC.
     pub fn register_raw_object(&mut self, handle: Handle, raw_data: &[u8], handle_bits: i64) {
+        // Duplicate-handle guard (see register_object).
+        if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
+            return;
+        }
         let pos = self.output.len() as u32;
 
         // MS (size)
@@ -680,7 +693,18 @@ impl<'a> DwgObjectWriter<'a> {
     /// bytes are written back verbatim to preserve round-trip fidelity.
     /// Otherwise a BS 0 terminator is written (no EED).
     pub fn write_extended_data(&mut self, xdata: &crate::xdata::ExtendedData) {
-        if xdata.raw_dwg_eed.is_empty() {
+        // EED string entries (code 0) are code-page encoded pre-R2007 and
+        // UTF-16 in R2007+, so verbatim `raw_dwg_eed` bytes captured from a
+        // different encoding family garble and desync the record. Drop them on
+        // an incompatible cross-version save (write no EED) rather than corrupt.
+        let eed_compatible = match self.document.dwg_source_version {
+            None => true,
+            Some(src) => {
+                (src >= crate::types::DxfVersion::AC1021)
+                    == (self.dxf_version >= crate::types::DxfVersion::AC1021)
+            }
+        };
+        if xdata.raw_dwg_eed.is_empty() || !eed_compatible {
             // No EED: write BS 0 terminator
             self.writer.write_bit_short(0);
             return;

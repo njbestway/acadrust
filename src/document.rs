@@ -959,6 +959,13 @@ pub struct CadDocument {
     /// correct owned_object_count without re-expanding from the document model.
     pub(crate) block_entity_handles: HashMap<Handle, Vec<Handle>>,
 
+    /// DWG version this document was read from (set by the DWG reader).
+    /// Verbatim raw blobs (Unknown objects, EED) are encoded for this version
+    /// and cannot be re-emitted to a different encoding family without
+    /// corruption; the writer drops them on an incompatible cross-version save.
+    /// `None` when not loaded from DWG (new/DXF).
+    pub dwg_source_version: Option<DxfVersion>,
+
     /// Next handle to assign
     next_handle: u64,
 }
@@ -990,6 +997,7 @@ impl CadDocument {
             xdic_by_handle: HashMap::new(),
             reactors_by_handle: HashMap::new(),
             block_entity_handles: HashMap::new(),
+            dwg_source_version: None,
             // Start handle allocation above reserved table handles (0x1-0xA)
             // Table handles are well-known fixed values used by AutoCAD
             next_handle: 0x10,
@@ -1005,6 +1013,46 @@ impl CadDocument {
         let mut doc = Self::new();
         doc.version = version;
         doc
+    }
+
+    /// Whether writing this document to `target` would lose or corrupt data
+    /// that was captured verbatim from the source DWG version.
+    ///
+    /// Unsupported objects (e.g. AEC/Civil3D), raw graphical records
+    /// (Surface/MLEADER/unknown entities) and EED blobs are stored as the
+    /// source version's bytes; they can only be re-emitted to the same encoding
+    /// family. When `target` is in a different family the writer must drop
+    /// them, so a caller that wants a lossless round-trip should save in
+    /// [`dwg_source_version`](Self::dwg_source_version) instead. Returns false
+    /// when there is nothing version-locked (or the document is not from DWG).
+    pub fn has_version_locked_data(&self, target: DxfVersion) -> bool {
+        let src = match self.dwg_source_version {
+            Some(v) => v,
+            None => return false,
+        };
+        let same_family = (src >= DxfVersion::AC1021) == (target >= DxfVersion::AC1021)
+            && (src >= DxfVersion::AC1024) == (target >= DxfVersion::AC1024);
+        if same_family {
+            return false;
+        }
+        // Unsupported non-graphical objects preserved as raw bytes.
+        let raw_objects = self.objects.values().any(|o| {
+            matches!(o, crate::objects::ObjectType::Unknown { raw_dwg_data: Some(_), .. })
+        });
+        if raw_objects {
+            return true;
+        }
+        // Raw graphical records + per-entity EED.
+        let raw_entities = self.entities.iter().any(|e| {
+            let raw = match e {
+                crate::entities::EntityType::Unknown(u) => u.raw_dwg_data.is_some(),
+                crate::entities::EntityType::Surface(s) => s.raw_dwg_data.is_some(),
+                crate::entities::EntityType::MultiLeader(m) => m.raw_dwg_data.is_some(),
+                _ => false,
+            };
+            raw || !e.common().extended_data.raw_dwg_eed.is_empty()
+        });
+        raw_entities || self.eed_by_handle.values().any(|v| !v.is_empty())
     }
 
     /// Initialize default tables with standard entries

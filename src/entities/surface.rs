@@ -77,6 +77,8 @@ pub struct Surface {
     pub raw_dwg_data: Option<Vec<u8>>,
     /// Handle-stream bit length captured alongside `raw_dwg_data`.
     pub dwg_handle_bits: i64,
+    /// DWG version `raw_dwg_data` was read from (drop on incompatible cross-version save).
+    pub dwg_source_version: Option<crate::types::DxfVersion>,
 }
 
 impl Surface {
@@ -90,6 +92,7 @@ impl Surface {
             silhouettes: Vec::new(),
             raw_dwg_data: None,
             dwg_handle_bits: 0,
+            dwg_source_version: None,
         }
     }
 
