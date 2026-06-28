@@ -1372,6 +1372,14 @@ impl CadDocument {
 
     /// Allocate a new unique handle
     pub fn allocate_handle(&mut self) -> Handle {
+        // The DWG reader inserts objects straight into `objects` without
+        // bumping `next_handle`, but it does fix `header.handle_seed` up to the
+        // true max+1. Respect that as a floor so a post-load add (a new
+        // linetype, a drawn entity) never re-issues a higher-handled existing
+        // object's handle — which silently overwrites it and corrupts the file.
+        if self.header.handle_seed > self.next_handle {
+            self.next_handle = self.header.handle_seed;
+        }
         let handle = Handle::new(self.next_handle);
         self.next_handle += 1;
         // Keep HANDSEED in sync — DWG header requires this to be ≥ next_handle
