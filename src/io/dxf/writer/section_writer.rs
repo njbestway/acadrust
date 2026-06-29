@@ -45,6 +45,13 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
     bylayer_linetype_handle: Handle,
     /// Handle of the ByBlock linetype (treated as "unset" for MLeader etc.)
     byblock_linetype_handle: Handle,
+    /// Handle of the *Model_Space block record — owner fallback for entities
+    /// whose original owner was dropped during conversion (e.g. an application
+    /// container object with no DXF representation).
+    model_space_handle: Handle,
+    /// Handle of the root named-objects dictionary — owner fallback for
+    /// dictionaries whose owner was dropped.
+    root_dict_handle: Handle,
 }
 
 impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
@@ -60,6 +67,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             valid_handles: HashSet::new(),
             bylayer_linetype_handle: Handle::NULL,
             byblock_linetype_handle: Handle::NULL,
+            model_space_handle: Handle::NULL,
+            root_dict_handle: Handle::NULL,
         }
     }
 
@@ -67,13 +76,25 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Call this before writing BLOCKS / ENTITIES / OBJECTS.
     pub fn build_valid_handles(&mut self, document: &CadDocument) {
         let mut set = HashSet::new();
-        // Object handles
-        for h in document.objects.keys() {
+        // Object handles — but EXCLUDE unsupported objects read from DWG that
+        // have no DXF representation (Unknown with no raw_dxf_codes):
+        // write_unknown_object skips those, so any reference to them would
+        // dangle and must be filtered out, or strict CAD readers reject the
+        // file on audit.
+        for (h, obj) in document.objects.iter() {
+            if let ObjectType::Unknown { raw_dxf_codes, .. } = obj {
+                if raw_dxf_codes.is_none() {
+                    continue;
+                }
+            }
             set.insert(*h);
         }
-        // Entity handles (from all block records)
+        // Entity handles (from all block records); capture *Model_Space.
         for br in document.block_records.iter() {
             set.insert(br.handle());
+            if br.name.eq_ignore_ascii_case("*Model_Space") {
+                self.model_space_handle = br.handle();
+            }
             for eh in &br.entity_handles {
                 set.insert(*eh);
             }
@@ -91,6 +112,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         for r in document.views.iter() { set.insert(r.handle()); }
         for r in document.vports.iter() { set.insert(r.handle()); }
         for r in document.ucss.iter() { set.insert(r.handle()); }
+        self.root_dict_handle = Self::find_root_dict_handle(&document.objects);
         self.valid_handles = set;
         // Store ByLayer/ByBlock linetype handles for use as default in MLeader etc.
         if let Some(lt) = document.line_types.get("ByLayer") {
@@ -1067,8 +1089,25 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
     }
 
+    /// Return `owner` if it will be present in the output, else fall back to the
+    /// *Model_Space record. An entity whose original owner (e.g. a dropped
+    /// application container with no DXF form) is gone would otherwise emit a
+    /// dangling 330 reference that strict CAD readers reject on audit.
+    fn safe_entity_owner(&self, owner: Handle) -> Handle {
+        if owner == Handle::NULL
+            || self.valid_handles.is_empty()
+            || self.valid_handles.contains(&owner)
+            || self.model_space_handle == Handle::NULL
+        {
+            owner
+        } else {
+            self.model_space_handle
+        }
+    }
+
     /// Write common entity data with owner
     fn write_common_entity_data(&mut self, common: &EntityCommon, owner: Handle) -> Result<()> {
+        let owner = self.safe_entity_owner(owner);
         self.writer.write_handle(5, common.handle)?;
         self.writer.write_handle(330, owner)?;
 
@@ -2442,18 +2481,30 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_dictionary(&mut self, dict: &Dictionary, objects: &std::collections::HashMap<Handle, ObjectType>) -> Result<()> {
         self.writer.write_string(0, "DICTIONARY")?;
         self.writer.write_handle(5, dict.handle)?;
-        self.writer.write_handle(330, dict.owner)?;
+        let dict_owner = if dict.owner == Handle::NULL
+            || self.valid_handles.is_empty()
+            || self.valid_handles.contains(&dict.owner)
+            || self.root_dict_handle == Handle::NULL
+        {
+            dict.owner
+        } else {
+            self.root_dict_handle
+        };
+        self.writer.write_handle(330, dict_owner)?;
         self.writer.write_subclass("AcDbDictionary")?;
         self.writer
             .write_byte(280, if dict.hard_owner { 1 } else { 0 })?;
         self.writer.write_byte(281, dict.duplicate_cloning as u8)?;
 
         for (key, handle) in &dict.entries {
-            // Skip entries pointing to objects that don't exist in the
-            // document (e.g. unsupported DWG object types that were not
-            // read).  Writing dangling references causes CAD programs
-            // to report audit errors.
-            if !objects.contains_key(handle) {
+            // Skip entries pointing to objects that don't exist in the document,
+            // OR that exist only as an Unknown DWG object with no DXF form (and
+            // are therefore filtered out of valid_handles and never written).
+            // Writing dangling references causes CAD programs to report audit
+            // errors.
+            if !objects.contains_key(handle)
+                || (!self.valid_handles.is_empty() && !self.valid_handles.contains(handle))
+            {
                 continue;
             }
             self.writer.write_string(3, key)?;
