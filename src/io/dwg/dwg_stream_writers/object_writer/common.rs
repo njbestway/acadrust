@@ -135,6 +135,15 @@ impl<'a> DwgObjectWriter<'a> {
     /// final output is flushed).  This is critical because the CRC-16
     /// operates on complete bytes.
     pub fn register_object(&mut self, handle: Handle) {
+        // Duplicate-handle guard: a handle must appear in the object map exactly
+        // once. If this one was already emitted (e.g. an xdictionary XRECORD
+        // reached from two paths), drop this repeat — duplicate handles are a
+        // hard integrity error AutoCAD's audit rejects.
+        if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
+            self.writer.reset();
+            return;
+        }
+
         // 1. Merge all sub-streams → single byte buffer
         //    (handle_start_bits is recorded during merge by the merged writer)
         let data = self.writer.merge();
@@ -208,6 +217,10 @@ impl<'a> DwgObjectWriter<'a> {
     /// that was between `[ModularShort(size)]` and `[CRC16]` in the
     /// original file.  We re-frame it with a fresh MS prefix and CRC.
     pub fn register_raw_object(&mut self, handle: Handle, raw_data: &[u8], handle_bits: i64) {
+        // Duplicate-handle guard (see register_object).
+        if !handle.is_null() && !self.registered_handles.insert(handle.value()) {
+            return;
+        }
         let pos = self.output.len() as u32;
 
         // MS (size)
@@ -330,11 +343,13 @@ impl<'a> DwgObjectWriter<'a> {
                 .write_handle(DwgReferenceType::SoftPointer, r.value());
         }
 
-        // Filter entity xdic handle: only keep it if the referenced
-        // dictionary object actually exists in document.objects, otherwise
-        // BricsCAD reports "Object was erased" for the dangling reference.
+        // Filter entity xdic handle: only keep it if the referenced dictionary
+        // is actually WRITTEN. `contains_key` is not enough — a dictionary that
+        // is present in the document but dropped on this save (e.g. an AEC/
+        // version-locked object) would leave a dangling handle that AutoCAD's
+        // reader rejects (the object reads as improperly read / erased).
         let effective_entity_xdic = xdictionary_handle
-            .filter(|xdic| !xdic.is_null() && self.document.objects.contains_key(xdic));
+            .filter(|xdic| !xdic.is_null() && self.is_writable_object(xdic));
 
         // R2004+: no-xdic flag (MAIN) + conditional xdic handle (HANDLE)
         // Pre-R2004: always write xdic handle (0 if none)
@@ -662,8 +677,11 @@ impl<'a> DwgObjectWriter<'a> {
     /// 64-group "xref dependant" flag with explicit value.
     pub fn write_xref_dependant_bit_value(&mut self, xref_dep: bool) {
         if self.version.r2007_plus() {
-            // R2007+: xrefindex+1 BS 70 (combined flags)
-            let combined: i16 = if xref_dep { 0x10 } else { 0 };
+            // R2007+: is_xref_resolved BS — only 0 (not xref-dependent) or
+            // 256 (0x100, xref-resolved) are valid; the reader derives
+            // is_xref_dep from `== 256`. Writing 0x10 makes AutoCAD reject the
+            // record (eDwgObjectImproperlyRead) on xref-dependent table entries.
+            let combined: i16 = if xref_dep { 0x100 } else { 0 };
             self.writer.write_bit_short(combined);
         } else {
             // Pre-R2007: 64-flag B (Referenced), xrefindex+1 BS, Xdep B (XrefDependent)
@@ -680,7 +698,18 @@ impl<'a> DwgObjectWriter<'a> {
     /// bytes are written back verbatim to preserve round-trip fidelity.
     /// Otherwise a BS 0 terminator is written (no EED).
     pub fn write_extended_data(&mut self, xdata: &crate::xdata::ExtendedData) {
-        if xdata.raw_dwg_eed.is_empty() {
+        // EED string entries (code 0) are code-page encoded pre-R2007 and
+        // UTF-16 in R2007+, so verbatim `raw_dwg_eed` bytes captured from a
+        // different encoding family garble and desync the record. Drop them on
+        // an incompatible cross-version save (write no EED) rather than corrupt.
+        let eed_compatible = match self.document.dwg_source_version {
+            None => true,
+            Some(src) => {
+                (src >= crate::types::DxfVersion::AC1021)
+                    == (self.dxf_version >= crate::types::DxfVersion::AC1021)
+            }
+        };
+        if xdata.raw_dwg_eed.is_empty() || !eed_compatible {
             // No EED: write BS 0 terminator
             self.writer.write_bit_short(0);
             return;

@@ -1301,6 +1301,20 @@ impl DwgDocumentBuilder {
                     // Compute rotation from x_direction vector
                     e.rotation = data.x_direction.y.atan2(data.x_direction.x);
                     e.line_spacing_factor = data.linespacing_factor;
+                    e.background_fill_flags = data.background_flags;
+                    e.background_scale = data.background_scale;
+                    e.background_color = data.background_color;
+                    e.background_transparency = data.background_transparency;
+                    e.is_annotative = data.is_annotative;
+                    e.column_data = MTextColumnData {
+                        column_type: data.column_type,
+                        column_count: data.column_count,
+                        flow_reversed: data.column_flow_reversed,
+                        auto_height: data.column_auto_height,
+                        width: data.column_width,
+                        gutter: data.column_gutter,
+                        heights: data.column_heights,
+                    };
                     e.style = maps.style_name(data.style_handle);
                     let _ = document.add_entity(EntityType::MText(e));
                 },
@@ -1700,7 +1714,9 @@ impl DwgDocumentBuilder {
                     e.common = entity_common;
                     e.context = data.context;
                     e.style_handle = if data.style_handle != 0 { Some(Handle::from(data.style_handle)) } else { None };
-                    e.property_override_flags = MultiLeaderPropertyOverrideFlags::from_bits_truncate(data.property_override_flags);
+                    // Retain (not truncate) so flag bits the enum doesn't name
+                    // are preserved for a lossless re-write.
+                    e.property_override_flags = MultiLeaderPropertyOverrideFlags::from_bits_retain(data.property_override_flags);
                     e.path_type = MultiLeaderPathType::from(data.path_type);
                     e.line_color = data.line_color;
                     e.line_type_handle = if data.line_type_handle != 0 { Some(Handle::from(data.line_type_handle)) } else { None };
@@ -1733,6 +1749,11 @@ impl DwgDocumentBuilder {
                     e.text_bottom_attachment = TextAttachmentType::from(data.text_bottom_attachment);
                     e.text_top_attachment = TextAttachmentType::from(data.text_top_attachment);
                     e.extend_leader_to_text = data.extend_leader_to_text;
+                    // Preserve the raw record for verbatim write-back (native
+                    // MLEADER encoder is not yet byte-exact).
+                    e.dwg_handle_bits = reader.get_handle_bits();
+                    e.raw_dwg_data = Some(reader.raw_merged_data());
+                    e.dwg_source_version = Some(document.version);
                     let _ = document.add_entity(EntityType::MultiLeader(e));
                 },
 
@@ -1764,6 +1785,37 @@ impl DwgDocumentBuilder {
                     e.insertion_point = data.text_data.insertion_point;
                     e.height = data.text_data.height;
                     e.rotation = data.text_data.rotation;
+                    // Carry the full text geometry the reader parsed. Without
+                    // these the attribute reverts to left/baseline with no
+                    // alignment point (DataFlags 0x02|0x40), discarding the
+                    // real placement — AutoCAD's R2018 reader rejects it.
+                    e.horizontal_alignment = match data.text_data.horizontal_alignment {
+                        1 => HorizontalAlignment::Center,
+                        2 => HorizontalAlignment::Right,
+                        3 => HorizontalAlignment::Aligned,
+                        4 => HorizontalAlignment::Middle,
+                        5 => HorizontalAlignment::Fit,
+                        _ => HorizontalAlignment::Left,
+                    };
+                    e.vertical_alignment = match data.text_data.vertical_alignment {
+                        1 => VerticalAlignment::Bottom,
+                        2 => VerticalAlignment::Middle,
+                        3 => VerticalAlignment::Top,
+                        _ => VerticalAlignment::Baseline,
+                    };
+                    // Match the writer/reader convention: an alignment point is
+                    // only meaningful when the text is not left/baseline.
+                    e.alignment_point = if data.text_data.horizontal_alignment != 0
+                        || data.text_data.vertical_alignment != 0
+                    {
+                        data.text_data.alignment_point
+                    } else {
+                        crate::types::Vector3::ZERO
+                    };
+                    e.width_factor = data.text_data.width_factor;
+                    e.oblique_angle = data.text_data.oblique_angle;
+                    e.normal = data.text_data.normal;
+                    e.text_style = maps.style_name(data.text_data.style_handle);
                     // Collect pending — will be attached to parent INSERT
                     // after Pass 2 (owner_handle = INSERT handle).
                     pending_attributes
@@ -2043,6 +2095,7 @@ impl DwgDocumentBuilder {
                     // the original surface type (no native surface encoder yet).
                     e.dwg_handle_bits = reader.get_handle_bits();
                     e.raw_dwg_data = Some(reader.raw_merged_data());
+                    e.dwg_source_version = Some(document.version);
                     let _ = document.add_entity(EntityType::Surface(e));
                 },
 
@@ -2053,6 +2106,7 @@ impl DwgDocumentBuilder {
                     e.dwg_type_code = type_code;
                     e.dwg_handle_bits = reader.get_handle_bits();
                     e.raw_dwg_data = Some(reader.raw_merged_data());
+                    e.dwg_source_version = Some(document.version);
                     let _ = document.add_entity(EntityType::Unknown(e));
                 }
             }
@@ -2540,6 +2594,7 @@ impl DwgDocumentBuilder {
                             raw_dxf_codes: None,
                             raw_dwg_data: Some(raw_data),
                             raw_dwg_handle_bits: raw_handle_bits,
+                            raw_dwg_version: Some(document.version),
                         },
                     );
                 }
@@ -2561,6 +2616,7 @@ impl DwgDocumentBuilder {
                             raw_dxf_codes: None,
                             raw_dwg_data: Some(raw_data),
                             raw_dwg_handle_bits: raw_handle_bits,
+                            raw_dwg_version: Some(document.version),
                         },
                     );
                 }
@@ -2579,6 +2635,7 @@ impl DwgDocumentBuilder {
                             raw_dxf_codes: None,
                             raw_dwg_data: Some(raw_data),
                             raw_dwg_handle_bits: raw_handle_bits,
+                            raw_dwg_version: Some(document.version),
                         },
                     );
                 }

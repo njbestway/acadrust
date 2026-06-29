@@ -17,6 +17,160 @@ use crate::types::{DxfVersion, Handle};
 use super::common;
 use super::DwgObjectWriter;
 
+/// Value type of an XRECORD/xdata resbuf item, keyed by its group code.
+/// Mirrors libredwg `dwg_resbuf_value_type`. Only `Str` is version-specific
+/// (code page pre-R2007, UTF-16 since); every other type is a fixed byte run.
+#[derive(PartialEq)]
+enum XdVt {
+    Str,
+    Real,
+    Int16,
+    Int32,
+    Int64,
+    Int8,
+    Point3d,
+    Binary,
+    Handle,
+    Invalid,
+}
+
+fn xdata_value_type(gc: i16) -> XdVt {
+    use XdVt::*;
+    match gc {
+        g if g < 0 => Handle,
+        0..=4 => Str,
+        5 => Handle,
+        6..=9 => Str,
+        10..=37 => Point3d,
+        38..=59 => Real,
+        60..=79 => Int16,
+        80..=99 => Int32,
+        100..=102 => Str,
+        105 => Handle,
+        110..=139 => Point3d,
+        140..=149 => Real,
+        150..=169 => Int64,
+        170..=179 => Int16,
+        210..=269 => Point3d,
+        270..=279 => Int16,
+        280..=289 => Int8,
+        290..=299 => Int8, // bool, one byte
+        300..=309 => Str,
+        310..=319 => Binary,
+        320..=369 => Handle, // 320-329 handle, 330-369 objectid (8 bytes)
+        370..=389 => Int16,
+        390..=399 => Handle,
+        400..=409 => Int16,
+        410..=419 => Str,
+        420..=429 => Int32,
+        430..=439 => Str,
+        440..=459 => Int32,
+        460..=469 => Real,
+        470..=479 => Str,
+        999 => Str,
+        1004 => Binary,
+        1000..=1009 => Str,
+        1010..=1039 => Point3d,
+        1040..=1042 => Real,
+        1043..=1069 => Point3d,
+        1070 => Int16,
+        1071 => Int32,
+        _ => Invalid,
+    }
+}
+
+/// Re-encode an XRECORD's xdata byte blob between the code-page (pre-R2007) and
+/// UTF-16 (R2007+) string encodings, copying every non-string item verbatim.
+///
+/// XRECORD framing is already written version-correctly by the normal object
+/// path; only the inline strings inside the xdata are version-specific. Without
+/// this a cross-version save would emit the source version's strings and the
+/// reader would mis-parse them ("Invalid xdata type"). Items are byte-aligned
+/// (every value is a byte multiple). Code-page strings are treated as Latin-1,
+/// which is exact for the ASCII keys/app names XRECORDs carry.
+fn transcode_xrecord_xdata(raw: &[u8], src_unicode: bool, tgt_unicode: bool) -> Vec<u8> {
+    if src_unicode == tgt_unicode {
+        return raw.to_vec();
+    }
+    let rd_u16 = |b: &[u8], i: usize| (b[i] as u16) | ((b[i + 1] as u16) << 8);
+    let mut out = Vec::with_capacity(raw.len() + raw.len() / 2);
+    let mut p = 0usize;
+    while p + 2 <= raw.len() {
+        let gc = rd_u16(raw, p) as i16;
+        let vt = xdata_value_type(gc);
+        if vt == XdVt::Invalid {
+            break;
+        }
+        out.extend_from_slice(&raw[p..p + 2]); // group code
+        p += 2;
+        // Fixed-size values: copy the exact byte run verbatim.
+        let fixed = match vt {
+            XdVt::Real | XdVt::Int64 | XdVt::Handle => Some(8usize),
+            XdVt::Point3d => Some(24),
+            XdVt::Int32 => Some(4),
+            XdVt::Int16 => Some(2),
+            XdVt::Int8 => Some(1),
+            _ => None,
+        };
+        if let Some(n) = fixed {
+            if p + n > raw.len() {
+                break;
+            }
+            out.extend_from_slice(&raw[p..p + n]);
+            p += n;
+            continue;
+        }
+        if vt == XdVt::Binary {
+            if p >= raw.len() {
+                break;
+            }
+            let size = raw[p] as usize;
+            if p + 1 + size > raw.len() {
+                break;
+            }
+            out.extend_from_slice(&raw[p..p + 1 + size]);
+            p += 1 + size;
+            continue;
+        }
+        // Str: decode source format, re-encode target format.
+        if p + 2 > raw.len() {
+            break;
+        }
+        let len = rd_u16(raw, p) as usize;
+        p += 2;
+        let text: String = if src_unicode {
+            if p + len * 2 > raw.len() {
+                break;
+            }
+            let units: Vec<u16> = (0..len).map(|i| rd_u16(raw, p + i * 2)).collect();
+            p += len * 2;
+            String::from_utf16_lossy(&units)
+        } else {
+            // [u8 codepage][len bytes]
+            if p + 1 + len > raw.len() {
+                break;
+            }
+            p += 1; // codepage byte (treat bytes as Latin-1)
+            let s: String = raw[p..p + len].iter().map(|&b| b as char).collect();
+            p += len;
+            s
+        };
+        if tgt_unicode {
+            let utf16: Vec<u16> = text.encode_utf16().collect();
+            out.extend_from_slice(&(utf16.len() as u16).to_le_bytes());
+            for u in utf16 {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+        } else {
+            let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
+            out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+            out.push(30); // ANSI_1252 code page
+            out.extend_from_slice(&bytes);
+        }
+    }
+    out
+}
+
 /// Flatten a [`Matrix4`](crate::types::Matrix4) into 12 doubles holding its 3×4
 /// part in row-major order (3 rows of 4); the bottom row is dropped. DWG stores
 /// the spatial-filter transforms row-major.
@@ -61,9 +215,11 @@ impl<'a> DwgObjectWriter<'a> {
             | ObjectType::VisualStyle(_)
             | ObjectType::Material(_)
             | ObjectType::TableStyle(_) => {}
-            ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, .. } => {
+            ObjectType::Unknown { handle, raw_dwg_data, raw_dwg_handle_bits, raw_dwg_version, .. } => {
                 if let Some(ref raw) = raw_dwg_data {
-                    self.register_raw_object(*handle, raw, *raw_dwg_handle_bits);
+                    if self.raw_passthrough_compatible(*raw_dwg_version) {
+                        self.register_raw_object(*handle, raw, *raw_dwg_handle_bits);
+                    }
                 }
             }
         }
@@ -71,12 +227,30 @@ impl<'a> DwgObjectWriter<'a> {
 
     // ── Helpers ──────────────────────────────────────────────────────
 
+    /// Whether verbatim `raw_dwg_data` from `raw_dwg_version` can be re-emitted
+    /// to the current target. Raw bytes encode the object using the source
+    /// version's object-type encoding, stream layout and text encoding, which
+    /// differ across the R2004/R2007 and R2007/R2010 boundaries and cannot be
+    /// reframed without parsing the (unsupported) object — so passthrough is
+    /// only valid within the same encoding family. `None` (e.g. DXF) is treated
+    /// as compatible. Incompatible objects are dropped to keep the file valid.
+    pub(super) fn raw_passthrough_compatible(&self, raw_dwg_version: Option<DxfVersion>) -> bool {
+        match raw_dwg_version {
+            None => true,
+            Some(src) => {
+                let tgt = self.dxf_version;
+                (src >= DxfVersion::AC1021) == (tgt >= DxfVersion::AC1021)
+                    && (src >= DxfVersion::AC1024) == (tgt >= DxfVersion::AC1024)
+            }
+        }
+    }
+
     /// Returns `true` when the object at `handle` will actually be
     /// serialized by `write_object`.  Entries pointing to un-writable
     /// objects (VisualStyle, Material, TableStyle, etc.) must be
     /// excluded from dictionary records so the DWG doesn't contain
     /// dangling handle references.
-    fn is_writable_object(&self, handle: &Handle) -> bool {
+    pub(super) fn is_writable_object(&self, handle: &Handle) -> bool {
         match self.document.objects.get(handle) {
             None => false,
             Some(obj) => match obj {
@@ -84,14 +258,15 @@ impl<'a> DwgObjectWriter<'a> {
                 | ObjectType::VisualStyle(_)
                 | ObjectType::Material(_)
                 | ObjectType::TableStyle(_) => false,
-                ObjectType::Unknown { type_name, raw_dwg_data, .. } => {
+                ObjectType::Unknown { type_name, raw_dwg_data, raw_dwg_version, .. } => {
                     // Exclude types that would also be excluded if parsed into proper variants
                     if type_name.starts_with("DWG_OBJ_106") // TABLESTYLE
                         || type_name.starts_with("DWG_OBJ_105") // TABLECONTENT
                     {
                         return false;
                     }
-                    raw_dwg_data.is_some()
+                    // Exclude raw objects dropped on incompatible cross-version save.
+                    raw_dwg_data.is_some() && self.raw_passthrough_compatible(*raw_dwg_version)
                 }
                 _ => true,
             },
@@ -141,12 +316,14 @@ impl<'a> DwgObjectWriter<'a> {
         // Entry names + handles
         for (name, handle) in &entries {
             self.writer.write_variable_text(name);
-            let ref_type = if dict.hard_owner {
-                DwgReferenceType::HardOwnership
-            } else {
-                DwgReferenceType::SoftOwnership
-            };
-            self.writer.write_handle(ref_type, handle.value());
+            // Dictionary item handles ALWAYS use reference code 2 (soft owner),
+            // regardless of the hard-owner flag. The hard/soft distinction is
+            // carried only by the is_hardowner byte (and the DXF 350/360 group),
+            // NOT the DWG handle code. Writing code 3 here makes AutoCAD reject
+            // every entry (eWrongObjectType) and discard the whole dictionary.
+            // (libredwg dwg.spec: HANDLE_VECTOR_N(itemhandles, numitems, 2, 0).)
+            self.writer
+                .write_handle(DwgReferenceType::SoftOwnership, handle.value());
 
             // Enqueue referenced objects
             if !handle.is_null() {
@@ -201,12 +378,10 @@ impl<'a> DwgObjectWriter<'a> {
 
         for (name, handle) in &entries {
             self.writer.write_variable_text(name);
-            let ref_type = if dict.hard_owner {
-                DwgReferenceType::HardOwnership
-            } else {
-                DwgReferenceType::SoftOwnership
-            };
-            self.writer.write_handle(ref_type, handle.value());
+            // Dictionary item handles always use reference code 2 (see
+            // write_dictionary) — never code 3, which AutoCAD rejects.
+            self.writer
+                .write_handle(DwgReferenceType::SoftOwnership, handle.value());
 
             if !handle.is_null() {
                 self.object_queue.push_back(*handle);
@@ -855,11 +1030,19 @@ impl<'a> DwgObjectWriter<'a> {
         // stream (owner first, then one per entry). Mirrors `read_sort_entities_
         // table`. (#146)
         for entry in &entries {
+            // Sort handles are sort-order keys, NOT object references — they use
+            // reference code 0 (Undefined/absolute), per the ODA spec
+            // (FIELD_HANDLE(sort_ents, 0, 5)). Writing them as a resolvable
+            // pointer makes AutoCAD's audit dereference them and mark the
+            // SORTENTS object ePermanentlyErased when a key has no live object.
             self.writer
-                .write_main_handle(DwgReferenceType::SoftPointer, entry.sort_handle.value());
+                .write_main_handle(DwgReferenceType::Undefined, entry.sort_handle.value());
         }
+        // block_owner is a soft pointer (code 4), not hard — matches the ODA
+        // spec FIELD_HANDLE(block_owner, 4, 0); a hard ref here makes AutoCAD
+        // reject the table (eWrongObjectType).
         self.writer
-            .write_handle(DwgReferenceType::HardPointer, table.block_owner_handle.value());
+            .write_handle(DwgReferenceType::SoftPointer, table.block_owner_handle.value());
         for entry in &entries {
             self.writer
                 .write_handle(DwgReferenceType::SoftPointer, entry.entity_handle.value());
@@ -879,10 +1062,24 @@ impl<'a> DwgObjectWriter<'a> {
             &None,
         );
 
-        // Write raw data bytes first (per spec: data before cloning flags)
-        if !xrec.raw_data.is_empty() {
-            self.writer.write_bit_long(xrec.raw_data.len() as i32);
-            for &b in &xrec.raw_data {
+        // Write xdata bytes first (per spec: data before cloning flags). The
+        // blob is captured verbatim from the source version; when saving to a
+        // different string-encoding family (code page <-> UTF-16) re-encode the
+        // inline strings so the xdata stays valid instead of being dropped.
+        let xdata = if xrec.raw_data.is_empty() {
+            Vec::new()
+        } else {
+            let tgt_unicode = self.dxf_version >= DxfVersion::AC1021;
+            match self.document.dwg_source_version {
+                Some(src) if (src >= DxfVersion::AC1021) != tgt_unicode => {
+                    transcode_xrecord_xdata(&xrec.raw_data, src >= DxfVersion::AC1021, tgt_unicode)
+                }
+                _ => xrec.raw_data.clone(),
+            }
+        };
+        if !xdata.is_empty() {
+            self.writer.write_bit_long(xdata.len() as i32);
+            for &b in &xdata {
                 self.writer.write_byte(b);
             }
         } else {

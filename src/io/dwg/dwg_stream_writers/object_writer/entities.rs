@@ -65,12 +65,14 @@ impl<'a> DwgObjectWriter<'a> {
                 // (no native surface encoder yet). Without raw data we skip it,
                 // exactly like an unknown entity.
                 if let Some(ref raw_data) = e.raw_dwg_data {
-                    self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
-                    // On R2013+ the ACIS geometry lives in the AcDsPrototype
-                    // section, not the entity record — re-queue it so the SAB
-                    // survives write-back alongside the raw entity stub.
-                    if self.needs_acds_section() {
-                        self.queue_sab_entry(&e.acis_data, e.common.handle);
+                    if self.raw_passthrough_compatible(e.dwg_source_version) {
+                        self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                        // On R2013+ the ACIS geometry lives in the AcDsPrototype
+                        // section, not the entity record — re-queue it so the SAB
+                        // survives write-back alongside the raw entity stub.
+                        if self.needs_acds_section() {
+                            self.queue_sab_entry(&e.acis_data, e.common.handle);
+                        }
                     }
                 }
             }
@@ -79,11 +81,13 @@ impl<'a> DwgObjectWriter<'a> {
                 // Not yet supported â€” silently skip
             }
             EntityType::Unknown(e) => {
-                // Write raw DWG data verbatim if available
+                // Write raw DWG data verbatim only when the target matches the
+                // source encoding family; otherwise drop rather than corrupt.
                 if let Some(ref raw_data) = e.raw_dwg_data {
-                    self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    if self.raw_passthrough_compatible(e.dwg_source_version) {
+                        self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    }
                 }
-                // else: no raw data â†’ silently skip (DXF-only unknown)
             }
         }
     }
@@ -390,14 +394,91 @@ impl<'a> DwgObjectWriter<'a> {
         // R2004+:
         if self.version.r2004_plus() {
             // Background flags BL 90 (0 = no background)
-            self.writer.write_bit_long(0);
+            self.writer.write_bit_long(e.background_fill_flags);
+
+            // The background-fill block is written when the UseBackgroundFillColor
+            // bit (0x01) is set, or — for R2018+ — when the TextFrame bit (0x10)
+            // is set. Mirrors read_mtext.
+            if (e.background_fill_flags & 0x01) != 0
+                || (self.version.r2018_plus(self.dxf_version)
+                    && (e.background_fill_flags & 0x10) != 0)
+            {
+                // Background scale factor BD 45
+                self.writer.write_bit_double(e.background_scale);
+                // Background color CMC 63
+                self.writer.write_cm_color(&e.background_color);
+                // Background transparency BL 441
+                self.writer.write_bit_long(e.background_transparency);
+            }
         }
 
         // R2018+:
         if self.version.r2018_plus(self.dxf_version) {
             // Is NOT annotative B
-            // Write false = "it IS annotative" = skip redundant fields
-            self.writer.write_bit(false);
+            self.writer.write_bit(!e.is_annotative);
+
+            // IF MTEXT is not annotative: redundant fields + column data.
+            if !e.is_annotative {
+                // Version BS (default 0; AcadSharp emits 4)
+                self.writer.write_bit_short(4);
+                // Default flag B (default true)
+                self.writer.write_bit(true);
+                // Registered application H (null hard pointer)
+                self.writer
+                    .write_handle(DwgReferenceType::HardPointer, 0);
+
+                // ── BEGIN redundant fields (discarded on read) ──
+                // Attachment point BL
+                self.writer.write_bit_long(e.attachment_point as i32);
+                // X-axis dir 3BD
+                let x_dir_redundant =
+                    Vector3::new(e.rotation.cos(), e.rotation.sin(), 0.0);
+                self.writer.write_3bit_double(x_dir_redundant);
+                // Insertion point 3BD
+                self.writer.write_3bit_double(e.insertion_point);
+                // Rect width BD
+                self.writer.write_bit_double(e.rectangle_width);
+                // Rect height BD
+                self.writer
+                    .write_bit_double(e.rectangle_height.unwrap_or(0.0));
+                // Extents width BD
+                self.writer.write_bit_double(0.0);
+                // Extents height BD
+                self.writer.write_bit_double(0.0);
+                // ── END redundant fields ──
+
+                let col = &e.column_data;
+                // Column type BS 71
+                self.writer.write_bit_short(col.column_type);
+                if col.column_type != 0 {
+                    // Column height count BL 72. For dynamic, non-auto-height
+                    // columns the reader consumes exactly this many height
+                    // doubles, so it must match the number we emit below.
+                    let has_heights = col.column_type == 2 && !col.auto_height;
+                    let height_count = if has_heights {
+                        col.heights.len() as i32
+                    } else {
+                        col.column_count
+                    };
+                    self.writer.write_bit_long(height_count);
+                    // Column width BD 44
+                    self.writer.write_bit_double(col.width);
+                    // Gutter BD 45
+                    self.writer.write_bit_double(col.gutter);
+                    // Auto height? B 73
+                    self.writer.write_bit(col.auto_height);
+                    // Flow reversed? B 74
+                    self.writer.write_bit(col.flow_reversed);
+
+                    // Per-column heights only for dynamic, non-auto columns.
+                    if !col.auto_height && col.column_type == 2 {
+                        for h in &col.heights {
+                            // Column height BD 46
+                            self.writer.write_bit_double(*h);
+                        }
+                    }
+                }
+            }
         }
 
         self.register_object(e.common.handle);
@@ -450,35 +531,34 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_raw_double(e.first_corner.z);
             }
 
+            // Corners 2-4 are full 3DD (x/y/z) relative to the previous
+            // corner. z_is_zero only governs corner1.z (the RD above), NOT
+            // these default-double corners: when z is zero each z-DD is just
+            // the 2-bit "equals default" code, but it must still be present
+            // (the reader always consumes a full 3DD here).
             // 2nd corner 3DD (default = 1st corner)
             self.writer
                 .write_bit_double_with_default(e.second_corner.x, e.first_corner.x);
             self.writer
                 .write_bit_double_with_default(e.second_corner.y, e.first_corner.y);
-            if !z_is_zero {
-                self.writer
-                    .write_bit_double_with_default(e.second_corner.z, e.first_corner.z);
-            }
+            self.writer
+                .write_bit_double_with_default(e.second_corner.z, e.first_corner.z);
 
             // 3rd corner 3DD (default = 2nd corner)
             self.writer
                 .write_bit_double_with_default(e.third_corner.x, e.second_corner.x);
             self.writer
                 .write_bit_double_with_default(e.third_corner.y, e.second_corner.y);
-            if !z_is_zero {
-                self.writer
-                    .write_bit_double_with_default(e.third_corner.z, e.second_corner.z);
-            }
+            self.writer
+                .write_bit_double_with_default(e.third_corner.z, e.second_corner.z);
 
             // 4th corner 3DD (default = 3rd corner)
             self.writer
                 .write_bit_double_with_default(e.fourth_corner.x, e.third_corner.x);
             self.writer
                 .write_bit_double_with_default(e.fourth_corner.y, e.third_corner.y);
-            if !z_is_zero {
-                self.writer
-                    .write_bit_double_with_default(e.fourth_corner.z, e.third_corner.z);
-            }
+            self.writer
+                .write_bit_double_with_default(e.fourth_corner.z, e.third_corner.z);
 
             if !has_no_flags {
                 self.writer
@@ -540,8 +620,17 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2004+: owned object count when has_attribs
         let (attrib_handles, seqend_handle) = if e.has_attributes() {
-            let ahs: Vec<Handle> = (0..e.attributes.len())
-                .map(|_| self.alloc_handle())
+            // Preserve each attribute's original handle. The owning block's
+            // owned-entity list references these handles, so re-allocating them
+            // leaves dangling references (AutoCAD: eUnknownHandle on the space).
+            // Only allocate a fresh handle when one is missing (e.g. an
+            // attribute created programmatically with a null handle).
+            let ahs: Vec<Handle> = e.attributes.iter()
+                .map(|a| if a.common.handle.is_null() {
+                    self.alloc_handle()
+                } else {
+                    a.common.handle
+                })
                 .collect();
             let sh = self.alloc_handle();
 
@@ -718,6 +807,12 @@ impl<'a> DwgObjectWriter<'a> {
         // R2007+: lock position
         if self.version.r2007_plus() {
             self.writer.write_bit(false);
+        }
+        // R2010–R2013: keep_duplicate_records (RC). AutoCAD does NOT emit this
+        // byte for R2018 ATTRIBs (verified against an AutoCAD-authored R2018
+        // file) — writing it there overruns the record and AutoCAD discards it.
+        if self.version.r2010_plus() && !self.version.r2018_plus(self.dxf_version) {
+            self.writer.write_byte(0);
         }
 
         self.register_object(handle);
@@ -2336,6 +2431,15 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ MultiLeader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_multileader(&mut self, e: &MultiLeader) {
+        // Same encoding family: emit the captured bytes verbatim (guaranteed
+        // lossless). Cross-version falls through to the native encoder below,
+        // which re-encodes the parsed entity in the target version's layout.
+        if let Some(ref raw) = e.raw_dwg_data {
+            if self.raw_passthrough_compatible(e.dwg_source_version) {
+                self.register_raw_object(e.common.handle, raw, e.dwg_handle_bits);
+                return;
+            }
+        }
         // UNLISTED entity type â€” always use DXF class number (500+)
         let type_code = self.class_type_code("MULTILEADER", common::OBJ_MULTILEADER);
         self.entity_preamble(type_code, &e.common);
@@ -2430,7 +2534,13 @@ impl<'a> DwgObjectWriter<'a> {
         // 293 Enable Annotation Scale / Is annotative (B)
         self.writer.write_bit(e.enable_annotation_scale);
 
-        // Block Attributes
+        // Pre-R2007 only: num_arrowheads (BL) + the override-arrowhead list
+        // (typically empty). R2007+ drops this list.
+        if !self.version.r2007_plus() {
+            self.writer.write_bit_long(0);
+        }
+
+        // num_blocklabels (BL) + the block labels — written for ALL versions.
         self.writer.write_bit_long(e.block_attributes.len() as i32);
         for ba in &e.block_attributes {
             // 330 Block Attribute definition handle (hard pointer)
@@ -2444,19 +2554,20 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_double(ba.width);
         }
 
+        // Written for ALL versions (NOT R2010+-gated — that omission overran
+        // the R2018 record and AutoCAD discarded it).
         // 294 Text Direction Negative (B)
         self.writer.write_bit(e.text_direction_negative);
-        
         // 178 Text Align in IPE (BS)
         self.writer.write_bit_short(e.text_align_in_ipe);
-        
         // 179 Text Attachment Point (BS)
         self.writer.write_bit_short(e.text_attachment_point as i16);
-        
         // 45 ScaleFactor (BD)
         self.writer.write_bit_double(e.scale_factor);
 
-        // R2010+ fields
+        // R2010+: attachment directions — order is dir(271), bottom(272),
+        // top(273) per AutoCAD (AcadSharp), NOT the dir/top/bottom of the
+        // public libredwg spec.
         if self.version.r2010_plus() {
             // 271 Text attachment direction (BS)
             self.writer.write_bit_short(e.text_attachment_direction as i16);
@@ -2820,6 +2931,10 @@ impl<'a> DwgObjectWriter<'a> {
         // R2007+: lock position
         if self.version.r2007_plus() {
             self.writer.write_bit(false);
+        }
+        // R2010–R2013: keep_duplicate_records (RC). Not emitted for R2018.
+        if self.version.r2010_plus() && !self.version.r2018_plus(self.dxf_version) {
+            self.writer.write_byte(0);
         }
 
         // Style handle (already written above in writeTextEntity)

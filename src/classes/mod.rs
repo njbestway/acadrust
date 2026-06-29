@@ -150,6 +150,23 @@ impl DxfClassCollection {
         }
     }
 
+    /// Append a class verbatim, preserving order and duplicate dxf names.
+    ///
+    /// The DWG classes section is *positional*: a custom object's type code is
+    /// `500 + index_in_section`, and readers (libredwg, AutoCAD) resolve the
+    /// class by that index, not by the stored number. Two distinct classes may
+    /// legitimately share a dxf name (different C++ classes), so deduping by
+    /// name — as [`add_or_update`](Self::add_or_update) does — drops one entry,
+    /// shifts every later class's effective number, and makes those objects
+    /// resolve to the wrong class. The DWG reader must preserve every entry.
+    pub fn push_preserving(&mut self, class: DxfClass) {
+        let key = class.dxf_name.to_uppercase();
+        let idx = self.entries.len();
+        // Last writer wins for name lookup; positional `entries` keeps all.
+        self.name_index.insert(key, idx);
+        self.entries.push(class);
+    }
+
     /// Get a class by its DXF name (case-insensitive)
     pub fn get_by_name(&self, dxf_name: &str) -> Option<&DxfClass> {
         let key = dxf_name.to_uppercase();

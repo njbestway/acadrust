@@ -1028,19 +1028,20 @@ pub fn read_block_header(
 
     let endblk_handle = reader.read_handle();
 
-    let layout_handle = if version.r2000_plus() {
-        Some(reader.read_handle())
-    } else {
-        None
-    };
-
-    // R2000+: insert handles (one per insert_count_byte)
+    // ODA spec handle-stream order is: endblk, inserts[num_inserts], layout.
+    // Insert handles come BEFORE the layout handle.
     let mut insert_handles = Vec::new();
     if version.r2000_plus() {
         for _ in 0..insert_count_bytes.len() {
             insert_handles.push(reader.read_handle());
         }
     }
+
+    let layout_handle = if version.r2000_plus() {
+        Some(reader.read_handle())
+    } else {
+        None
+    };
 
     BlockHeaderData {
         name, anonymous, has_attributes, is_xref, is_xref_overlay,
