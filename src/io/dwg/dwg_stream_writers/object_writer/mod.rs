@@ -41,7 +41,7 @@ use crate::types::{BoundingBox3D, DxfVersion, Handle, Vector2};
 /// for deduplication.  This function strips them back for writing.
 fn dwg_block_name(name: &str) -> &str {
     // Known multi-word prefixes first
-    for prefix in &["*Paper_Space", "*Model_Space"] {
+    for prefix in &["*Model_Space"] {
         if name.starts_with(prefix) {
             let rest = &name[prefix.len()..];
             if rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit()) {

@@ -435,7 +435,12 @@ impl DwgFileHeaderWriterAC18 {
         self.gap_amount = 0;
         self.last_page_id = last.page_number;
         self.last_section_addr = ((last.seeker as u64) + (size as u64)).saturating_sub(256);
-        self.section_amount = (self.local_section_maps.len() - 1) as u32;
+        // The section page map records one entry per local section map, including
+        // the page-map page itself (appended just above). `section_amount` must
+        // equal that entry count (with no gaps) — readers verify
+        // `page_entries == gap_amount + section_amount`. An off-by-one here is
+        // tolerated by lenient readers but rejected by strict ones.
+        self.section_amount = self.local_section_maps.len() as u32;
         self.page_map_address = section.seeker as u64;
 
         Ok(())

@@ -173,6 +173,10 @@ impl DwgDocumentBuilder {
             Ucs(u64, tables::UcsData),
             VPort(u64, tables::VPortData),
             AppId(u64, tables::AppIdData),
+            /// BLOCK_CONTROL hard-owner refs: (model_space_handle, paper_space_handle).
+            /// These are the authoritative active model/paper space designation —
+            /// the file header's block handles are unreliable on some versions.
+            BlockControl(u64, u64),
         }
         let mut parsed_entries: Vec<ParsedEntry> = Vec::new();
 
@@ -244,6 +248,16 @@ impl DwgDocumentBuilder {
                             );
                             Some(ParsedEntry::Block(obj_handle, data))
                         },
+                        OBJ_BLOCK_CONTROL => {
+                            // Capture the authoritative *Model_Space / *Paper_Space
+                            // designation (hard-owner refs) so block-name dedup can
+                            // keep the canonical names on the correct records.
+                            let data = tables::read_block_control(&mut reader);
+                            Some(ParsedEntry::BlockControl(
+                                data.model_space_handle,
+                                data.paper_space_handle,
+                            ))
+                        },
                         OBJ_STYLE => {
                             let data = tables::read_text_style(
                                 &mut reader,
@@ -310,8 +324,21 @@ impl DwgDocumentBuilder {
                             ParsedEntry::Ucs(_, _) => {},
                             ParsedEntry::VPort(_, _) => {},
                             ParsedEntry::AppId(_, _) => {},
+                            ParsedEntry::BlockControl(m, p) => {
+                                // Seed the authoritative active model/paper space
+                                // handles (used by the block-name dedup below).
+                                if *m != 0 {
+                                    document.header.model_space_block_handle = Handle::from(*m);
+                                }
+                                if *p != 0 {
+                                    document.header.paper_space_block_handle = Handle::from(*p);
+                                }
+                            },
                         }
-                        parsed_entries.push(entry);
+                        // The block control is not a table record — don't store it.
+                        if !matches!(entry, ParsedEntry::BlockControl(..)) {
+                            parsed_entries.push(entry);
+                        }
                     }
                     Ok(None) => {}
                     Err(_) => {
@@ -719,6 +746,9 @@ impl DwgDocumentBuilder {
                     let _ = document.app_ids.remove(&data.name);
                     let _ = document.app_ids.add(app);
                 },
+                // Block control is consumed during Pass 1 (header seeding); it is
+                // never stored as a parsed table entry.
+                ParsedEntry::BlockControl(..) => {},
             }
         }
 
