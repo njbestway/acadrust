@@ -2021,7 +2021,7 @@ impl DwgDocumentBuilder {
                 // ── ACIS entities (3DSOLID, REGION, BODY) ───────────
                 OBJ_3DSOLID => {
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Solid3D::new();
                     e.common = entity_common;
@@ -2033,6 +2033,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     // A 3D solid has no insertion point of its own; the file's
                     // point field is usually zero. Prefer the ACIS placement
                     // origin so the reference reflects where the body sits.
@@ -2054,7 +2055,7 @@ impl DwgDocumentBuilder {
                 },
                 OBJ_REGION => {
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Region::new();
                     e.common = entity_common;
@@ -2066,6 +2067,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     e.point_of_reference =
                         e.acis_data.placement_origin().unwrap_or(data.point);
                     e.wires = data.wires;
@@ -2074,7 +2076,7 @@ impl DwgDocumentBuilder {
                 },
                 OBJ_BODY => {
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Body::new();
                     e.common = entity_common;
@@ -2086,6 +2088,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     e.point_of_reference =
                         e.acis_data.placement_origin().unwrap_or(data.point);
                     e.wires = data.wires;
@@ -2107,7 +2110,7 @@ impl DwgDocumentBuilder {
                         _ => crate::entities::SurfaceKind::Generic,
                     };
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Surface::new(kind);
                     e.common = entity_common;
@@ -2119,6 +2122,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
                     // Preserve the raw object verbatim so DWG write-back keeps

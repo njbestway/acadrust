@@ -8,7 +8,7 @@ use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
 use crate::io::dwg::dwg_version::DwgVersion;
 use crate::types::{Color, Handle, Vector2, Vector3, DxfVersion};
 use crate::entities::multileader::*;
-use crate::entities::solid3d::{Wire, WireType, Silhouette};
+use crate::entities::solid3d::{Wire, WireType, Silhouette, AcisRevision};
 use super::safe_count;
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2301,6 +2301,8 @@ pub struct AcisEntityData {
     pub wires: Vec<Wire>,
     /// Silhouette data for viewports.
     pub silhouettes: Vec<Silhouette>,
+    /// R2013+ modeler-geometry revision block (`COMMON_3DSOLID`).
+    pub revision: AcisRevision,
 }
 
 /// Read modeler-geometry (ACIS) data shared by 3DSOLID, REGION, BODY.
@@ -2311,6 +2313,7 @@ pub struct AcisEntityData {
 pub fn read_acis_entity(
     reader: &mut DwgMergedReader,
     version: DwgVersion,
+    dxf_version: DxfVersion,
 ) -> AcisEntityData {
     let acis_empty = reader.read_bit();
 
@@ -2391,6 +2394,7 @@ pub fn read_acis_entity(
                 has_history: false,
                 wires: Vec::new(),
                 silhouettes: Vec::new(),
+                revision: AcisRevision::default(),
             };
         }
     }
@@ -2438,10 +2442,26 @@ pub fn read_acis_entity(
     // acis_empty_bit (COMMON_3DSOLID — always present)
     let _acis_empty_bit = reader.read_bit();
 
-    // R2007+: unknown BL field (COMMON_3DSOLID)
-    if version.r2007_plus() {
-        let _unknown_2007 = reader.read_bit_long();
-    }
+    // Materials only follow when the ACIS version > 1, i.e. binary SAB — and
+    // that path returns early above. For the empty / SAT-text bodies that
+    // reach here there is no materials block.
+    //
+    // R2013+ (AC1027+): the modeler-geometry revision block. It must be read
+    // (and later written back) or the entity stream desyncs — AutoCAD/TrueView
+    // then reject the file.
+    let revision = if version.r2013_plus(dxf_version) {
+        let has_guid = reader.read_bit();
+        let major = reader.read_bit_long() as u32;
+        let minor1 = reader.read_bit_short();
+        let minor2 = reader.read_bit_short();
+        let raw = reader.read_bytes(8);
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&raw[..8.min(raw.len())]);
+        let end_marker = reader.read_bit_long() as u32;
+        AcisRevision { has_guid, major, minor1, minor2, bytes, end_marker }
+    } else {
+        AcisRevision::default()
+    };
 
     AcisEntityData {
         acis_empty,
@@ -2453,6 +2473,7 @@ pub fn read_acis_entity(
         has_history: false,
         wires,
         silhouettes,
+        revision,
     }
 }
 
@@ -2696,7 +2717,7 @@ mod tests {
         let hsb = w.handle_start_bits();
         let mut r = DwgMergedReader::new(data, d, hsb);
 
-        let result = read_acis_entity(&mut r, v);
+        let result = read_acis_entity(&mut r, v, d);
         assert!(!result.acis_empty);
         assert!(!result.is_binary);
         assert_eq!(result.version, 1);
@@ -2732,7 +2753,7 @@ mod tests {
         let mut r = DwgMergedReader::new(data, d, hsb);
         r.set_handle_start(hsb); // required for SAB size calculation
 
-        let result = read_acis_entity(&mut r, v);
+        let result = read_acis_entity(&mut r, v, d);
         assert!(!result.acis_empty);
         assert!(result.is_binary);
         assert_eq!(result.version, 2);
@@ -2754,7 +2775,7 @@ mod tests {
         let hsb = w.handle_start_bits();
         let mut r = DwgMergedReader::new(data, d, hsb);
 
-        let result = read_acis_entity(&mut r, v);
+        let result = read_acis_entity(&mut r, v, d);
         assert!(result.acis_empty);
         assert!(result.sat_data.is_empty());
         assert!(result.sab_data.is_empty());

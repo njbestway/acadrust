@@ -3098,9 +3098,13 @@ impl<'a> DwgObjectWriter<'a> {
             // acis_empty_bit — must match acis_empty
             self.writer.write_bit(acds);
 
-            // R2007+: unknown BL field (COMMON_3DSOLID)
-            if self.version.r2007_plus() {
-                self.writer.write_bit_long(0);
+            // R2013+: modeler-geometry revision block (COMMON_3DSOLID).
+            // Empty / SAT bodies carry no materials block (materials only
+            // follow binary SAB, handled on the early-return path). Omitting
+            // this block corrupts the entity stream for R2013+ and prevents
+            // the file from opening in AutoCAD/TrueView/BricsCAD.
+            if self.version.r2013_plus(self.dxf_version) {
+                self.write_acis_revision(&e.acis_data.revision);
             }
         }
 
@@ -3130,9 +3134,13 @@ impl<'a> DwgObjectWriter<'a> {
             // acis_empty_bit — must match acis_empty
             self.writer.write_bit(acds);
 
-            // R2007+: unknown BL field (COMMON_3DSOLID)
-            if self.version.r2007_plus() {
-                self.writer.write_bit_long(0);
+            // R2013+: modeler-geometry revision block (COMMON_3DSOLID).
+            // Empty / SAT bodies carry no materials block (materials only
+            // follow binary SAB, handled on the early-return path). Omitting
+            // this block corrupts the entity stream for R2013+ and prevents
+            // the file from opening in AutoCAD/TrueView/BricsCAD.
+            if self.version.r2013_plus(self.dxf_version) {
+                self.write_acis_revision(&e.acis_data.revision);
             }
         }
 
@@ -3156,9 +3164,13 @@ impl<'a> DwgObjectWriter<'a> {
             // acis_empty_bit — must match acis_empty
             self.writer.write_bit(acds);
 
-            // R2007+: unknown BL field (COMMON_3DSOLID)
-            if self.version.r2007_plus() {
-                self.writer.write_bit_long(0);
+            // R2013+: modeler-geometry revision block (COMMON_3DSOLID).
+            // Empty / SAT bodies carry no materials block (materials only
+            // follow binary SAB, handled on the early-return path). Omitting
+            // this block corrupts the entity stream for R2013+ and prevents
+            // the file from opening in AutoCAD/TrueView/BricsCAD.
+            if self.version.r2013_plus(self.dxf_version) {
+                self.write_acis_revision(&e.acis_data.revision);
             }
         }
 
@@ -3173,6 +3185,18 @@ impl<'a> DwgObjectWriter<'a> {
     fn write_acis_empty(&mut self) {
         self.writer.write_bit(true); // acis_empty = true (no inline data)
         self.writer.write_bit(false); // wireframe_present = false
+    }
+
+    /// Write the R2013+ modeler-geometry revision block (`COMMON_3DSOLID`).
+    ///
+    /// Layout: `B has_guid | BL major | BS minor1 | BS minor2 | RC×8 bytes | BL end_marker`.
+    fn write_acis_revision(&mut self, rev: &crate::entities::solid3d::AcisRevision) {
+        self.writer.write_bit(rev.has_guid);
+        self.writer.write_bit_long(rev.major as i32);
+        self.writer.write_bit_short(rev.minor1);
+        self.writer.write_bit_short(rev.minor2);
+        self.writer.write_bytes(&rev.bytes);
+        self.writer.write_bit_long(rev.end_marker as i32);
     }
 
     /// Queue SAB data for writing into the AcDsPrototype_1b section.

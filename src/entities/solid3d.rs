@@ -246,6 +246,29 @@ impl From<u8> for AcisVersion {
 ///
 /// The ACIS data represents the actual 3D solid geometry in Spatial
 /// Corporation's proprietary format.
+/// Modeler-geometry revision block (`COMMON_3DSOLID`, R2013+).
+///
+/// Every 3DSOLID/REGION/BODY in an R2013+ (AC1027+) DWG carries a revision
+/// block identifying the ACIS/ShapeManager modeler revision. It must be
+/// preserved on write; omitting it corrupts the entity stream and prevents the
+/// file from opening in AutoCAD/TrueView/BricsCAD.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AcisRevision {
+    /// Whether a revision GUID is present.
+    pub has_guid: bool,
+    /// GUID major component (BitLong).
+    pub major: u32,
+    /// GUID minor component 1 (BitShort).
+    pub minor1: i16,
+    /// GUID minor component 2 (BitShort).
+    pub minor2: i16,
+    /// The 8 raw GUID bytes.
+    pub bytes: [u8; 8],
+    /// Trailing end marker (BitLong).
+    pub end_marker: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AcisData {
@@ -257,6 +280,8 @@ pub struct AcisData {
     pub sab_data: Vec<u8>,
     /// Whether this is binary SAB format.
     pub is_binary: bool,
+    /// R2013+ modeler-geometry revision block (preserved for round-trip).
+    pub revision: AcisRevision,
 }
 
 impl AcisData {
@@ -267,6 +292,7 @@ impl AcisData {
             sat_data: String::new(),
             sab_data: Vec::new(),
             is_binary: false,
+            revision: AcisRevision::default(),
         }
     }
 
@@ -280,6 +306,7 @@ impl AcisData {
             sat_data: Self::strip_sat_terminator(sat),
             sab_data: Vec::new(),
             is_binary: false,
+            revision: AcisRevision::default(),
         }
     }
 
@@ -290,6 +317,7 @@ impl AcisData {
             sat_data: String::new(),
             sab_data: sab,
             is_binary: true,
+            revision: AcisRevision::default(),
         }
     }
 
