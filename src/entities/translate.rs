@@ -225,6 +225,13 @@ pub(crate) fn translate_insert(e: &mut Insert, offset: Vector3) {
     let ocs = Matrix3::arbitrary_axis(e.normal);
     let world = ocs * e.insert_point + offset;
     e.insert_point = ocs.transpose() * world;
+
+    // Attributes are positioned in world space beside the block; move them by
+    // the same world offset so they follow the INSERT (mirrors transform_insert
+    // — without this a MOVE left the attribute text behind).
+    for att in &mut e.attributes {
+        translate_attribute_entity(att, offset);
+    }
 }
 
 // ── Block ────────────────────────────────────────────────────────────────────
@@ -284,20 +291,27 @@ pub(crate) fn translate_leader(e: &mut Leader, offset: Vector3) {
 // ── MultiLeader ──────────────────────────────────────────────────────────────
 
 pub(crate) fn translate_multileader(e: &mut MultiLeader, offset: Vector3) {
-    e.context.content_base_point.x += offset.x;
-    e.context.content_base_point.y += offset.y;
-    e.context.content_base_point.z += offset.z;
+    // Move every anchor the render reads. The text / block content / base
+    // points were previously skipped, so a MOVE shifted the leader line but
+    // left the label (and dogleg break points) behind.
+    e.context.content_base_point = e.context.content_base_point + offset;
+    e.context.text_location = e.context.text_location + offset;
+    e.context.block_content_location = e.context.block_content_location + offset;
+    e.context.base_point = e.context.base_point + offset;
 
     for root in &mut e.context.leader_roots {
-        root.connection_point.x += offset.x;
-        root.connection_point.y += offset.y;
-        root.connection_point.z += offset.z;
-
+        root.connection_point = root.connection_point + offset;
+        for bp in &mut root.break_points {
+            bp.start_point = bp.start_point + offset;
+            bp.end_point = bp.end_point + offset;
+        }
         for line in &mut root.lines {
             for pt in &mut line.points {
-                pt.x += offset.x;
-                pt.y += offset.y;
-                pt.z += offset.z;
+                *pt = *pt + offset;
+            }
+            for bp in &mut line.break_points {
+                bp.start_point = bp.start_point + offset;
+                bp.end_point = bp.end_point + offset;
             }
         }
     }
@@ -550,5 +564,38 @@ mod tests {
         solid.point_of_reference = Vector3::new(1.0, 2.0, 3.0);
         translate_solid3d(&mut solid, Vector3::new(10.0, 0.0, 0.0));
         assert_eq!(solid.point_of_reference, Vector3::new(11.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn test_translate_insert_moves_attributes() {
+        let mut ins = Insert::new("B", Vector3::new(10.0, 10.0, 0.0));
+        let mut att = AttributeEntity::new("T".into(), "V".into());
+        att.insertion_point = Vector3::new(12.0, 10.0, 0.0);
+        att.alignment_point = Vector3::new(12.0, 10.0, 0.0);
+        ins.attributes.push(att);
+
+        translate_insert(&mut ins, Vector3::new(5.0, 0.0, 0.0));
+
+        assert_eq!(ins.insert_point, Vector3::new(15.0, 10.0, 0.0));
+        // The attribute must follow the block (a MOVE used to leave it behind).
+        assert_eq!(ins.attributes[0].insertion_point, Vector3::new(17.0, 10.0, 0.0));
+        assert_eq!(ins.attributes[0].alignment_point, Vector3::new(17.0, 10.0, 0.0));
+    }
+
+    #[test]
+    fn test_translate_multileader_moves_text() {
+        let mut ml = MultiLeader::default();
+        ml.context.text_location = Vector3::new(5.0, 5.0, 0.0);
+        ml.context.base_point = Vector3::new(5.0, 5.0, 0.0);
+        ml.context.block_content_location = Vector3::new(5.0, 5.0, 0.0);
+        ml.context.content_base_point = Vector3::new(5.0, 5.0, 0.0);
+
+        translate_multileader(&mut ml, Vector3::new(3.0, 0.0, 0.0));
+
+        // Every anchor moves, not just the leader line (the label used to stay).
+        assert_eq!(ml.context.text_location, Vector3::new(8.0, 5.0, 0.0));
+        assert_eq!(ml.context.base_point, Vector3::new(8.0, 5.0, 0.0));
+        assert_eq!(ml.context.block_content_location, Vector3::new(8.0, 5.0, 0.0));
+        assert_eq!(ml.context.content_base_point, Vector3::new(8.0, 5.0, 0.0));
     }
 }
