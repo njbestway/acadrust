@@ -1053,6 +1053,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             EntityType::Text(e) => self.write_text(e, owner),
             EntityType::MText(e) => self.write_mtext(e, owner),
             EntityType::Spline(e) => self.write_spline(e, owner),
+            EntityType::Helix(e) => self.write_helix(e, owner),
             EntityType::Dimension(dim) => self.write_dimension(dim, owner),
             EntityType::Hatch(e) => self.write_hatch(e, owner),
             EntityType::Solid(e) => self.write_solid(e, owner),
@@ -1554,6 +1555,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_spline(&mut self, spline: &Spline, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("SPLINE")?;
         self.write_common_entity_data(&spline.common, owner)?;
+        self.write_spline_body(spline)?;
+        Ok(())
+    }
+
+    /// Write the AcDbSpline subclass block (marker + all spline group codes).
+    /// Shared by SPLINE and HELIX, which carries a spline as its geometry.
+    fn write_spline_body(&mut self, spline: &Spline) -> Result<()> {
         self.writer.write_subclass("AcDbSpline")?;
 
         // Normal vector
@@ -1616,6 +1624,27 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_point3d(11, *point)?;
         }
 
+        Ok(())
+    }
+
+    /// Write a HELIX entity: the AcDbSpline geometry block followed by the
+    /// AcDbHelix parameters.
+    fn write_helix(&mut self, helix: &Helix, owner: Handle) -> Result<()> {
+        self.writer.write_entity_type("HELIX")?;
+        self.write_common_entity_data(&helix.common, owner)?;
+        self.write_spline_body(&helix.spline)?;
+
+        self.writer.write_subclass("AcDbHelix")?;
+        self.writer.write_i32(90, helix.major_version)?;
+        self.writer.write_i32(91, helix.maintenance_version)?;
+        self.writer.write_point3d(10, helix.axis_base_point)?;
+        self.writer.write_point3d(11, helix.start_point)?;
+        self.writer.write_point3d(12, helix.axis_vector)?;
+        self.writer.write_double(40, helix.radius)?;
+        self.writer.write_double(41, helix.turns)?;
+        self.writer.write_double(42, helix.turn_height)?;
+        self.writer.write_bool(290, helix.handedness)?;
+        self.writer.write_byte(280, helix.constraint.to_code())?;
         Ok(())
     }
 

@@ -684,6 +684,11 @@ impl<'a> SectionReader<'a> {
                             block_entities.push(EntityType::Spline(entity));
                         }
                     }
+                    "HELIX" => {
+                        if let Some(entity) = self.read_helix()? {
+                            block_entities.push(EntityType::Helix(entity));
+                        }
+                    }
                     "DIMENSION" => {
                         if let Some(entity) = self.read_dimension()? {
                             block_entities.push(EntityType::Dimension(entity));
@@ -916,6 +921,11 @@ impl<'a> SectionReader<'a> {
                     "SPLINE" => {
                         if let Some(entity) = self.read_spline()? {
                             let _ = document.add_entity(EntityType::Spline(entity));
+                        }
+                    }
+                    "HELIX" => {
+                        if let Some(entity) = self.read_helix()? {
+                            let _ = document.add_entity(EntityType::Helix(entity));
                         }
                     }
                     "DIMENSION" => {
@@ -3597,6 +3607,205 @@ impl<'a> SectionReader<'a> {
         }
 
         Ok(Some(spline))
+    }
+
+    /// Read a HELIX entity: AcDbSpline geometry followed by AcDbHelix
+    /// parameters. Group codes shared by the two subclasses (10/11/12/40/41/42)
+    /// are disambiguated by the active `100` subclass marker.
+    fn read_helix(&mut self) -> Result<Option<crate::entities::Helix>> {
+        use crate::entities::HelixConstraint;
+        let mut helix = crate::entities::Helix::new();
+        let mut in_helix = false;
+
+        // Spline accumulators (mirror read_spline).
+        let mut normal = PointReader::new();
+        let mut current_control_point = PointReader::new();
+        let mut current_fit_point = PointReader::new();
+        let mut begin_tangent = PointReader::new();
+        let mut end_tangent = PointReader::new();
+        let mut reading_control = false;
+        let mut reading_fit = false;
+
+        // Helix point accumulators.
+        let mut axis_base = PointReader::new();
+        let mut start_pt = PointReader::new();
+        let mut axis_vec = PointReader::new();
+
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
+            }
+
+            match pair.code {
+                100 => in_helix = pair.value_string == "AcDbHelix",
+                8 => helix.common.layer = pair.value_string.clone(),
+                62 => {
+                    if let Some(ci) = pair.as_i16() {
+                        helix.common.color = Color::from_index(ci);
+                    }
+                }
+                370 => {
+                    if let Some(lw) = pair.as_i16() {
+                        helix.common.line_weight = LineWeight::from_value(lw);
+                    }
+                }
+
+                // ── AcDbHelix parameters ──
+                90 if in_helix => {
+                    if let Some(v) = pair.as_i32() {
+                        helix.major_version = v;
+                    }
+                }
+                91 if in_helix => {
+                    if let Some(v) = pair.as_i32() {
+                        helix.maintenance_version = v;
+                    }
+                }
+                290 => {
+                    if let Some(v) = pair.as_i16() {
+                        helix.handedness = v != 0;
+                    }
+                }
+                280 => {
+                    if let Some(v) = pair.as_i16() {
+                        helix.constraint = HelixConstraint::from_code(v as u8);
+                    }
+                }
+                10 | 20 | 30 if in_helix => {
+                    axis_base.add_coordinate(&pair);
+                }
+                11 | 21 | 31 if in_helix => {
+                    start_pt.add_coordinate(&pair);
+                }
+                12 | 22 | 32 if in_helix => {
+                    axis_vec.add_coordinate(&pair);
+                }
+                40 if in_helix => {
+                    if let Some(v) = pair.as_double() {
+                        helix.radius = v;
+                    }
+                }
+                41 if in_helix => {
+                    if let Some(v) = pair.as_double() {
+                        helix.turns = v;
+                    }
+                }
+                42 if in_helix => {
+                    if let Some(v) = pair.as_double() {
+                        helix.turn_height = v;
+                    }
+                }
+
+                // ── AcDbSpline geometry ──
+                70 => {
+                    if let Some(f) = pair.as_i16() {
+                        helix.spline.flags.closed = (f & 1) != 0;
+                        helix.spline.flags.periodic = (f & 2) != 0;
+                        helix.spline.flags.rational = (f & 4) != 0;
+                        helix.spline.flags.planar = (f & 8) != 0;
+                        helix.spline.flags.linear = (f & 16) != 0;
+                    }
+                }
+                71 => {
+                    if let Some(d) = pair.as_i16() {
+                        helix.spline.degree = d as i32;
+                    }
+                }
+                40 => {
+                    if let Some(k) = pair.as_double() {
+                        helix.spline.knots.push(k);
+                    }
+                }
+                41 => {
+                    if let Some(w) = pair.as_double() {
+                        helix.spline.weights.push(w);
+                    }
+                }
+                42 => {
+                    if let Some(t) = pair.as_double() {
+                        helix.spline.knot_tolerance = t;
+                    }
+                }
+                43 => {
+                    if let Some(t) = pair.as_double() {
+                        helix.spline.control_tolerance = t;
+                    }
+                }
+                44 => {
+                    if let Some(t) = pair.as_double() {
+                        helix.spline.fit_tolerance = t;
+                    }
+                }
+                12 | 22 | 32 => {
+                    begin_tangent.add_coordinate(&pair);
+                }
+                13 | 23 | 33 => {
+                    end_tangent.add_coordinate(&pair);
+                }
+                10 | 20 | 30 => {
+                    if pair.code == 10 {
+                        if reading_control {
+                            if let Some(pt) = current_control_point.get_point() {
+                                helix.spline.control_points.push(pt);
+                            }
+                        }
+                        current_control_point = PointReader::new();
+                        reading_control = true;
+                    }
+                    current_control_point.add_coordinate(&pair);
+                }
+                11 | 21 | 31 => {
+                    if pair.code == 11 {
+                        if reading_fit {
+                            if let Some(pt) = current_fit_point.get_point() {
+                                helix.spline.fit_points.push(pt);
+                            }
+                        }
+                        current_fit_point = PointReader::new();
+                        reading_fit = true;
+                    }
+                    current_fit_point.add_coordinate(&pair);
+                }
+                210 | 220 | 230 => {
+                    normal.add_coordinate(&pair);
+                }
+                _ => {
+                    self.try_read_common_entity_code(&pair, &mut helix.common)?;
+                }
+            }
+        }
+
+        if reading_control {
+            if let Some(pt) = current_control_point.get_point() {
+                helix.spline.control_points.push(pt);
+            }
+        }
+        if reading_fit {
+            if let Some(pt) = current_fit_point.get_point() {
+                helix.spline.fit_points.push(pt);
+            }
+        }
+        if let Some(n) = normal.get_point() {
+            helix.spline.normal = n;
+        }
+        if let Some(t) = begin_tangent.get_point() {
+            helix.spline.begin_tangent = t;
+        }
+        if let Some(t) = end_tangent.get_point() {
+            helix.spline.end_tangent = t;
+        }
+        if let Some(p) = axis_base.get_point() {
+            helix.axis_base_point = p;
+        }
+        if let Some(p) = start_pt.get_point() {
+            helix.start_point = p;
+        }
+        if let Some(p) = axis_vec.get_point() {
+            helix.axis_vector = p;
+        }
+
+        Ok(Some(helix))
     }
 
     /// Read a DIMENSION entity

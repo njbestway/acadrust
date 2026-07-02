@@ -246,6 +246,15 @@ pub(crate) fn transform_spline(e: &mut Spline, transform: &Transform) {
     e.normal = transform.apply_rotation(e.normal).normalize();
 }
 
+// ── Helix ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn transform_helix(e: &mut Helix, transform: &Transform) {
+    transform_spline(&mut e.spline, transform);
+    e.axis_base_point = transform.apply(e.axis_base_point);
+    e.start_point = transform.apply(e.start_point);
+    e.axis_vector = transform.apply_rotation(e.axis_vector).normalize();
+}
+
 // ── Dimension ────────────────────────────────────────────────────────────────
 
 // Dimension uses the default Entity trait implementation (extract translation).
@@ -980,6 +989,7 @@ impl EntityType {
             EntityType::Text(e) => transform_text(e, transform),
             EntityType::MText(e) => transform_mtext(e, transform),
             EntityType::Spline(e) => transform_spline(e, transform),
+            EntityType::Helix(e) => transform_helix(e, transform),
             EntityType::Dimension(_) => {
                 // Dimension uses the default Entity trait implementation
                 let origin = Vector3::ZERO;

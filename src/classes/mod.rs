@@ -251,6 +251,7 @@ fn default_classes() -> Vec<DxfClass> {
         ("PDFUNDERLAY", "AcDbPdfReference", 1, "ObjectDBX Classes", true),
         ("DWFUNDERLAY", "AcDbDwfReference", 1, "ObjectDBX Classes", true),
         ("DGNUNDERLAY", "AcDbDgnReference", 1, "ObjectDBX Classes", true),
+        ("HELIX", "AcDbHelix", 0, "ObjectDBX Classes", true),
         ("MULTILEADER", "AcDbMLeader", 1025, "ACDB_MLEADER_CLASS", true),
         ("OLE2FRAME", "AcDbOle2Frame", 1, "ObjectDBX Classes", true),
         ("MLINE", "AcDbMline", 1, "ObjectDBX Classes", true),

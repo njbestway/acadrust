@@ -183,13 +183,13 @@ mod tests {
             "Class count mismatch: wrote {}, read {}",
             classes.len(), read_classes.len());
 
-        // Verify a specific class (ACDBPLACEHOLDER is 15th, class_number=514
-        // after the three PDF/DWF/DGN underlay reference classes).
+        // Verify a specific class (ACDBPLACEHOLDER is 16th, class_number=515
+        // after the three underlay reference classes + the HELIX class).
         let acdb_placeholder = read_classes.get_by_name("ACDBPLACEHOLDER");
         assert!(acdb_placeholder.is_some(), "Should find ACDBPLACEHOLDER class");
         let cls = acdb_placeholder.unwrap();
         assert_eq!(cls.cpp_class_name, "AcDbPlaceHolder");
-        assert_eq!(cls.class_number, 514);
+        assert_eq!(cls.class_number, 515);
     }
 
     #[test]

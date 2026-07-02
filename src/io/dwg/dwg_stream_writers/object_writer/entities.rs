@@ -33,6 +33,7 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Insert(e) => self.write_insert(e),
             EntityType::LwPolyline(e) => self.write_lwpolyline(e),
             EntityType::Spline(e) => self.write_spline(e),
+            EntityType::Helix(e) => self.write_helix(e),
             EntityType::Ray(e) => self.write_ray(e),
             EntityType::XLine(e) => self.write_xline(e),
             EntityType::Leader(e) => self.write_leader(e),
@@ -935,7 +936,14 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_spline(&mut self, e: &Spline) {
         self.entity_preamble(common::OBJ_SPLINE, &e.common);
+        self.write_spline_data(e);
+        self.register_object(e.common.handle);
+    }
 
+    /// Write the AcDbSpline object-data body (everything after the entity
+    /// preamble, no handle registration). Shared by SPLINE and HELIX, which
+    /// embeds a spline as its curve geometry.
+    fn write_spline_data(&mut self, e: &Spline) {
         // Determine scenario: 2 = fit points, 1 = control points/knots
         let scenario: i32 = if !e.fit_points.is_empty() { 2 } else { 1 };
 
@@ -1014,6 +1022,31 @@ impl<'a> DwgObjectWriter<'a> {
                 }
             }
         }
+    }
+
+    // ── Helix ───────────────────────────────────────────────────────
+
+    /// Write a HELIX entity (AcDbHelix): the full spline record followed by
+    /// the helix parameters. HELIX is UNLISTED, so its type code comes from
+    /// the registered class number.
+    fn write_helix(&mut self, e: &Helix) {
+        let type_code = self.class_type_code("HELIX", common::OBJ_HELIX);
+        self.entity_preamble(type_code, &e.common);
+
+        // AcDbSpline part (curve geometry).
+        self.write_spline_data(&e.spline);
+
+        // AcDbHelix part.
+        self.writer.write_bit_long(e.major_version);
+        self.writer.write_bit_long(e.maintenance_version);
+        self.writer.write_3bit_double(e.axis_base_point);
+        self.writer.write_3bit_double(e.start_point);
+        self.writer.write_3bit_double(e.axis_vector);
+        self.writer.write_bit_double(e.radius);
+        self.writer.write_bit_double(e.turns);
+        self.writer.write_bit_double(e.turn_height);
+        self.writer.write_bit(e.handedness);
+        self.writer.write_byte(e.constraint.to_code());
 
         self.register_object(e.common.handle);
     }

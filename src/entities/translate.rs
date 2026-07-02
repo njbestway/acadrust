@@ -97,6 +97,13 @@ pub(crate) fn translate_spline(e: &mut Spline, offset: Vector3) {
     }
 }
 
+pub(crate) fn translate_helix(e: &mut Helix, offset: Vector3) {
+    translate_spline(&mut e.spline, offset);
+    e.axis_base_point = e.axis_base_point + offset;
+    e.start_point = e.start_point + offset;
+    // axis_vector is a direction — unchanged by translation.
+}
+
 // ── Dimension ────────────────────────────────────────────────────────────────
 
 pub(crate) fn translate_dimension(e: &mut Dimension, offset: Vector3) {
@@ -484,6 +491,7 @@ impl EntityType {
             EntityType::Text(e) => translate_text(e, offset),
             EntityType::MText(e) => translate_mtext(e, offset),
             EntityType::Spline(e) => translate_spline(e, offset),
+            EntityType::Helix(e) => translate_helix(e, offset),
             EntityType::Dimension(e) => translate_dimension(e, offset),
             EntityType::Hatch(e) => translate_hatch(e, offset),
             EntityType::Solid(e) => translate_solid(e, offset),

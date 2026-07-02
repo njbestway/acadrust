@@ -2096,6 +2096,7 @@ fn get_common_mut(entity: &mut EntityType) -> &mut EntityCommon {
         EntityType::Text(e) => &mut e.common,
         EntityType::MText(e) => &mut e.common,
         EntityType::Spline(e) => &mut e.common,
+        EntityType::Helix(e) => &mut e.common,
         EntityType::Dimension(d) => &mut d.base_mut().common,
         EntityType::Hatch(e) => &mut e.common,
         EntityType::Solid(e) => &mut e.common,

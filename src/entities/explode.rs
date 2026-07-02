@@ -791,6 +791,7 @@ impl EntityType {
             EntityType::Solid(e) => explode_solid(e),
             EntityType::Face3D(e) => explode_face3d(e),
             EntityType::Spline(e) => explode_spline(e),
+            EntityType::Helix(e) => explode_spline(&e.spline),
             EntityType::MText(e) => explode_mtext(e),
             EntityType::Dimension(e) => explode_dimension(e),
             EntityType::Leader(e) => explode_leader(e),

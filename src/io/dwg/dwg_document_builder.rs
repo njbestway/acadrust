@@ -1323,6 +1323,40 @@ impl DwgDocumentBuilder {
                     e.end_tangent = data.end_tangent;
                     let _ = document.add_entity(EntityType::Spline(e));
                 },
+                OBJ_HELIX => {
+                    // HELIX = full spline record + helix parameters.
+                    let data = entities::read_spline(
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
+                    );
+                    let mut e = crate::entities::Helix::new();
+                    e.common = entity_common;
+                    e.spline.degree = data.degree;
+                    e.spline.flags.rational = data.rational;
+                    e.spline.flags.closed = data.closed;
+                    e.spline.flags.periodic = data.periodic;
+                    e.spline.knots = data.knots;
+                    e.spline.control_points = data.control_points;
+                    e.spline.weights = data.weights;
+                    e.spline.fit_points = data.fit_points;
+                    e.spline.knot_tolerance = data.knot_tolerance;
+                    e.spline.control_tolerance = data.control_tolerance;
+                    e.spline.fit_tolerance = data.fit_tolerance;
+                    e.spline.begin_tangent = data.begin_tangent;
+                    e.spline.end_tangent = data.end_tangent;
+                    // AcDbHelix parameters follow the spline record.
+                    e.major_version = reader.read_bit_long();
+                    e.maintenance_version = reader.read_bit_long();
+                    e.axis_base_point = reader.read_3bit_double();
+                    e.start_point = reader.read_3bit_double();
+                    e.axis_vector = reader.read_3bit_double();
+                    e.radius = reader.read_bit_double();
+                    e.turns = reader.read_bit_double();
+                    e.turn_height = reader.read_bit_double();
+                    e.handedness = reader.read_bit();
+                    e.constraint =
+                        crate::entities::HelixConstraint::from_code(reader.read_byte());
+                    let _ = document.add_entity(EntityType::Helix(e));
+                },
                 OBJ_TEXT => {
                     let data = entities::read_text(&mut reader, self.obj_reader.version());
                     let mut e = Text::new();

@@ -118,6 +118,8 @@ pub const OBJ_NURBSURFACE: i16 = -11;
 pub const OBJ_PDFUNDERLAY: i16 = -12;
 pub const OBJ_DWFUNDERLAY: i16 = -13;
 pub const OBJ_DGNUNDERLAY: i16 = -14;
+// HELIX (AcDbHelix) is a class-based, spline-derived graphical entity.
+pub const OBJ_HELIX: i16 = -15;
 
 // Class-based non-entity objects — also resolved via class mapping for
 // portable type codes.  The values here match ACadSharp's ObjectType.
@@ -161,7 +163,7 @@ pub fn is_entity_type(type_code: i16) -> bool {
     // MULTILEADER, MESH, IMAGE).
     // Class-based entity types (≥500) are NOT included here; the builder
     // checks the class's is_an_entity flag directly.
-    matches!(type_code, -14..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
+    matches!(type_code, -15..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
 }
 
 /// Returns true if the type code is a table control or entry.
@@ -195,6 +197,7 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "PDFUNDERLAY" => Some(OBJ_PDFUNDERLAY),
         "DWFUNDERLAY" => Some(OBJ_DWFUNDERLAY),
         "DGNUNDERLAY" => Some(OBJ_DGNUNDERLAY),
+        "HELIX" => Some(OBJ_HELIX),
         // Non-entity objects
         "ACDBDICTIONARYWDFLT" => Some(OBJ_DICTIONARYWDFLT),
         "DICTIONARYVAR" => Some(OBJ_DICTIONARYVAR),
