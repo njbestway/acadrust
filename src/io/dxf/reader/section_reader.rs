@@ -3421,6 +3421,12 @@ impl<'a> SectionReader<'a> {
                         mtext.line_spacing_factor = lsf;
                     }
                 }
+                73 => {
+                    if let Some(ls) = pair.as_i16() {
+                        mtext.line_spacing_style =
+                            crate::entities::LineSpacingStyle::from(ls);
+                    }
+                }
                 7 => mtext.style = pair.value_string.clone(),
                 // X-axis direction vector (takes priority over rotation 50).
                 11 | 21 | 31 => { x_direction.add_coordinate(&pair); }

@@ -1,6 +1,6 @@
 //! Multi-line text entity
 
-use super::{Entity, EntityCommon};
+use super::{Entity, EntityCommon, LineSpacingStyle};
 use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vector3};
 
 /// Attachment point for MText
@@ -109,6 +109,8 @@ pub struct MText {
     pub drawing_direction: DrawingDirection,
     /// Line spacing factor
     pub line_spacing_factor: f64,
+    /// Line spacing style (DXF 73): AtLeast (1) or Exactly (2).
+    pub line_spacing_style: LineSpacingStyle,
     /// Normal vector
     pub normal: Vector3,
     /// Background fill flags (BL 90): bit 0x01 = use background fill color,
@@ -142,6 +144,7 @@ impl MText {
             attachment_point: AttachmentPoint::TopLeft,
             drawing_direction: DrawingDirection::LeftToRight,
             line_spacing_factor: 1.0,
+            line_spacing_style: LineSpacingStyle::AtLeast,
             normal: Vector3::UNIT_Z,
             background_fill_flags: 0,
             background_scale: 1.5,

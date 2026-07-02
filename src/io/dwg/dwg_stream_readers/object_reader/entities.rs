@@ -165,6 +165,9 @@ pub struct SplineData {
     pub begin_tangent: Vector3,
     pub end_tangent: Vector3,
     pub fit_points: Vec<Vector3>,
+    /// Knot parameterization method (R2013+): 0=Chord, 1=SquareRoot,
+    /// 2=Uniform, 15=Custom. Zero for pre-R2013 splines.
+    pub knot_param: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -543,13 +546,13 @@ pub fn read_spline(
     dxf_version: DxfVersion,
 ) -> SplineData {
     let mut _flags1 = 0i32;
-    let mut _knot_param = 0i32;
+    let mut knot_param = 0i32;
 
     let scenario;
     if version.r2013_plus(dxf_version) {
         scenario = reader.read_bit_long();
         _flags1 = reader.read_bit_long();
-        _knot_param = reader.read_bit_long();
+        knot_param = reader.read_bit_long();
     } else {
         scenario = reader.read_bit_long();
     }
@@ -607,6 +610,7 @@ pub fn read_spline(
         knot_tolerance, control_tolerance,
         knots, control_points, weights,
         fit_tolerance, begin_tangent, end_tangent, fit_points,
+        knot_param,
     }
 }
 

@@ -68,6 +68,9 @@ pub struct Spline {
     pub begin_tangent: Vector3,
     /// End tangent vector (DXF 13/23/33); zero when unset.
     pub end_tangent: Vector3,
+    /// Knot parameterization method (R2013+ DWG): 0=Chord, 1=SquareRoot,
+    /// 2=Uniform, 15=Custom. Zero for splines saved before R2013.
+    pub knot_parameterization: i32,
 }
 
 impl Spline {
@@ -87,6 +90,7 @@ impl Spline {
             fit_tolerance: 0.0,
             begin_tangent: Vector3::ZERO,
             end_tangent: Vector3::ZERO,
+            knot_parameterization: 0,
         }
     }
 

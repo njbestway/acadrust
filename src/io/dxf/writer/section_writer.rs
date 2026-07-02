@@ -1530,6 +1530,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if mtext.rotation != 0.0 {
             self.writer.write_double(50, mtext.rotation.to_degrees())?;
         }
+        self.writer.write_i16(73, mtext.line_spacing_style as i16)?;
         self.writer.write_double(44, mtext.line_spacing_factor)?;
         if let Some(h) = mtext.rectangle_height {
             self.writer.write_double(46, h)?;

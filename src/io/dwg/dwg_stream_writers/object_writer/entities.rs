@@ -386,7 +386,7 @@ impl<'a> DwgObjectWriter<'a> {
             .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         // Linespacing Style BS 73 (1=At Least, 2=Exact)
-        self.writer.write_bit_short(1);
+        self.writer.write_bit_short(e.line_spacing_style as i16);
         // Linespacing Factor BD 44
         self.writer.write_bit_double(e.line_spacing_factor);
         // Unknown bit B
@@ -949,7 +949,7 @@ impl<'a> DwgObjectWriter<'a> {
             // R2013+: scenario BL, flags1 BL, knot parametrization BL
             self.writer.write_bit_long(scenario);
             self.writer.write_bit_long(0); // flags1
-            self.writer.write_bit_long(0); // knot parametrization
+            self.writer.write_bit_long(e.knot_parameterization); // knot parametrization
         } else {
             // Scenario BL
             self.writer.write_bit_long(scenario);

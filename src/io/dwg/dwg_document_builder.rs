@@ -1345,6 +1345,7 @@ impl DwgDocumentBuilder {
                     e.fit_tolerance = data.fit_tolerance;
                     e.begin_tangent = data.begin_tangent;
                     e.end_tangent = data.end_tangent;
+                    e.knot_parameterization = data.knot_param;
                     let _ = document.add_entity(EntityType::Spline(e));
                 },
                 OBJ_HELIX => {
@@ -1367,6 +1368,7 @@ impl DwgDocumentBuilder {
                     e.spline.fit_tolerance = data.fit_tolerance;
                     e.spline.begin_tangent = data.begin_tangent;
                     e.spline.end_tangent = data.end_tangent;
+                    e.spline.knot_parameterization = data.knot_param;
                     // AcDbHelix parameters follow the spline record.
                     e.major_version = reader.read_bit_long();
                     e.maintenance_version = reader.read_bit_long();
@@ -1450,6 +1452,8 @@ impl DwgDocumentBuilder {
                     // Compute rotation from x_direction vector
                     e.rotation = data.x_direction.y.atan2(data.x_direction.x);
                     e.line_spacing_factor = data.linespacing_factor;
+                    e.line_spacing_style =
+                        crate::entities::LineSpacingStyle::from(data.linespacing_style);
                     e.background_fill_flags = data.background_flags;
                     e.background_scale = data.background_scale;
                     e.background_color = data.background_color;
