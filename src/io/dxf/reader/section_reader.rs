@@ -5827,27 +5827,220 @@ impl<'a> SectionReader<'a> {
 
     /// Read a TABLE entity (basic properties)
     fn read_table_entity(&mut self) -> Result<Option<crate::entities::Table>> {
-        let mut insertion_point = PointReader::new();
-        let mut table = crate::entities::Table::new(Vector3::zero(), 1, 1);
+        use crate::entities::table::{
+            CellContent, CellType, CellValue, CellValueType, TableCell, TableCellContentType,
+            TableColumn, TableRow,
+        };
 
-        while let Some(pair) = self.reader.read_pair()? {
-            if pair.code == 0 { self.reader.push_back(pair); break; }
-            match pair.code {
-                8 => table.common.layer = pair.value_string.clone(),
-                62 => { if let Some(v) = pair.as_i16() { table.common.color = Color::from_index(v); } }
-                370 => { if let Some(v) = pair.as_i16() { table.common.line_weight = LineWeight::from_value(v); } }
-                10 | 20 | 30 => { insertion_point.add_coordinate(&pair); }
-                342 => {
-                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { table.table_style_handle = Some(Handle::new(h)); }
-                }
-                343 => {
-                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { table.block_record_handle = Some(Handle::new(h)); }
-                }
-                _ => { self.try_read_common_entity_code(&pair, &mut table.common)?; }
+        let mut insertion_point = PointReader::new();
+        let mut horizontal = PointReader::new();
+        let mut table = crate::entities::Table::new(Vector3::zero(), 0, 0);
+        table.rows.clear();
+        table.columns.clear();
+
+        let mut row_heights: Vec<f64> = Vec::new();
+        let mut col_widths: Vec<f64> = Vec::new();
+        let mut cells: Vec<TableCell> = Vec::new();
+        let mut ncols: usize = 0;
+        let mut cur: Option<TableCell> = None;
+
+        // Ensure the current cell has at least one content to receive a value.
+        fn ensure_content(cell: &mut TableCell) {
+            if cell.contents.is_empty() {
+                cell.contents.push(CellContent::new());
             }
         }
 
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
+            }
+            match pair.code {
+                8 => table.common.layer = pair.value_string.clone(),
+                62 if cur.is_none() => {
+                    if let Some(v) = pair.as_i16() {
+                        table.common.color = Color::from_index(v);
+                    }
+                }
+                370 if cur.is_none() => {
+                    if let Some(v) = pair.as_i16() {
+                        table.common.line_weight = LineWeight::from_value(v);
+                    }
+                }
+                // Block record handle: acadrust writes it under 2, AutoCAD under 343.
+                2 | 343 => {
+                    if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                        table.block_record_handle = Some(Handle::new(h));
+                    }
+                }
+                342 => {
+                    if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                        table.table_style_handle = Some(Handle::new(h));
+                    }
+                }
+                280 if cur.is_none() => {
+                    if let Some(v) = pair.as_i16() {
+                        table.data_version = v;
+                    }
+                }
+                10 | 20 | 30 => {
+                    insertion_point.add_coordinate(&pair);
+                }
+                11 | 21 | 31 => {
+                    horizontal.add_coordinate(&pair);
+                }
+                92 => {
+                    if let Some(v) = pair.as_i32() {
+                        ncols = v.max(0) as usize;
+                    }
+                }
+                141 => {
+                    if let Some(v) = pair.as_double() {
+                        row_heights.push(v);
+                    }
+                }
+                142 => {
+                    if let Some(v) = pair.as_double() {
+                        col_widths.push(v);
+                    }
+                }
+                // ── Cells ──
+                171 => {
+                    if let Some(c) = cur.take() {
+                        cells.push(c);
+                    }
+                    let mut c = TableCell::new();
+                    if let Some(v) = pair.as_i16() {
+                        c.cell_type = if v == 2 { CellType::Block } else { CellType::Text };
+                    }
+                    cur = Some(c);
+                }
+                174 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.merged = v as i32;
+                    }
+                }
+                175 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.merge_width = v as i32;
+                    }
+                }
+                176 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.merge_height = v as i32;
+                    }
+                }
+                177 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.virtual_edge = v;
+                    }
+                }
+                144 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_double()) {
+                        c.rotation = v;
+                    }
+                }
+                170 => {
+                    if let Some(c) = cur.as_mut() {
+                        let mut content = CellContent::new();
+                        if let Some(v) = pair.as_i16() {
+                            content.content_type = match v {
+                                1 => TableCellContentType::Value,
+                                2 => TableCellContentType::Field,
+                                4 => TableCellContentType::Block,
+                                _ => TableCellContentType::Unknown,
+                            };
+                        }
+                        c.contents.push(content);
+                    }
+                }
+                1 => {
+                    if let Some(c) = cur.as_mut() {
+                        ensure_content(c);
+                        c.contents.last_mut().unwrap().value =
+                            CellValue::text(&pair.value_string);
+                    }
+                }
+                140 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_double()) {
+                        ensure_content(c);
+                        let cv = &mut c.contents.last_mut().unwrap().value;
+                        cv.numeric_value = v;
+                        cv.value_type = CellValueType::Double;
+                    }
+                }
+                90 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i32()) {
+                        ensure_content(c);
+                        let cv = &mut c.contents.last_mut().unwrap().value;
+                        cv.numeric_value = v as f64;
+                        cv.value_type = CellValueType::Long;
+                    }
+                }
+                300 => {
+                    if let Some(c) = cur.as_mut() {
+                        if let Some(content) = c.contents.last_mut() {
+                            content.value.format = pair.value_string.clone();
+                        }
+                    }
+                }
+                340 => {
+                    if let Some(c) = cur.as_mut() {
+                        if let (Some(content), Ok(h)) = (
+                            c.contents.last_mut(),
+                            u64::from_str_radix(pair.value_string.trim(), 16),
+                        ) {
+                            content.block_handle = Some(Handle::new(h));
+                        }
+                    }
+                }
+                _ => {
+                    if cur.is_none() {
+                        self.try_read_common_entity_code(&pair, &mut table.common)?;
+                    }
+                }
+            }
+        }
+        if let Some(c) = cur.take() {
+            cells.push(c);
+        }
+
+        // Assemble columns/rows and distribute the row-major cell stream.
+        for w in col_widths {
+            table.columns.push(TableColumn {
+                name: String::new(),
+                width: w,
+                style: None,
+                custom_data: 0,
+            });
+        }
+        if ncols == 0 {
+            ncols = table.columns.len();
+        }
+        for h in row_heights {
+            table.rows.push(TableRow {
+                height: h,
+                cells: Vec::new(),
+                style: None,
+                custom_data: 0,
+            });
+        }
+        if ncols > 0 && !table.rows.is_empty() {
+            for (i, cell) in cells.into_iter().enumerate() {
+                let r = i / ncols;
+                if r < table.rows.len() {
+                    table.rows[r].cells.push(cell);
+                }
+            }
+        } else if !table.rows.is_empty() {
+            table.rows[0].cells = cells;
+        }
+
         table.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
+        if let Some(h) = horizontal.get_point() {
+            table.horizontal_direction = h;
+        }
         Ok(Some(table))
     }
 

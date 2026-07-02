@@ -1833,7 +1833,12 @@ fn read_cad_value(reader: &mut DwgMergedReader, version: DwgVersion) -> CellValu
     match type_code {
         0 | 1 => v.numeric_value = reader.read_bit_long() as f64, // Unknown / Long
         2 => v.numeric_value = reader.read_bit_double(),         // Double
-        4 | 0x200 => v.text = read_string_cad_value(reader, version), // String / General
+        4 | 0x200 => {
+            // String / General — a text value; label it String so downstream
+            // (DXF write, display) treats it as text.
+            v.text = read_string_cad_value(reader, version);
+            v.value_type = CellValueType::String;
+        }
         8 => {
             // Date: BL size + size bytes.
             let size = reader.read_bit_long();
