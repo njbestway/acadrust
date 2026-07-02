@@ -76,8 +76,8 @@ impl<'a> DwgObjectWriter<'a> {
                     }
                 }
             }
-            EntityType::Table(_)
-            | EntityType::Underlay(_) => {
+            EntityType::Underlay(e) => self.write_underlay(e),
+            EntityType::Table(_) => {
                 // Not yet supported â€” silently skip
             }
             EntityType::Unknown(e) => {
@@ -2292,6 +2292,49 @@ impl<'a> DwgObjectWriter<'a> {
             .unwrap_or(self.document.header.current_multiline_style_handle);
         self.writer
             .write_handle(DwgReferenceType::HardPointer, sh.value());
+
+        self.register_object(e.common.handle);
+    }
+
+    // â”€â”€ Underlay (PDF / DWF / DGN) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /// Write an UNDERLAY reference (AcDbUnderlayReference).
+    ///
+    /// Mirrors [`read_underlay`] field-for-field. Unlike the raster image
+    /// writer there is a single (definition) handle, no version-gated
+    /// clip-inversion bit, and the clip boundary is always a bit-long count
+    /// followed by raw 2D vertices.
+    fn write_underlay(&mut self, e: &Underlay) {
+        // UNLISTED entity type â€” always resolve to the DXF class number (500+).
+        let dxf_name = e.entity_name();
+        let fallback = match e.underlay_type {
+            UnderlayType::Dwf => common::OBJ_DWFUNDERLAY,
+            UnderlayType::Dgn => common::OBJ_DGNUNDERLAY,
+            UnderlayType::Pdf => common::OBJ_PDFUNDERLAY,
+        };
+        let type_code = self.class_type_code(dxf_name, fallback);
+        self.entity_preamble(type_code, &e.common);
+
+        self.writer.write_3bit_double(e.normal);
+        self.writer.write_3bit_double(e.insertion_point);
+        self.writer.write_bit_double(e.rotation);
+        self.writer.write_bit_double(e.x_scale);
+        self.writer.write_bit_double(e.y_scale);
+        self.writer.write_bit_double(e.z_scale);
+        self.writer.write_byte(e.flags.bits());
+        self.writer.write_byte(e.contrast);
+        self.writer.write_byte(e.fade);
+
+        // Definition handle (hard pointer) â€” drawn from the handle stream, so
+        // it is emitted here mid-record without disturbing the data cursor.
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, e.definition_handle.value());
+
+        self.writer
+            .write_bit_long(e.clip_boundary_vertices.len() as i32);
+        for v in &e.clip_boundary_vertices {
+            self.writer.write_2raw_double(*v);
+        }
 
         self.register_object(e.common.handle);
     }
