@@ -891,7 +891,7 @@ fn build_acds_prototype(sab_entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
 ///
 /// Fourteen little-endian `RL` fields per the ODA datastore layout (field names
 /// follow libredwg's `acds.spec`), then zero padding to 128 bytes. A strict
-/// reader (AutoCAD/BricsCAD) validates these; a wrong `ds_version` in particular
+/// reader validates these; a wrong `ds_version` in particular
 /// made the whole section read as "invalid data". The segment ordering emitted
 /// by [`build_acds_prototype`] is fixed (segidx=1, _data_=2, thumbnail=3,
 /// datidx=4, schdat=5, schidx=6, search=7), so the `*_segidx` pointers are
@@ -978,7 +978,7 @@ fn acds_segment_header(seg: &mut [u8], name: &[u8; 6], segment_idx: u32) {
 
 /// Build `datidx` segment id=4 — one index entry per ACIS record.
 ///
-/// Layout (matches a BricsCAD-authored reference): the 48-byte segment header,
+/// Layout (matches the documented datastore reference): the 48-byte header,
 /// then `num_entries` (RL), `di_unknown` (RL = 0), then one 12-byte index entry
 /// per record — `(segidx = 2 [the _data_ segment], offset = i*20, schidx = 1)`.
 fn build_acds_datidx(num_records: usize) -> Vec<u8> {
@@ -1000,34 +1000,46 @@ fn build_acds_datidx(num_records: usize) -> Vec<u8> {
     seg
 }
 
-/// Build `search` segment id=7 — the datastore's per-schema sorted lookup index.
+/// Build `search` segment id=7 — the datastore's two per-schema sorted lookup
+/// indexes (matching the documented DWG datastore layout).
 ///
-/// Two schemas, matching a BricsCAD-authored reference: schema 0 (`AcDbDs::ID`,
-/// namidx=1) sorts by record index (`sortedidx[i] = i << 32`); schema 1 (the
-/// data schema, namidx=0). Each schema: `namidx (RL), num_sortedidx (RL),
-/// sortedidx[] (RLLd), num_ididxs (RL), unknown (RL)`, then the ididx groups.
+/// Both schemas start with `namidx (RL)` + `count (RL)`. Schema 0 (the record-ID
+/// schema, namidx=1) then holds `count` 8-byte keys `i << 32` (sorted by record
+/// index) followed by `num_ididxs = 0` and `unknown = 1`. Schema 1 (the data
+/// schema, namidx=0) holds `count` 24-byte entries `(handle, 1, record_index)`
+/// **sorted ascending by handle** — the handle→record lookup — followed by a
+/// fixed 24-byte tail. `handles[i]` is the handle of the i-th SAB record, so the
+/// record index stored is the pre-sort position.
 fn build_acds_search_segment(handles: &[u32]) -> Vec<u8> {
     let n = handles.len();
     let mut content: Vec<u8> = Vec::new();
     content.extend_from_slice(&2u32.to_le_bytes()); // num_search = 2 schemas
 
-    // Schema 0: sort key = record index.
+    // Schema 0: keyed by record index.
     content.extend_from_slice(&1u32.to_le_bytes()); // schema_namidx
-    content.extend_from_slice(&(n as u32).to_le_bytes()); // num_sortedidx
+    content.extend_from_slice(&(n as u32).to_le_bytes()); // count
     for i in 0..n {
         content.extend_from_slice(&((i as u64) << 32).to_le_bytes());
     }
     content.extend_from_slice(&0u32.to_le_bytes()); // num_ididxs
     content.extend_from_slice(&1u32.to_le_bytes()); // unknown
 
-    // Schema 1: the data schema (index body kept minimal for now).
+    // Schema 1: keyed by entity handle → (handle, 1, record_index), sorted by
+    // handle so a reader can binary-search a handle to its SAB record.
     content.extend_from_slice(&0u32.to_le_bytes()); // schema_namidx
-    content.extend_from_slice(&(n as u32).to_le_bytes()); // num_sortedidx
-    for i in 0..n {
-        content.extend_from_slice(&((i as u64) << 32).to_le_bytes());
+    content.extend_from_slice(&(n as u32).to_le_bytes()); // count
+    let mut by_handle: Vec<(u32, usize)> =
+        handles.iter().copied().enumerate().map(|(i, h)| (h, i)).collect();
+    by_handle.sort_by_key(|&(h, _)| h);
+    for &(handle, record_index) in &by_handle {
+        content.extend_from_slice(&(handle as u64).to_le_bytes());
+        content.extend_from_slice(&1u64.to_le_bytes());
+        content.extend_from_slice(&(record_index as u64).to_le_bytes());
     }
-    content.extend_from_slice(&0u32.to_le_bytes()); // num_ididxs
-    content.extend_from_slice(&0u32.to_le_bytes()); // unknown
+    // Fixed 24-byte schema-1 tail from the reference layout.
+    for v in [0u32, 0, 0, 1, 0, 0] {
+        content.extend_from_slice(&v.to_le_bytes());
+    }
 
     let raw = 48 + content.len();
     let seg_size = align16(raw).max(192);
