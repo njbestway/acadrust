@@ -869,6 +869,55 @@ fn solid_with_sab(sab: Vec<u8>) -> EntityType {
 }
 
 #[test]
+fn dwg_r2018_planar_body_solid_survives_roundtrip() {
+    // A 3DSOLID built from an exact planar B-rep (build_planar_body) must save
+    // to R2018 DWG and reload with its ACIS geometry intact and linked via the
+    // has_ds_data flag — the full exact-export path (issue 225 + Problem 1).
+    use acadrust::entities::acis::primitives::build_planar_body;
+    use acadrust::entities::solid3d::Solid3D;
+
+    let vertices = [
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 0.0, 2.0],
+        [2.0, 0.0, 2.0],
+        [2.0, 2.0, 2.0],
+        [0.0, 2.0, 2.0],
+    ];
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![3, 7, 6, 2],
+        vec![1, 2, 6, 5],
+        vec![0, 4, 7, 3],
+    ];
+    let sat = build_planar_body(&vertices, &faces).expect("cube builds");
+
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let mut solid = Solid3D::new();
+    solid.set_sat_document(&sat);
+    assert!(solid.acis_data.has_data(), "solid must carry ACIS data pre-save");
+    let handle = doc.add_entity(EntityType::Solid3D(solid)).unwrap();
+
+    let rt = dwg_roundtrip(&doc);
+    let e = rt.get_entity(handle).expect("solid present after roundtrip");
+    let EntityType::Solid3D(s) = e else {
+        panic!("entity is not a 3DSOLID after roundtrip");
+    };
+    assert!(
+        s.acis_data.has_data(),
+        "planar-body solid lost its ACIS geometry on DWG roundtrip"
+    );
+    assert!(
+        s.common.has_ds_data,
+        "planar-body solid was not linked to its AcDs SAB blob (would be dropped)"
+    );
+}
+
+#[test]
 fn dwg_r2018_acds_sab_pairs_with_correct_solid() {
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
     // Distinct sizes so a mis-pairing (shift) fails the byte-equality assert.

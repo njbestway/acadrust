@@ -201,16 +201,36 @@ fn find_acds_magic(buf: &[u8], from: usize) -> Option<usize> {
     None
 }
 
+/// End-of-body terminator for an Autodesk ShapeManager (ASM) SAB blob, written
+/// as separate tagged tokens: `0E 03 "End" 0E 02 "of" 0E 03 "ASM" 0D 04 "data"`.
+/// This is what AutoCAD 2013+ / BricsCAD emit.
+const ASM_END_MARKER: &[u8] = b"\x0E\x03End\x0E\x02of\x0E\x03ASM\x0D\x04data";
+/// End-of-body terminator for a classic ACIS SAB blob, written as one tagged
+/// identifier string. This is what acadrust's own `SabWriter` emits, so the
+/// reader must recognise it to round-trip natively-built solids (primitives and
+/// the exact planar/NURBS export), not just ASM bodies read from other apps.
+const ACIS_END_MARKER: &[u8] = b"End-of-ACIS-data";
+
+/// First end-marker (ASM or classic ACIS) at/after `from`, with its length so
+/// the caller can advance past the whole terminator.
+fn find_acds_end(buf: &[u8], from: usize) -> Option<(usize, usize)> {
+    let asm = find_subsequence(buf, ASM_END_MARKER, from).map(|e| (e, ASM_END_MARKER.len()));
+    let acis = find_subsequence(buf, ACIS_END_MARKER, from).map(|e| (e, ACIS_END_MARKER.len()));
+    match (asm, acis) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
 /// Extract every SAB (ACIS/ASM binary) blob from a decompressed AcDs section.
 ///
 /// Each blob runs from its header magic — `"ACIS BinaryFile"` (classic ACIS) or
-/// `"ASM BinaryFile"` (Autodesk ShapeManager, AutoCAD 2013+) — through the
-/// `End-of-ASM-data` terminator. Blobs are returned in the order they appear,
-/// which matches the order the modeler entities were written.
+/// `"ASM BinaryFile"` (Autodesk ShapeManager, AutoCAD 2013+) — through its
+/// end-of-body terminator (`End-of-ASM-data` or `End-of-ACIS-data`). Blobs are
+/// returned in the order they appear, which matches the order the modeler
+/// entities were written.
 fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
-    // 0E 03 "End" 0E 02 "of" 0E 03 "ASM" 0D 04 "data"
-    const END_MARKER: &[u8] = b"\x0E\x03End\x0E\x02of\x0E\x03ASM\x0D\x04data";
-
     let mut blobs = Vec::new();
     let mut pos = 0usize;
     // A single forward walk: each `find_acds_magic` resumes from `pos`, and the
@@ -218,9 +238,9 @@ fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
     // the buffer is scanned once overall — not once per blob per magic, which
     // was quadratic on 3D-heavy files with many SAB bodies (issue #203).
     while let Some(start) = find_acds_magic(buf, pos) {
-        match find_subsequence(buf, END_MARKER, start) {
-            Some(end) => {
-                let stop = end + END_MARKER.len();
+        match find_acds_end(buf, start) {
+            Some((end, marker_len)) => {
+                let stop = end + marker_len;
                 blobs.push(buf[start..stop].to_vec());
                 pos = stop;
             }
