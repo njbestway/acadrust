@@ -1552,53 +1552,70 @@ impl<'a> DwgObjectWriter<'a> {
             .collect();
 
         for br in &block_records {
+            // An xref block record references an external drawing: its contents
+            // live in that file, not here. Some hosts merge the resolved xref
+            // geometry into the block record for display; serializing those as
+            // owned entities would bind/explode the xref into the host file on
+            // the next open. Write the header with an empty owned list and skip
+            // the entity loop entirely, leaving only the BLOCK/ENDBLK markers.
+            // This matches the reader, which writes/reads no owned-object count
+            // for an xref block (see the `is_xref` guards in the header).
+            let is_xref = br.flags.is_xref || br.flags.is_xref_overlay;
+
             // The block header's owned-handle list MUST match the objects the
             // entity loop below actually writes (br.entity_handles + their
             // sub-entities). Compute that set first.
-            let expanded = self.expand_entity_handles(&br.entity_handles);
-            // Prefer the original DWG-binary order/handles when available, but
-            // only when they describe exactly the same set — otherwise the file
-            // had entities added or removed since it was read and the stored
-            // list is stale, leaving the header pointing at handles that are
-            // never written. AutoCAD stops reading a block's contents at the
-            // first such dangling owned handle, silently dropping every entity
-            // after it. Drop stale entries and fall back to the live set.
-            let entity_handles_for_header = match self.document.block_entity_handles.get(&br.handle) {
-                Some(orig) => {
-                    use std::collections::HashSet;
-                    let valid: HashSet<u64> = expanded.iter().map(|h| h.value()).collect();
-                    let filtered: Vec<Handle> =
-                        orig.iter().copied().filter(|h| valid.contains(&h.value())).collect();
-                    if filtered.len() == expanded.len() {
-                        filtered
-                    } else {
-                        expanded
+            let entity_handles_for_header = if is_xref {
+                Vec::new()
+            } else {
+                let expanded = self.expand_entity_handles(&br.entity_handles);
+                // Prefer the original DWG-binary order/handles when available,
+                // but only when they describe exactly the same set — otherwise
+                // the file had entities added or removed since it was read and
+                // the stored list is stale, leaving the header pointing at
+                // handles that are never written. AutoCAD stops reading a
+                // block's contents at the first such dangling owned handle,
+                // silently dropping every entity after it. Drop stale entries
+                // and fall back to the live set.
+                match self.document.block_entity_handles.get(&br.handle) {
+                    Some(orig) => {
+                        use std::collections::HashSet;
+                        let valid: HashSet<u64> = expanded.iter().map(|h| h.value()).collect();
+                        let filtered: Vec<Handle> =
+                            orig.iter().copied().filter(|h| valid.contains(&h.value())).collect();
+                        if filtered.len() == expanded.len() {
+                            filtered
+                        } else {
+                            expanded
+                        }
                     }
+                    None => expanded,
                 }
-                None => expanded,
             };
             self.write_block_header_with_handles(br, &entity_handles_for_header);
             self.write_block_begin(br);
 
-            // Look up entities by handle from the document
-            let handles = &br.entity_handles;
-            let len = handles.len();
-            for (i, eh) in handles.iter().enumerate() {
-                if let Some(&idx) = self.document.entity_index.get(eh) {
-                    let entity = &self.document.entities[idx];
-                    // Set prev/next for entity linking (pre-R2004)
-                    self.prev_handle = if i > 0 {
-                        Some(handles[i - 1])
-                    } else {
-                        None
-                    };
-                    self.next_handle = if i + 1 < len {
-                        Some(handles[i + 1])
-                    } else {
-                        None
-                    };
+            if !is_xref {
+                // Look up entities by handle from the document
+                let handles = &br.entity_handles;
+                let len = handles.len();
+                for (i, eh) in handles.iter().enumerate() {
+                    if let Some(&idx) = self.document.entity_index.get(eh) {
+                        let entity = &self.document.entities[idx];
+                        // Set prev/next for entity linking (pre-R2004)
+                        self.prev_handle = if i > 0 {
+                            Some(handles[i - 1])
+                        } else {
+                            None
+                        };
+                        self.next_handle = if i + 1 < len {
+                            Some(handles[i + 1])
+                        } else {
+                            None
+                        };
 
-                    self.write_entity(entity);
+                        self.write_entity(entity);
+                    }
                 }
             }
 
@@ -1750,8 +1767,11 @@ impl<'a> DwgObjectWriter<'a> {
                 .write_handle(DwgReferenceType::SoftPointer, last.value());
         }
 
-        // R2004+: entity handles (hard owner)
-        if self.version.r2004_plus() {
+        // R2004+: entity handles (hard owner). Xref blocks own no entities in
+        // the format — the owned-object count is skipped above, so the reader
+        // reads zero handles here. Writing any would desync the handle stream
+        // and corrupt the block record on read, matching the R13-R2000 guard.
+        if self.version.r2004_plus() && !record.flags.is_xref && !record.flags.is_xref_overlay {
             for h in entity_handles {
                 self.writer
                     .write_handle(DwgReferenceType::HardOwnership, h.value());
