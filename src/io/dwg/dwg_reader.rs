@@ -223,48 +223,87 @@ fn find_acds_end(buf: &[u8], from: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// Ordered owning-entity handles of the blob-bearing records in the AcDs
-/// `_data_` (id=2) segment, i.e. the i-th handle owns the i-th SAB blob.
+/// Each AcDs SAB blob paired with its owning entity handle, read from the
+/// `_data_` record table(s) — authoritative regardless of blob / record / handle
+/// ordering (that ordering diverges in some BIM exports, so guessing it gave one
+/// solid another solid's geometry and body transform).
 ///
-/// The segment opens with a 48-byte header, then a record table — one entry per
-/// modeler record: `col0(RL=0x14) idx(RL) handle(RL) col3(RL)`, and, when that
-/// record carries geometry, a trailing `blob_size(RL)`. A record with no size
-/// (its next `RL` is the following entry's `0x14`) has no blob and is skipped.
-/// The blobs themselves follow the table in this same record order, so pairing
-/// blob[i] with the i-th sized entry is authoritative — unlike guessing from
-/// handle or object-stream order, which diverges in some BIM exports.
-fn parse_acds_record_handles(buf: &[u8]) -> Vec<u64> {
-    let marker = [0xACu8, 0xD5, 0x5F, 0x64, 0x61, 0x74, 0x61, 0x5F]; // "\xAC\xD5_data_"
-    // The id=2 (SAB) `_data_` segment: the marker followed by id RL == 2.
-    let seg = buf.windows(12).position(|w| {
-        w[..8] == marker && u32::from_le_bytes([w[8], w[9], w[10], w[11]]) == 2
-    });
-    let Some(seg) = seg else { return Vec::new() };
+/// A record-table `_data_` segment's content (after the 48-byte header) opens
+/// with a `col0 = 0x14` entry; its id is 2 in small files but a high index in
+/// large multi-segment datastores, so match on that content marker, not the id,
+/// and process every such segment. Each 20-byte entry is
+/// `col0(0x14) idx handle data_offset`, where `data_offset` is the cumulative
+/// start of the record's blob in the blob data that follows the table. Record r's
+/// blob therefore lives in `[base + off[r] .. base + off[r+1]]`; locate the SAB
+/// header there and read through its end marker (which can run a few bytes past
+/// `off[r+1]`). Records with an empty range carry no geometry and are skipped.
+/// Empty when there is no such table (the caller then falls back to order-based
+/// attachment).
+fn extract_acds_record_blobs(buf: &[u8]) -> Vec<(u64, Vec<u8>)> {
     let rd = |p: usize| -> Option<u32> {
         buf.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))
     };
-    let mut handles = Vec::new();
-    let mut p = seg + 48; // skip the segment header
-    while rd(p) == Some(0x14) {
-        let handle = match rd(p + 8) {
-            Some(h) => h as u64,
-            None => break,
-        };
-        p += 16; // col0, idx, handle, col3
-        // A trailing size (≠ the next entry's 0x14 marker) means this record
-        // owns a blob; no size means it does not.
-        if rd(p) == Some(0x14) {
-            continue; // no blob for this record
+    let marker = [0xACu8, 0xD5, 0x5F, 0x64, 0x61, 0x74, 0x61, 0x5F]; // "\xAC\xD5_data_"
+    let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
+    // A large datastore splits its records across several `_data_` segments, so
+    // process every one whose content is a record table (opens with `col0=0x14`).
+    let mut scan = 0;
+    while let Some(i) = buf[scan..].windows(8).position(|w| w == marker) {
+        let seg = scan + i;
+        scan = seg + 8;
+        if rd(seg + 48) != Some(0x14) {
+            continue; // e.g. the empty thumbnail `_data_` segment
         }
-        handles.push(handle);
-        p += 4; // consume the size
+        // Segment size (RQ at header offset 16) bounds this segment's blob data,
+        // so the last record does not run into the following segment.
+        let seg_size = buf
+            .get(seg + 16..seg + 24)
+            .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()) as usize);
+        let seg_end = seg.saturating_add(seg_size).min(buf.len());
+        // Record table: (handle, cumulative data offset) per record.
+        let mut recs: Vec<(u64, usize)> = Vec::new();
+        let mut p = seg + 48;
+        while rd(p) == Some(0x14) {
+            let (Some(handle), Some(off)) = (rd(p + 8), rd(p + 16)) else { break };
+            recs.push((handle as u64, off as usize));
+            p += 20;
+        }
+        // A genuine record table is a run of consecutive 20-byte entries. A
+        // single entry is a different layout — e.g. `SabWriter`'s own segment
+        // interleaves a 36-byte record header before each blob, so the walk
+        // stops after one; skip it (the caller then falls back to order-based
+        // attachment, which round-trips those files).
+        if recs.len() < 2 {
+            continue;
+        }
+        let base = seg + 48 + recs.len() * 20; // blob data follows the table
+        for k in 0..recs.len() {
+            let (handle, off) = recs[k];
+            let region_start = base + off;
+            let region_end = recs.get(k + 1).map_or(seg_end, |&(_, o)| base + o);
+            if region_start >= seg_end || region_end <= region_start {
+                continue; // record with no geometry
+            }
+            let region = &buf[region_start..region_end.min(seg_end)];
+            let Some(mp) = region
+                .windows(14)
+                .position(|w| w == b"ASM BinaryFile")
+                .or_else(|| region.windows(15).position(|w| w == b"ACIS BinaryFile"))
+            else {
+                continue; // no SAB body in this record's range
+            };
+            let start = region_start + mp;
+            if let Some((end, marker_len)) = find_acds_end(buf, start) {
+                out.push((handle, buf[start..end + marker_len].to_vec()));
+            }
+        }
     }
-    handles
+    out
 }
 
 /// Extract every SAB (ACIS/ASM binary) blob from a decompressed AcDs section, in
 /// the order they appear — the `_data_` record order, matching the handle list
-/// from [`parse_acds_record_handles`].
+/// order they appear.
 ///
 /// Each blob runs from its header magic — `"ACIS BinaryFile"` (classic ACIS) or
 /// `"ASM BinaryFile"` (Autodesk ShapeManager, AutoCAD 2013+) — through its
@@ -289,80 +328,72 @@ fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
     blobs
 }
 
-/// Attach extracted AcDs SAB blobs to the document's modeler (3DSOLID / REGION /
-/// BODY / SURFACE) entities. Returns the number attached.
-///
-/// When the `_data_` record table yielded one owning handle per blob
-/// (`record_handles`), pair blob[i] with `record_handles[i]` — authoritative,
-/// and correct even when the record order matches neither handle nor
-/// object-stream order (as happens in some BIM exports, where guessing the order
-/// gave a solid another solid's geometry). Otherwise fall back to the
-/// object-stream-ordered handle list (`document.acis_sab_handles`), then to
-/// positional attachment in document order, matching the historical behaviour
-/// for layouts without a parseable record table.
-fn attach_acds_sab_blobs(
-    document: &mut crate::document::CadDocument,
-    blobs: Vec<Vec<u8>>,
-    record_handles: Vec<u64>,
-) -> usize {
-    use crate::entities::solid3d::AcisVersion;
+/// Fill an `AcisData` from a SAB blob and mark it binary v2.
+fn acds_fill(acis: &mut crate::entities::solid3d::AcisData, blob: Vec<u8>) {
+    acis.sab_data = blob;
+    acis.sat_data = String::new();
+    acis.is_binary = true;
+    acis.version = crate::entities::solid3d::AcisVersion::Version2;
+}
+
+/// Apply a SAB blob to a modeler entity, deriving its placement reference point
+/// now that the geometry is available. Returns false for non-modeler entities.
+fn acds_apply(entity: &mut crate::entities::EntityType, blob: Vec<u8>) -> bool {
     use crate::entities::EntityType;
-
-    // Fill an AcisData from a blob.
-    fn fill(acis: &mut crate::entities::solid3d::AcisData, blob: Vec<u8>) {
-        acis.sab_data = blob;
-        acis.sat_data = String::new();
-        acis.is_binary = true;
-        acis.version = AcisVersion::Version2;
+    match entity {
+        EntityType::Solid3D(s) => {
+            acds_fill(&mut s.acis_data, blob);
+            if let Some(p) = s.acis_data.placement_origin() {
+                s.point_of_reference = p;
+            }
+            true
+        }
+        EntityType::Region(r) => {
+            acds_fill(&mut r.acis_data, blob);
+            if let Some(p) = r.acis_data.placement_origin() {
+                r.point_of_reference = p;
+            }
+            true
+        }
+        EntityType::Body(b) => {
+            acds_fill(&mut b.acis_data, blob);
+            if let Some(p) = b.acis_data.placement_origin() {
+                b.point_of_reference = p;
+            }
+            true
+        }
+        EntityType::Surface(s) => {
+            acds_fill(&mut s.acis_data, blob);
+            true
+        }
+        _ => false,
     }
-    // Apply a blob to whichever modeler entity carries `handle`, deriving the
-    // placement reference point now that the SAB geometry is available.
-    fn apply(entity: &mut EntityType, blob: Vec<u8>) -> bool {
-        match entity {
-            EntityType::Solid3D(s) => {
-                fill(&mut s.acis_data, blob);
-                if let Some(p) = s.acis_data.placement_origin() {
-                    s.point_of_reference = p;
-                }
-                true
+}
+
+/// Attach handle-paired AcDs SAB blobs (from [`extract_acds_record_blobs`]) to
+/// their owning modeler entities — authoritative, each blob to the entity the
+/// record table named. Returns the number attached.
+fn attach_acds_record_blobs(
+    document: &mut crate::document::CadDocument,
+    record_blobs: Vec<(u64, Vec<u8>)>,
+) -> usize {
+    document.acis_sab_handles.clear();
+    let mut attached = 0usize;
+    for (h, blob) in record_blobs {
+        if let Some(entity) = document.get_entity_mut(crate::Handle::new(h)) {
+            if acds_apply(entity, blob) {
+                attached += 1;
             }
-            EntityType::Region(r) => {
-                fill(&mut r.acis_data, blob);
-                if let Some(p) = r.acis_data.placement_origin() {
-                    r.point_of_reference = p;
-                }
-                true
-            }
-            EntityType::Body(b) => {
-                fill(&mut b.acis_data, blob);
-                if let Some(p) = b.acis_data.placement_origin() {
-                    b.point_of_reference = p;
-                }
-                true
-            }
-            EntityType::Surface(s) => {
-                fill(&mut s.acis_data, blob);
-                true
-            }
-            _ => false,
         }
     }
+    attached
+}
 
-    // Preferred: the record table gives one owning handle per blob (same order),
-    // so pair by handle. The length match guards against a partially-parsed
-    // table silently dropping or mis-shifting geometry.
-    if !record_handles.is_empty() && record_handles.len() == blobs.len() {
-        document.acis_sab_handles.clear();
-        let mut attached = 0usize;
-        for (h, blob) in record_handles.into_iter().zip(blobs.into_iter()) {
-            if let Some(entity) = document.get_entity_mut(crate::Handle::new(h)) {
-                if apply(entity, blob) {
-                    attached += 1;
-                }
-            }
-        }
-        return attached;
-    }
+/// Attach order-extracted AcDs SAB blobs when no record table is parseable: pair
+/// by the object-stream-ordered handle list (`document.acis_sab_handles`), else
+/// positionally in document order. Returns the number attached.
+fn attach_acds_sab_blobs(document: &mut crate::document::CadDocument, blobs: Vec<Vec<u8>>) -> usize {
+    use crate::entities::EntityType;
 
     // Fallback A: attach by the object-stream-ordered handle list.
     let ordered = std::mem::take(&mut document.acis_sab_handles);
@@ -370,7 +401,7 @@ fn attach_acds_sab_blobs(
         let mut attached = 0usize;
         for (handle, blob) in ordered.into_iter().zip(blobs.into_iter()) {
             if let Some(entity) = document.get_entity_mut(handle) {
-                if apply(entity, blob) {
+                if acds_apply(entity, blob) {
                     attached += 1;
                 }
             }
@@ -383,39 +414,18 @@ fn attach_acds_sab_blobs(
     let mut attached = 0usize;
     for entity in document.entities_mut() {
         // Only consume a blob for ACIS-backed entities, in document order.
-        match entity {
-            EntityType::Solid3D(s) => {
-                let Some(blob) = it.next() else { break };
-                fill(&mut s.acis_data, blob);
-                // The SAB geometry — and with it the body's placement — only
-                // becomes available now, so derive the reference point here.
-                if let Some(p) = s.acis_data.placement_origin() {
-                    s.point_of_reference = p;
-                }
+        if matches!(
+            entity,
+            EntityType::Solid3D(_)
+                | EntityType::Region(_)
+                | EntityType::Body(_)
+                | EntityType::Surface(_)
+        ) {
+            let Some(blob) = it.next() else { break };
+            if acds_apply(entity, blob) {
                 attached += 1;
             }
-            EntityType::Region(r) => {
-                let Some(blob) = it.next() else { break };
-                fill(&mut r.acis_data, blob);
-                if let Some(p) = r.acis_data.placement_origin() {
-                    r.point_of_reference = p;
-                }
-                attached += 1;
-            }
-            EntityType::Body(b) => {
-                let Some(blob) = it.next() else { break };
-                fill(&mut b.acis_data, blob);
-                if let Some(p) = b.acis_data.placement_origin() {
-                    b.point_of_reference = p;
-                }
-                attached += 1;
-            }
-            EntityType::Surface(s) => {
-                let Some(blob) = it.next() else { break };
-                fill(&mut s.acis_data, blob);
-                attached += 1;
-            }
-            _ => continue,
+            continue;
         }
     }
     attached
@@ -605,10 +615,23 @@ impl<R: Read + Seek> DwgReader<R> {
         //    order, to the modeler-geometry entities that arrived with only a
         //    stub. Files without an AcDs section keep their inline data.
         if let Ok(acds_buf) = self.get_section_buffer("AcDb:AcDsPrototype_1b", &info) {
-            let blobs = extract_acds_sab_blobs(&acds_buf);
-            if !blobs.is_empty() {
-                let record_handles = parse_acds_record_handles(&acds_buf);
-                let attached = attach_acds_sab_blobs(&mut document, blobs, record_handles);
+            // Authoritative: the `_data_` record table(s) bind each blob to its
+            // owning handle. When present, attach by handle — the only mapping
+            // that survives BIM exports whose blob/record/handle orders diverge.
+            let record_blobs = extract_acds_record_blobs(&acds_buf);
+            let attached = if !record_blobs.is_empty() {
+                attach_acds_record_blobs(&mut document, record_blobs)
+            } else {
+                // No parseable record table: magic-scan the blobs and pair by
+                // the object-stream handle list, else positionally.
+                let blobs = extract_acds_sab_blobs(&acds_buf);
+                if blobs.is_empty() {
+                    0
+                } else {
+                    attach_acds_sab_blobs(&mut document, blobs)
+                }
+            };
+            if attached > 0 {
                 self.notifications.notify(
                     NotificationType::Warning,
                     format!("AcDs: attached {} SAB blob(s) to modeler entities", attached),
