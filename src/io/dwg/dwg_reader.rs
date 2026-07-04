@@ -223,13 +223,52 @@ fn find_acds_end(buf: &[u8], from: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// Extract every SAB (ACIS/ASM binary) blob from a decompressed AcDs section.
+/// Ordered owning-entity handles of the blob-bearing records in the AcDs
+/// `_data_` (id=2) segment, i.e. the i-th handle owns the i-th SAB blob.
+///
+/// The segment opens with a 48-byte header, then a record table — one entry per
+/// modeler record: `col0(RL=0x14) idx(RL) handle(RL) col3(RL)`, and, when that
+/// record carries geometry, a trailing `blob_size(RL)`. A record with no size
+/// (its next `RL` is the following entry's `0x14`) has no blob and is skipped.
+/// The blobs themselves follow the table in this same record order, so pairing
+/// blob[i] with the i-th sized entry is authoritative — unlike guessing from
+/// handle or object-stream order, which diverges in some BIM exports.
+fn parse_acds_record_handles(buf: &[u8]) -> Vec<u64> {
+    let marker = [0xACu8, 0xD5, 0x5F, 0x64, 0x61, 0x74, 0x61, 0x5F]; // "\xAC\xD5_data_"
+    // The id=2 (SAB) `_data_` segment: the marker followed by id RL == 2.
+    let seg = buf.windows(12).position(|w| {
+        w[..8] == marker && u32::from_le_bytes([w[8], w[9], w[10], w[11]]) == 2
+    });
+    let Some(seg) = seg else { return Vec::new() };
+    let rd = |p: usize| -> Option<u32> {
+        buf.get(p..p + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let mut handles = Vec::new();
+    let mut p = seg + 48; // skip the segment header
+    while rd(p) == Some(0x14) {
+        let handle = match rd(p + 8) {
+            Some(h) => h as u64,
+            None => break,
+        };
+        p += 16; // col0, idx, handle, col3
+        // A trailing size (≠ the next entry's 0x14 marker) means this record
+        // owns a blob; no size means it does not.
+        if rd(p) == Some(0x14) {
+            continue; // no blob for this record
+        }
+        handles.push(handle);
+        p += 4; // consume the size
+    }
+    handles
+}
+
+/// Extract every SAB (ACIS/ASM binary) blob from a decompressed AcDs section, in
+/// the order they appear — the `_data_` record order, matching the handle list
+/// from [`parse_acds_record_handles`].
 ///
 /// Each blob runs from its header magic — `"ACIS BinaryFile"` (classic ACIS) or
 /// `"ASM BinaryFile"` (Autodesk ShapeManager, AutoCAD 2013+) — through its
-/// end-of-body terminator (`End-of-ASM-data` or `End-of-ACIS-data`). Blobs are
-/// returned in the order they appear, which matches the order the modeler
-/// entities were written.
+/// end-of-body terminator (`End-of-ASM-data` or `End-of-ACIS-data`).
 fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut blobs = Vec::new();
     let mut pos = 0usize;
@@ -253,13 +292,19 @@ fn extract_acds_sab_blobs(buf: &[u8]) -> Vec<Vec<u8>> {
 /// Attach extracted AcDs SAB blobs to the document's modeler (3DSOLID / REGION /
 /// BODY / SURFACE) entities. Returns the number attached.
 ///
-/// The blobs sit in the AcDs section in object-stream order. When the builder
-/// captured the flagged (`has_ds_data`) modeler handles in that same order
-/// (`document.acis_sab_handles`), pair blob[i] with the i-th handle — correct
-/// even though `document.entities` is handle-sorted rather than in stream order.
-/// Files that predate handle capture (empty list) fall back to positional
-/// attachment in document order, matching the historical behaviour.
-fn attach_acds_sab_blobs(document: &mut crate::document::CadDocument, blobs: Vec<Vec<u8>>) -> usize {
+/// When the `_data_` record table yielded one owning handle per blob
+/// (`record_handles`), pair blob[i] with `record_handles[i]` — authoritative,
+/// and correct even when the record order matches neither handle nor
+/// object-stream order (as happens in some BIM exports, where guessing the order
+/// gave a solid another solid's geometry). Otherwise fall back to the
+/// object-stream-ordered handle list (`document.acis_sab_handles`), then to
+/// positional attachment in document order, matching the historical behaviour
+/// for layouts without a parseable record table.
+fn attach_acds_sab_blobs(
+    document: &mut crate::document::CadDocument,
+    blobs: Vec<Vec<u8>>,
+    record_handles: Vec<u64>,
+) -> usize {
     use crate::entities::solid3d::AcisVersion;
     use crate::entities::EntityType;
 
@@ -303,7 +348,23 @@ fn attach_acds_sab_blobs(document: &mut crate::document::CadDocument, blobs: Vec
         }
     }
 
-    // Preferred: attach by object-stream-ordered handle list (see doc comment).
+    // Preferred: the record table gives one owning handle per blob (same order),
+    // so pair by handle. The length match guards against a partially-parsed
+    // table silently dropping or mis-shifting geometry.
+    if !record_handles.is_empty() && record_handles.len() == blobs.len() {
+        document.acis_sab_handles.clear();
+        let mut attached = 0usize;
+        for (h, blob) in record_handles.into_iter().zip(blobs.into_iter()) {
+            if let Some(entity) = document.get_entity_mut(crate::Handle::new(h)) {
+                if apply(entity, blob) {
+                    attached += 1;
+                }
+            }
+        }
+        return attached;
+    }
+
+    // Fallback A: attach by the object-stream-ordered handle list.
     let ordered = std::mem::take(&mut document.acis_sab_handles);
     if !ordered.is_empty() {
         let mut attached = 0usize;
@@ -317,7 +378,7 @@ fn attach_acds_sab_blobs(document: &mut crate::document::CadDocument, blobs: Vec
         return attached;
     }
 
-    // Fallback: positional attach in document order.
+    // Fallback B: positional attach in document order.
     let mut it = blobs.into_iter();
     let mut attached = 0usize;
     for entity in document.entities_mut() {
@@ -546,7 +607,8 @@ impl<R: Read + Seek> DwgReader<R> {
         if let Ok(acds_buf) = self.get_section_buffer("AcDb:AcDsPrototype_1b", &info) {
             let blobs = extract_acds_sab_blobs(&acds_buf);
             if !blobs.is_empty() {
-                let attached = attach_acds_sab_blobs(&mut document, blobs);
+                let record_handles = parse_acds_record_handles(&acds_buf);
+                let attached = attach_acds_sab_blobs(&mut document, blobs, record_handles);
                 self.notifications.notify(
                     NotificationType::Warning,
                     format!("AcDs: attached {} SAB blob(s) to modeler entities", attached),
