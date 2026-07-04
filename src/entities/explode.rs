@@ -68,6 +68,7 @@ fn arc_from_bulge(
             location: Vector3::new(p1x, p1y, elevation),
             thickness,
             normal,
+            x_axis_angle: 0.0,
         });
     }
 
@@ -382,6 +383,8 @@ fn explode_mtext(mtext: &MText) -> Vec<EntityType> {
         horizontal_alignment: TextHorizontalAlignment::Left,
         vertical_alignment: TextVerticalAlignment::Baseline,
         normal: mtext.normal,
+        thickness: 0.0,
+        generation_flags: 0,
     };
     vec![EntityType::Text(text)]
 }
@@ -543,6 +546,8 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
         horizontal_alignment: TextHorizontalAlignment::Center,
         vertical_alignment: TextVerticalAlignment::Middle,
         normal: base.normal,
+        thickness: 0.0,
+        generation_flags: 0,
     };
     result.push(EntityType::Text(text));
 
@@ -786,6 +791,7 @@ impl EntityType {
             EntityType::Solid(e) => explode_solid(e),
             EntityType::Face3D(e) => explode_face3d(e),
             EntityType::Spline(e) => explode_spline(e),
+            EntityType::Helix(e) => explode_spline(&e.spline),
             EntityType::MText(e) => explode_mtext(e),
             EntityType::Dimension(e) => explode_dimension(e),
             EntityType::Leader(e) => explode_leader(e),

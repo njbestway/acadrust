@@ -461,8 +461,17 @@ fn write_ac18<W: Write + Seek>(
     document: &CadDocument,
     version: DxfVersion,
 ) -> Result<()> {
+    // The maintenance-release version must match the value the AuxHeader
+    // writes AND the file-header metadata byte, because readers gate the
+    // R2010+ per-section "extra RL" (which locates the header/classes string
+    // stream) on `maintenance_version > 3`. A fresh document defaults to 0,
+    // which for R2013 (AC1027) omits that RL and makes the header string
+    // stream unreadable in AutoCAD/TrueView. Use the canonical per-version
+    // value so R2013 files are always well-formed.
+    let maint = aux_header_writer::dwg_maintenance_version(version) as u8;
+
     // AC18 writer reserves 0x100 bytes at file start for metadata
-    let mut fhw = DwgFileHeaderWriterAC18::new(version, document.maintenance_version, output)?;
+    let mut fhw = DwgFileHeaderWriterAC18::new(version, maint, output)?;
 
     // R2004+ default page size for most sections
     const PAGE_SIZE: usize = 0x7400;
@@ -477,7 +486,6 @@ fn write_ac18<W: Write + Seek>(
     let corrected_header = prepare_header(document, &handle_map_u32, &extents);
 
     // ── Section: Header (uses synced + corrected header) ──
-    let maint = document.maintenance_version;
     let header_data = header_writer::write_header(version, &corrected_header, maint);
     fhw.add_section(output, section_names::HEADER, &header_data, true, PAGE_SIZE)?;
 
@@ -861,12 +869,8 @@ fn build_acds_prototype(sab_entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
 
     // ── Jard header ──────────────────────────────────────────────
     let total_size = off_segidx + segidx_size;
-    let segidx_offset = off_segidx; // data_size field = segidx offset
-    let header = build_acds_jard_header(
-        sab_entries.len() as u32,
-        segidx_offset,
-        total_size,
-    );
+    let segidx_offset = off_segidx;
+    let header = build_acds_jard_header(segidx_offset, total_size);
 
     // ── Assemble ─────────────────────────────────────────────────
     let mut result = Vec::with_capacity(total_size as usize);
@@ -883,40 +887,32 @@ fn build_acds_prototype(sab_entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
     result
 }
 
-/// Build the "jard" header (128 bytes).
-fn build_acds_jard_header(
-    num_records: u32,
-    segidx_offset: u32,
-    total_size: u32,
-) -> Vec<u8> {
+/// Build the AcDsPrototype_1b file header ("jard", 128 bytes).
+///
+/// Fourteen little-endian `RL` fields per the ODA datastore layout (field names
+/// follow libredwg's `acds.spec`), then zero padding to 128 bytes. A strict
+/// reader validates these; a wrong `ds_version` in particular
+/// made the whole section read as "invalid data". The segment ordering emitted
+/// by [`build_acds_prototype`] is fixed (segidx=1, _data_=2, thumbnail=3,
+/// datidx=4, schdat=5, schidx=6, search=7), so the `*_segidx` pointers are
+/// constant.
+fn build_acds_jard_header(segidx_offset: u32, file_size: u32) -> Vec<u8> {
     let mut h = vec![0u8; 128];
-    // Magic
-    h[0..4].copy_from_slice(b"jard");
-    // Header size
-    h[4..8].copy_from_slice(&128u32.to_le_bytes());
-    // Schema version
-    h[8..12].copy_from_slice(&2u32.to_le_bytes());
-    // Num schemas
-    h[12..16].copy_from_slice(&2u32.to_le_bytes());
-    // Unknown
-    h[16..20].copy_from_slice(&0u32.to_le_bytes());
-    // Record count
-    h[20..24].copy_from_slice(&num_records.to_le_bytes());
-    // Segidx offset (u64)
-    h[24..32].copy_from_slice(&(segidx_offset as u64).to_le_bytes());
-    // Segidx entry count (null + 7 segments = 8)
-    h[32..36].copy_from_slice(&8u32.to_le_bytes());
-    // Num segments excluding segidx
-    h[36..40].copy_from_slice(&6u32.to_le_bytes());
-    // Unknown (4)
-    h[40..44].copy_from_slice(&4u32.to_le_bytes());
-    // Num segments total
-    h[44..48].copy_from_slice(&7u32.to_le_bytes());
-    // Unknown (0)
-    h[48..52].copy_from_slice(&0u32.to_le_bytes());
-    // Total size (u64)
-    h[52..60].copy_from_slice(&(total_size as u64).to_le_bytes());
-    // Remaining bytes are zero (padding)
+    h[0..4].copy_from_slice(b"jard"); // file_signature
+    h[4..8].copy_from_slice(&128u32.to_le_bytes()); // file_header_size
+    h[8..12].copy_from_slice(&2u32.to_le_bytes()); // unknown_1 (always 2)
+    h[12..16].copy_from_slice(&2u32.to_le_bytes()); // version (always 2)
+    h[16..20].copy_from_slice(&0u32.to_le_bytes()); // unknown_2 (always 0)
+    h[20..24].copy_from_slice(&1u32.to_le_bytes()); // ds_version (datastore revision)
+    h[24..28].copy_from_slice(&segidx_offset.to_le_bytes()); // segidx_offset
+    h[28..32].copy_from_slice(&0u32.to_le_bytes()); // segidx_unknown
+    h[32..36].copy_from_slice(&8u32.to_le_bytes()); // num_segidx (null + 7 segments)
+    h[36..40].copy_from_slice(&6u32.to_le_bytes()); // schidx_segidx
+    h[40..44].copy_from_slice(&4u32.to_le_bytes()); // datidx_segidx
+    h[44..48].copy_from_slice(&7u32.to_le_bytes()); // search_segidx
+    h[48..52].copy_from_slice(&0u32.to_le_bytes()); // prvsav_segidx
+    h[52..56].copy_from_slice(&file_size.to_le_bytes()); // file_size
+    // Remaining bytes are zero (padding to file_header_size).
     h
 }
 
@@ -936,10 +932,11 @@ fn build_acds_data2_segment(entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
 
     // Segment header (48 bytes)
     seg.extend_from_slice(&[0xAC, 0xD5, 0x5F, 0x64, 0x61, 0x74, 0x61, 0x5F]); // "_data_"
-    seg.extend_from_slice(&2u32.to_le_bytes()); // id=2
-    seg.extend_from_slice(&0u32.to_le_bytes()); // pad
+    seg.extend_from_slice(&2u32.to_le_bytes()); // segment_idx=2
+    seg.extend_from_slice(&0u32.to_le_bytes()); // is_blob01
     seg.extend_from_slice(&(seg_size as u64).to_le_bytes()); // segment size
-    seg.extend_from_slice(&(entries.len() as u64).to_le_bytes()); // record count
+    seg.extend_from_slice(&1u32.to_le_bytes()); // ds_version (always 1, NOT the record count)
+    seg.extend_from_slice(&0u32.to_le_bytes()); // unknown_3
     seg.extend_from_slice(&0u32.to_le_bytes()); // meta field1 = 0
     seg.extend_from_slice(&5u32.to_le_bytes()); // meta field2 = 5 (num columns)
     seg.extend_from_slice(&[0x55; 8]); // fill "UUUUUUUU"
@@ -963,76 +960,92 @@ fn build_acds_data2_segment(entries: &[(Handle, Vec<u8>)]) -> Vec<u8> {
     seg
 }
 
+/// Write the 48-byte AcDs segment header (signature + 6-char name + the fixed
+/// field block: segment_idx, is_blob01=0, segsize, unknown_2=0, ds_version=1,
+/// unknown_3=0, align offsets=0, 8× 0x55 fill).
+fn acds_segment_header(seg: &mut [u8], name: &[u8; 6], segment_idx: u32) {
+    let seg_len = seg.len() as u64;
+    seg[0..2].copy_from_slice(&[0xAC, 0xD5]);
+    seg[2..8].copy_from_slice(name);
+    seg[8..12].copy_from_slice(&segment_idx.to_le_bytes());
+    seg[12..16].copy_from_slice(&0u32.to_le_bytes()); // is_blob01
+    seg[16..24].copy_from_slice(&seg_len.to_le_bytes()); // segsize + unknown_2
+    seg[24..28].copy_from_slice(&1u32.to_le_bytes()); // ds_version (always 1)
+    seg[28..32].copy_from_slice(&0u32.to_le_bytes()); // unknown_3
+    seg[32..40].copy_from_slice(&0u64.to_le_bytes()); // data/objdata align offsets
+    seg[40..48].copy_from_slice(&[0x55; 8]); // fill
+}
+
 /// Build `datidx` segment id=4 — one index entry per ACIS record.
+///
+/// Layout (matches the documented datastore reference): the 48-byte header,
+/// then `num_entries` (RL), `di_unknown` (RL = 0), then one 12-byte index entry
+/// per record — `(segidx = 2 [the _data_ segment], offset = i*20, schidx = 1)`.
 fn build_acds_datidx(num_records: usize) -> Vec<u8> {
     let num = num_records.max(1);
-    // 48-byte header + 20 bytes per index entry, padded to 16-byte alignment.
-    let raw = 48 + num * 20;
+    let raw = 48 + 8 + num * 12;
     let seg_size = align16(raw).max(128);
     let mut seg = vec![0x70u8; seg_size];
+    acds_segment_header(&mut seg, b"datidx", 4);
 
-    // Segment header
-    seg[0..8].copy_from_slice(&[0xAC, 0xD5, 0x64, 0x61, 0x74, 0x69, 0x64, 0x78]); // "datidx"
-    seg[8..12].copy_from_slice(&4u32.to_le_bytes()); // id=4
-    seg[12..16].copy_from_slice(&0u32.to_le_bytes()); // pad
-    seg[16..24].copy_from_slice(&(seg_size as u64).to_le_bytes()); // segment size
-    seg[24..32].copy_from_slice(&(num as u64).to_le_bytes()); // record count
-    seg[32..40].copy_from_slice(&0u64.to_le_bytes()); // meta
-    seg[40..48].copy_from_slice(&[0x55; 8]); // fill
-
-    // Index entries: (row_index, 0, schema_id=2, 0, data_count=1) — 20 bytes each.
-    let mut pos = 48;
+    seg[48..52].copy_from_slice(&(num as u32).to_le_bytes()); // num_entries
+    seg[52..56].copy_from_slice(&0u32.to_le_bytes()); // di_unknown
+    let mut pos = 56;
     for i in 0..num {
-        seg[pos..pos + 4].copy_from_slice(&((i + 1) as u32).to_le_bytes());
-        seg[pos + 4..pos + 8].copy_from_slice(&0u32.to_le_bytes());
-        seg[pos + 8..pos + 12].copy_from_slice(&2u32.to_le_bytes());
-        seg[pos + 12..pos + 16].copy_from_slice(&0u32.to_le_bytes());
-        seg[pos + 16..pos + 20].copy_from_slice(&1u32.to_le_bytes());
-        pos += 20;
+        seg[pos..pos + 4].copy_from_slice(&2u32.to_le_bytes()); // segidx (→ _data_ id=2)
+        seg[pos + 4..pos + 8].copy_from_slice(&((i as u32) * 20).to_le_bytes()); // offset
+        seg[pos + 8..pos + 12].copy_from_slice(&1u32.to_le_bytes()); // schidx
+        pos += 12;
     }
-
     seg
 }
 
-/// Build `search` segment id=7 with one handle→record lookup per ACIS entity.
+/// Build `search` segment id=7 — the datastore's two per-schema sorted lookup
+/// indexes (matching the documented DWG datastore layout).
+///
+/// Both schemas start with `namidx (RL)` + `count (RL)`. Schema 0 (the record-ID
+/// schema, namidx=1) then holds `count` 8-byte keys `i << 32` (sorted by record
+/// index) followed by `num_ididxs = 0` and `unknown = 1`. Schema 1 (the data
+/// schema, namidx=0) holds `count` 24-byte entries `(handle, 1, record_index)`
+/// **sorted ascending by handle** — the handle→record lookup — followed by a
+/// fixed 24-byte tail. `handles[i]` is the handle of the i-th SAB record, so the
+/// record index stored is the pre-sort position.
 fn build_acds_search_segment(handles: &[u32]) -> Vec<u8> {
-    let num = handles.len().max(1);
-    // 48-byte header + a small fixed preamble + 8 bytes per handle entry,
-    // padded to 16-byte alignment (kept at least the reference 192 bytes).
-    let preamble = 36usize;
-    let raw = 48 + preamble + num * 8;
-    let seg_size = align16(raw).max(192);
-    let mut seg = vec![0x70u8; seg_size];
+    let n = handles.len();
+    let mut content: Vec<u8> = Vec::new();
+    content.extend_from_slice(&2u32.to_le_bytes()); // num_search = 2 schemas
 
-    // Segment header
-    seg[0..8].copy_from_slice(&[0xAC, 0xD5, 0x73, 0x65, 0x61, 0x72, 0x63, 0x68]); // "search"
-    seg[8..12].copy_from_slice(&7u32.to_le_bytes()); // id=7
-    seg[12..16].copy_from_slice(&0u32.to_le_bytes()); // pad
-    seg[16..24].copy_from_slice(&(seg_size as u64).to_le_bytes()); // segment size
-    seg[24..32].copy_from_slice(&(num as u64).to_le_bytes()); // record count
-    seg[32..40].copy_from_slice(&0u64.to_le_bytes()); // meta
-    seg[40..48].copy_from_slice(&[0x55; 8]); // fill
+    // Schema 0: keyed by record index.
+    content.extend_from_slice(&1u32.to_le_bytes()); // schema_namidx
+    content.extend_from_slice(&(n as u32).to_le_bytes()); // count
+    for i in 0..n {
+        content.extend_from_slice(&((i as u64) << 32).to_le_bytes());
+    }
+    content.extend_from_slice(&0u32.to_le_bytes()); // num_ididxs
+    content.extend_from_slice(&1u32.to_le_bytes()); // unknown
 
-    // Preamble (matches reference file layout for the schema-with-data table).
-    let content: &[u8] = &[
-        0x02, 0x00, 0x00, 0x00, // num_schemas_with_data = 2
-        0x01, 0x00, 0x00, 0x00, //
-        0x01, 0x00, 0x00, 0x00, //
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // zeros
-        0x00, 0x00, 0x00, 0x00, //
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
-        0x01, 0x00, 0x00, 0x00, //
-    ];
-    seg[48..48 + content.len()].copy_from_slice(content);
-
-    // Handle→record entries: (handle u32, record_index u32) at offset 84.
-    let mut pos = 84;
-    for (i, &handle_val) in handles.iter().enumerate() {
-        seg[pos..pos + 4].copy_from_slice(&handle_val.to_le_bytes());
-        seg[pos + 4..pos + 8].copy_from_slice(&((i + 1) as u32).to_le_bytes());
-        pos += 8;
+    // Schema 1: keyed by entity handle → (handle, 1, record_index), sorted by
+    // handle so a reader can binary-search a handle to its SAB record.
+    content.extend_from_slice(&0u32.to_le_bytes()); // schema_namidx
+    content.extend_from_slice(&(n as u32).to_le_bytes()); // count
+    let mut by_handle: Vec<(u32, usize)> =
+        handles.iter().copied().enumerate().map(|(i, h)| (h, i)).collect();
+    by_handle.sort_by_key(|&(h, _)| h);
+    for &(handle, record_index) in &by_handle {
+        content.extend_from_slice(&(handle as u64).to_le_bytes());
+        content.extend_from_slice(&1u64.to_le_bytes());
+        content.extend_from_slice(&(record_index as u64).to_le_bytes());
+    }
+    // Fixed 24-byte schema-1 tail from the reference layout.
+    for v in [0u32, 0, 0, 1, 0, 0] {
+        content.extend_from_slice(&v.to_le_bytes());
     }
 
+    let raw = 48 + content.len();
+    let seg_size = align16(raw).max(192);
+    let mut seg = vec![0x70u8; seg_size];
+    acds_segment_header(&mut seg, b"search", 7);
+    seg[48..48 + content.len()].copy_from_slice(&content);
     seg
 }
 

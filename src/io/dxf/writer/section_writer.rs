@@ -1053,6 +1053,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             EntityType::Text(e) => self.write_text(e, owner),
             EntityType::MText(e) => self.write_mtext(e, owner),
             EntityType::Spline(e) => self.write_spline(e, owner),
+            EntityType::Helix(e) => self.write_helix(e, owner),
             EntityType::Dimension(dim) => self.write_dimension(dim, owner),
             EntityType::Hatch(e) => self.write_hatch(e, owner),
             EntityType::Solid(e) => self.write_solid(e, owner),
@@ -1228,6 +1229,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(39, point.thickness)?;
         }
         self.write_normal(point.normal)?;
+        if point.x_axis_angle != 0.0 {
+            self.writer.write_double(50, point.x_axis_angle)?;
+        }
         Ok(())
     }
 
@@ -1451,6 +1455,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_entity_type("TEXT")?;
         self.write_common_entity_data(&text.common, owner)?;
         self.writer.write_subclass("AcDbText")?;
+        if text.thickness != 0.0 {
+            self.writer.write_double(39, text.thickness)?;
+        }
         self.writer.write_point3d(10, text.insertion_point)?;
         self.writer.write_double(40, text.height)?;
         self.writer.write_string(1, &text.value)?;
@@ -1464,6 +1471,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(51, text.oblique_angle)?;
         }
         self.writer.write_string(7, &text.style)?;
+        if text.generation_flags != 0 {
+            self.writer.write_i16(71, text.generation_flags)?;
+        }
         self.writer.write_i16(72, text.horizontal_alignment as i16)?;
         if let Some(align_pt) = text.alignment_point {
             self.writer.write_point3d(11, align_pt)?;
@@ -1520,7 +1530,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if mtext.rotation != 0.0 {
             self.writer.write_double(50, mtext.rotation.to_degrees())?;
         }
+        self.writer.write_i16(73, mtext.line_spacing_style as i16)?;
         self.writer.write_double(44, mtext.line_spacing_factor)?;
+        if let Some(h) = mtext.rectangle_height {
+            self.writer.write_double(46, h)?;
+        }
+        // Background fill — only when enabled by the flags.
+        if mtext.background_fill_flags != 0 {
+            self.writer.write_i32(90, mtext.background_fill_flags)?;
+            self.writer.write_double(45, mtext.background_scale)?;
+            if let Some(tc) = mtext.background_color.to_true_color_value() {
+                self.writer.write_i32(421, tc)?;
+            } else if let Some(idx) = mtext.background_color.index() {
+                self.writer.write_i16(63, idx as i16)?;
+            }
+            if mtext.background_transparency != 0 {
+                self.writer.write_i32(441, mtext.background_transparency)?;
+            }
+        }
         self.write_normal(mtext.normal)?;
         Ok(())
     }
@@ -1529,6 +1556,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_spline(&mut self, spline: &Spline, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("SPLINE")?;
         self.write_common_entity_data(&spline.common, owner)?;
+        self.write_spline_body(spline)?;
+        Ok(())
+    }
+
+    /// Write the AcDbSpline subclass block (marker + all spline group codes).
+    /// Shared by SPLINE and HELIX, which carries a spline as its geometry.
+    fn write_spline_body(&mut self, spline: &Spline) -> Result<()> {
         self.writer.write_subclass("AcDbSpline")?;
 
         // Normal vector
@@ -1545,6 +1579,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if spline.flags.rational {
             flags |= 4;
         }
+        if spline.flags.planar {
+            flags |= 8;
+        }
+        if spline.flags.linear {
+            flags |= 16;
+        }
         self.writer.write_i16(70, flags)?;
 
         self.writer.write_i16(71, spline.degree as i16)?;
@@ -1553,10 +1593,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             .write_i16(73, spline.control_points.len() as i16)?;
         self.writer.write_i16(74, spline.fit_points.len() as i16)?;
 
-        // Knot tolerance, control point tolerance, fit tolerance
-        self.writer.write_double(42, 0.0000001)?;
-        self.writer.write_double(43, 0.0000001)?;
-        self.writer.write_double(44, 0.0000001)?;
+        // Knot / control-point / fit tolerances (round-trip the stored values).
+        self.writer.write_double(42, spline.knot_tolerance)?;
+        self.writer.write_double(43, spline.control_tolerance)?;
+        self.writer.write_double(44, spline.fit_tolerance)?;
+
+        // Start / end tangents (only when set).
+        if spline.begin_tangent != Vector3::ZERO {
+            self.writer.write_point3d(12, spline.begin_tangent)?;
+        }
+        if spline.end_tangent != Vector3::ZERO {
+            self.writer.write_point3d(13, spline.end_tangent)?;
+        }
 
         // Knots
         for knot in &spline.knots {
@@ -1577,6 +1625,27 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_point3d(11, *point)?;
         }
 
+        Ok(())
+    }
+
+    /// Write a HELIX entity: the AcDbSpline geometry block followed by the
+    /// AcDbHelix parameters.
+    fn write_helix(&mut self, helix: &Helix, owner: Handle) -> Result<()> {
+        self.writer.write_entity_type("HELIX")?;
+        self.write_common_entity_data(&helix.common, owner)?;
+        self.write_spline_body(&helix.spline)?;
+
+        self.writer.write_subclass("AcDbHelix")?;
+        self.writer.write_i32(90, helix.major_version)?;
+        self.writer.write_i32(91, helix.maintenance_version)?;
+        self.writer.write_point3d(10, helix.axis_base_point)?;
+        self.writer.write_point3d(11, helix.start_point)?;
+        self.writer.write_point3d(12, helix.axis_vector)?;
+        self.writer.write_double(40, helix.radius)?;
+        self.writer.write_double(41, helix.turns)?;
+        self.writer.write_double(42, helix.turn_height)?;
+        self.writer.write_bool(290, helix.handedness)?;
+        self.writer.write_byte(280, helix.constraint.to_code())?;
         Ok(())
     }
 
@@ -2432,6 +2501,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 ObjectType::Group(group) => self.write_group(group)?,
                 ObjectType::MLineStyle(mlinestyle) => self.write_mlinestyle(mlinestyle)?,
                 ObjectType::ImageDefinition(imagedef) => self.write_image_definition(imagedef)?,
+                ObjectType::UnderlayDefinition(def) => self.write_underlay_definition(def)?,
                 ObjectType::PlotSettings(plotsettings) => self.write_plot_settings(plotsettings)?,
                 ObjectType::MultiLeaderStyle(style) => self.write_multileader_style(style)?,
                 ObjectType::TableStyle(style) => self.write_table_style(style)?,
@@ -2777,6 +2847,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer
             .write_byte(281, imagedef.resolution_unit.to_code() as u8)?;
 
+        Ok(())
+    }
+
+    /// Write a PDF/DWF/DGN underlay definition object.
+    fn write_underlay_definition(
+        &mut self,
+        def: &crate::objects::UnderlayDefinition,
+    ) -> Result<()> {
+        self.writer.write_string(0, def.entity_name())?;
+        self.writer.write_handle(5, def.handle)?;
+        self.writer.write_handle(330, def.owner_handle)?;
+        self.writer.write_subclass("AcDbUnderlayDefinition")?;
+        self.writer.write_string(1, &def.file_path)?;
+        self.writer.write_string(2, &def.page_name)?;
         Ok(())
     }
 
@@ -4215,6 +4299,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_handle(330, mesh.common.handle)?;
             self.writer.write_subclass("AcDbEntity")?;
             self.writer.write_string(8, &face.common.layer)?;
+            if let Some(c) = face.color {
+                if let Some(tc) = c.to_true_color_value() {
+                    self.writer.write_i32(420, tc)?;
+                } else if let Some(idx) = c.index() {
+                    self.writer.write_i16(62, idx as i16)?;
+                }
+            }
             self.writer.write_subclass("AcDbFaceRecord")?;
 
             // Dummy position

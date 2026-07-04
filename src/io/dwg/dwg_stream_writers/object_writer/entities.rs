@@ -33,6 +33,7 @@ impl<'a> DwgObjectWriter<'a> {
             EntityType::Insert(e) => self.write_insert(e),
             EntityType::LwPolyline(e) => self.write_lwpolyline(e),
             EntityType::Spline(e) => self.write_spline(e),
+            EntityType::Helix(e) => self.write_helix(e),
             EntityType::Ray(e) => self.write_ray(e),
             EntityType::XLine(e) => self.write_xline(e),
             EntityType::Leader(e) => self.write_leader(e),
@@ -76,10 +77,8 @@ impl<'a> DwgObjectWriter<'a> {
                     }
                 }
             }
-            EntityType::Table(_)
-            | EntityType::Underlay(_) => {
-                // Not yet supported â€” silently skip
-            }
+            EntityType::Underlay(e) => self.write_underlay(e),
+            EntityType::Table(e) => self.write_table(e),
             EntityType::Unknown(e) => {
                 // Write raw DWG data verbatim only when the target matches the
                 // source encoding family; otherwise drop rather than corrupt.
@@ -126,7 +125,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_3bit_double(e.location);
         self.writer.write_bit_thickness(e.thickness);
         self.writer.write_bit_extrusion(e.normal);
-        self.writer.write_bit_double(0.0); // x-axis angle
+        self.writer.write_bit_double(e.x_axis_angle);
         self.register_object(e.common.handle);
     }
 
@@ -217,7 +216,7 @@ impl<'a> DwgObjectWriter<'a> {
             // Extrusion 3BD 210
             self.writer.write_3bit_double(e.normal);
             // Thickness BD 39
-            self.writer.write_bit_double(0.0);
+            self.writer.write_bit_double(e.thickness);
             // Oblique ang BD 51
             self.writer.write_bit_double(e.oblique_angle);
             // Rotation ang BD 50
@@ -229,7 +228,7 @@ impl<'a> DwgObjectWriter<'a> {
             // Text value TV 1
             self.writer.write_variable_text(&e.value);
             // Generation BS 71
-            self.writer.write_bit_short(0); // mirror = None
+            self.writer.write_bit_short(e.generation_flags);
             // Horiz align BS 72
             self.writer.write_bit_short(e.horizontal_alignment as i16);
             // Vert align BS 73
@@ -260,8 +259,10 @@ impl<'a> DwgObjectWriter<'a> {
             if e.width_factor == 1.0 {
                 data_flags |= 0x10;
             }
-            // 0x20 = mirror flag is None (0)
-            data_flags |= 0x20; // always None, no mirror field in struct
+            // 0x20 = generation (mirror) flag is None (0)
+            if e.generation_flags == 0 {
+                data_flags |= 0x20;
+            }
             // 0x40 = horizontal alignment is Left (0)
             if e.horizontal_alignment as u8 == 0 {
                 data_flags |= 0x40;
@@ -290,7 +291,7 @@ impl<'a> DwgObjectWriter<'a> {
             // Extrusion BE 210
             self.writer.write_bit_extrusion(e.normal);
             // Thickness BT 39
-            self.writer.write_bit_thickness(0.0);
+            self.writer.write_bit_thickness(e.thickness);
             // Oblique ang RD 51 â€” present if !(DataFlags & 0x04)
             if (data_flags & 0x04) == 0 {
                 self.writer.write_raw_double(e.oblique_angle);
@@ -309,7 +310,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_variable_text(&e.value);
             // Generation BS 71 â€” present if !(DataFlags & 0x20)
             if (data_flags & 0x20) == 0 {
-                self.writer.write_bit_short(0); // mirror = None
+                self.writer.write_bit_short(e.generation_flags);
             }
             // Horiz align BS 72 â€” present if !(DataFlags & 0x40)
             if (data_flags & 0x40) == 0 {
@@ -385,7 +386,7 @@ impl<'a> DwgObjectWriter<'a> {
             .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         // Linespacing Style BS 73 (1=At Least, 2=Exact)
-        self.writer.write_bit_short(1);
+        self.writer.write_bit_short(e.line_spacing_style as i16);
         // Linespacing Factor BD 44
         self.writer.write_bit_double(e.line_spacing_factor);
         // Unknown bit B
@@ -933,7 +934,14 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_spline(&mut self, e: &Spline) {
         self.entity_preamble(common::OBJ_SPLINE, &e.common);
+        self.write_spline_data(e);
+        self.register_object(e.common.handle);
+    }
 
+    /// Write the AcDbSpline object-data body (everything after the entity
+    /// preamble, no handle registration). Shared by SPLINE and HELIX, which
+    /// embeds a spline as its curve geometry.
+    fn write_spline_data(&mut self, e: &Spline) {
         // Determine scenario: 2 = fit points, 1 = control points/knots
         let scenario: i32 = if !e.fit_points.is_empty() { 2 } else { 1 };
 
@@ -941,7 +949,7 @@ impl<'a> DwgObjectWriter<'a> {
             // R2013+: scenario BL, flags1 BL, knot parametrization BL
             self.writer.write_bit_long(scenario);
             self.writer.write_bit_long(0); // flags1
-            self.writer.write_bit_long(0); // knot parametrization
+            self.writer.write_bit_long(e.knot_parameterization); // knot parametrization
         } else {
             // Scenario BL
             self.writer.write_bit_long(scenario);
@@ -963,9 +971,9 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit(e.flags.periodic);
 
                 // Knot tol BD 42
-                self.writer.write_bit_double(1e-10);
+                self.writer.write_bit_double(e.knot_tolerance);
                 // Ctrl tol BD 43
-                self.writer.write_bit_double(1e-10);
+                self.writer.write_bit_double(e.control_tolerance);
 
                 // Generate clamped uniform knot vector if not provided
                 let knots: Vec<f64> = if e.knots.is_empty() && !e.control_points.is_empty() {
@@ -999,11 +1007,11 @@ impl<'a> DwgObjectWriter<'a> {
             _ => {
                 // Scenario 2: fit-point spline
                 // Fit Tol BD 44
-                self.writer.write_bit_double(0.0);
+                self.writer.write_bit_double(e.fit_tolerance);
                 // Beg tan vec 3BD 12
-                self.writer.write_3bit_double(Vector3::ZERO);
+                self.writer.write_3bit_double(e.begin_tangent);
                 // End tan vec 3BD 13
-                self.writer.write_3bit_double(Vector3::ZERO);
+                self.writer.write_3bit_double(e.end_tangent);
                 // num fit pts BL 74
                 self.writer.write_bit_long(e.fit_points.len() as i32);
                 // Fit points
@@ -1012,6 +1020,31 @@ impl<'a> DwgObjectWriter<'a> {
                 }
             }
         }
+    }
+
+    // ── Helix ───────────────────────────────────────────────────────
+
+    /// Write a HELIX entity (AcDbHelix): the full spline record followed by
+    /// the helix parameters. HELIX is UNLISTED, so its type code comes from
+    /// the registered class number.
+    fn write_helix(&mut self, e: &Helix) {
+        let type_code = self.class_type_code("HELIX", common::OBJ_HELIX);
+        self.entity_preamble(type_code, &e.common);
+
+        // AcDbSpline part (curve geometry).
+        self.write_spline_data(&e.spline);
+
+        // AcDbHelix part.
+        self.writer.write_bit_long(e.major_version);
+        self.writer.write_bit_long(e.maintenance_version);
+        self.writer.write_3bit_double(e.axis_base_point);
+        self.writer.write_3bit_double(e.start_point);
+        self.writer.write_3bit_double(e.axis_vector);
+        self.writer.write_bit_double(e.radius);
+        self.writer.write_bit_double(e.turns);
+        self.writer.write_bit_double(e.turn_height);
+        self.writer.write_bit(e.handedness);
+        self.writer.write_byte(e.constraint.to_code());
 
         self.register_object(e.common.handle);
     }
@@ -1484,7 +1517,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // Clip boundary handle (hard pointer)
         self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+            .write_handle(DwgReferenceType::HardPointer, e.clip_boundary_handle.value());
 
         // R2000 (AC1015) only: VIEWPORT ENT HEADER
         if self.version == crate::io::dwg::dwg_version::DwgVersion::AC15 {
@@ -2294,6 +2327,262 @@ impl<'a> DwgObjectWriter<'a> {
         self.register_object(e.common.handle);
     }
 
+    // â”€â”€ Underlay (PDF / DWF / DGN) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /// Write an UNDERLAY reference (AcDbUnderlayReference).
+    ///
+    // ── Table (ACAD_TABLE) ──────────────────────────────────────────
+    //
+    // Inverse of the table reader. Cell styles / borders acadrust does not
+    // model are written as empty presence-flag stubs (the anonymous block
+    // renders the visual), and the retained data — dimensions, cell contents
+    // (text/number) — is written in full so it round-trips.
+
+    fn write_table_string_value(&mut self, s: &str) {
+        if self.version.r2007_plus() {
+            let mut bytes: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            bytes.push(0);
+            bytes.push(0); // trailing UTF-16 NUL
+            self.writer.write_bit_long(bytes.len() as i32);
+            self.writer.write_bytes(&bytes);
+        } else {
+            let bytes = s.as_bytes();
+            self.writer.write_bit_long(bytes.len() as i32);
+            self.writer.write_bytes(bytes);
+        }
+    }
+
+    fn write_table_cad_value(&mut self, v: &CellValue) {
+        if self.version.r2007_plus() {
+            self.writer.write_bit_long(v.flags);
+        }
+        let code: i32 = match v.value_type {
+            CellValueType::Long => 1,
+            CellValueType::Double => 2,
+            CellValueType::String => 4,
+            CellValueType::General => 0x200,
+            CellValueType::Handle => 0x40,
+            _ => 0, // Unknown / unmodelled — decoded as a bit-long
+        };
+        self.writer.write_bit_long(code);
+        match code {
+            2 => self.writer.write_bit_double(v.numeric_value),
+            4 | 0x200 => self.write_table_string_value(&v.text),
+            0x40 => self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                v.handle_value.map(|h| h.value()).unwrap_or(0),
+            ),
+            _ => self.writer.write_bit_long(v.numeric_value as i32),
+        }
+        if self.version.r2007_plus() {
+            self.writer.write_bit_long(0); // units
+            self.writer.write_variable_text(&v.format);
+            self.writer.write_variable_text(&v.formatted_value);
+        }
+    }
+
+    /// An empty cell-style block: type + "no data" presence flag.
+    fn write_table_cell_style_empty(&mut self) {
+        self.writer.write_bit_long(0); // type
+        self.writer.write_bit_short(0); // has data = false
+    }
+
+    fn write_table_cell_content(&mut self, content: &CellContent) {
+        let ct: i32 = match content.content_type {
+            TableCellContentType::Value => 1,
+            TableCellContentType::Field => 2,
+            TableCellContentType::Block => 4,
+            _ => 0,
+        };
+        self.writer.write_bit_long(ct);
+        match content.content_type {
+            TableCellContentType::Value => self.write_table_cad_value(&content.value),
+            TableCellContentType::Field => {
+                self.writer.write_handle(DwgReferenceType::HardPointer, 0)
+            }
+            TableCellContentType::Block => self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                content.block_handle.map(|h| h.value()).unwrap_or(0),
+            ),
+            _ => {}
+        }
+        self.writer.write_bit_long(0); // attribute count
+        self.writer.write_bit_short(0); // has content format = false
+    }
+
+    /// R2010+ inline cell.
+    fn write_table_cell_r2010(&mut self, cell: &TableCell) {
+        self.writer.write_bit_long(cell.state.bits() as i32);
+        self.writer.write_variable_text(&cell.tooltip);
+        self.writer.write_bit_long(cell.custom_data);
+        self.writer.write_bit_long(0); // custom data items
+        self.writer.write_bit_long(0); // has linked data = false
+        self.writer.write_bit_long(cell.contents.len() as i32);
+        for content in &cell.contents {
+            self.write_table_cell_content(content);
+        }
+        self.write_table_cell_style_empty();
+        self.writer.write_bit_long(0); // style id
+        self.writer.write_bit_long(0); // unknown flag (no geometry)
+    }
+
+    /// R2010+ AcDbLinkedTableData body.
+    fn write_table_content(&mut self, e: &table::Table) {
+        self.writer.write_variable_text(""); // name
+        self.writer.write_variable_text(""); // description
+        self.writer.write_bit_long(e.columns.len() as i32);
+        for col in &e.columns {
+            self.writer.write_variable_text(&col.name);
+            self.writer.write_bit_long(col.custom_data);
+            self.writer.write_bit_long(0); // custom data items
+            self.write_table_cell_style_empty();
+            self.writer.write_bit_long(0); // style id
+            self.writer.write_bit_double(col.width);
+        }
+        self.writer.write_bit_long(e.rows.len() as i32);
+        for row in &e.rows {
+            self.writer.write_bit_long(row.cells.len() as i32);
+            for cell in &row.cells {
+                self.write_table_cell_r2010(cell);
+            }
+            self.writer.write_bit_long(row.custom_data);
+            self.writer.write_bit_long(0); // custom data items
+            self.write_table_cell_style_empty();
+            self.writer.write_bit_long(0); // style id
+            self.writer.write_bit_double(row.height);
+        }
+        self.writer.write_bit_long(0); // field count
+        self.write_table_cell_style_empty(); // table base cell style
+        self.writer.write_bit_long(0); // merged range count
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            e.table_style_handle.map(|h| h.value()).unwrap_or(0),
+        );
+    }
+
+    /// Pre-R2010 flat-format cell.
+    fn write_table_cell_data(&mut self, cell: &TableCell) {
+        self.writer.write_bit_short(cell.cell_type as i16);
+        self.writer.write_byte(0); // edge flags
+        self.writer.write_bit(false); // merged
+        self.writer.write_bit(cell.auto_fit);
+        self.writer.write_bit_long(cell.merge_width);
+        self.writer.write_bit_long(cell.merge_height);
+        self.writer.write_bit_double(cell.rotation);
+        self.writer.write_handle(DwgReferenceType::HardPointer, 0); // value handle
+        if cell.cell_type == CellType::Block {
+            self.writer.write_bit_double(1.0); // block scale
+            self.writer.write_bit(false); // no attributes
+        }
+        self.writer.write_bit(false); // has override = false
+        if self.version.r2007_plus() {
+            self.writer.write_bit_long(0); // unknown
+            let empty = CellValue::new();
+            let value = cell.contents.first().map(|c| &c.value).unwrap_or(&empty);
+            self.write_table_cad_value(value);
+        }
+    }
+
+    fn write_table(&mut self, e: &table::Table) {
+        let type_code = self.class_type_code("ACAD_TABLE", common::OBJ_TABLE);
+        self.entity_preamble(type_code, &e.common);
+
+        // Insert base (mirrors read_insert; tables carry no attributes).
+        self.writer.write_3bit_double(e.insertion_point);
+        if self.version.r13_14_only() {
+            self.writer.write_bit_double(1.0);
+            self.writer.write_bit_double(1.0);
+            self.writer.write_bit_double(1.0);
+        }
+        if self.version.r2000_plus() {
+            self.writer.write_2bits(3); // scale (1,1,1), no data
+        }
+        self.writer.write_bit_double(0.0); // rotation
+        self.writer.write_3bit_double(e.normal);
+        self.writer.write_bit(false); // has attributes
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            e.block_record_handle.map(|h| h.value()).unwrap_or(0),
+        );
+
+        if self.version.r2010_plus() {
+            self.writer.write_byte(0); // unknown RC
+            self.writer.write_handle(DwgReferenceType::SoftPointer, 0); // null handle
+            self.writer.write_bit_long(0); // unknown BL
+            if self.version.r2013_plus(self.dxf_version) {
+                self.writer.write_bit_long(0);
+            } else {
+                self.writer.write_bit(true);
+            }
+            self.write_table_content(e);
+            self.writer.write_bit_short(38); // unknown
+            self.writer.write_3bit_double(e.horizontal_direction);
+            self.writer.write_bit_long(0); // has break data = false
+            self.writer.write_bit_long(0); // break row range count
+        } else {
+            self.writer.write_bit_short(0); // value flag
+            self.writer.write_3bit_double(e.horizontal_direction);
+            self.writer.write_bit_long(e.columns.len() as i32);
+            self.writer.write_bit_long(e.rows.len() as i32);
+            for col in &e.columns {
+                self.writer.write_bit_double(col.width);
+            }
+            for row in &e.rows {
+                self.writer.write_bit_double(row.height);
+            }
+            self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                e.table_style_handle.map(|h| h.value()).unwrap_or(0),
+            );
+            for row in &e.rows {
+                for cell in &row.cells {
+                    self.write_table_cell_data(cell);
+                }
+            }
+        }
+
+        self.register_object(e.common.handle);
+    }
+
+    /// Mirrors [`read_underlay`] field-for-field. Unlike the raster image
+    /// writer there is a single (definition) handle, no version-gated
+    /// clip-inversion bit, and the clip boundary is always a bit-long count
+    /// followed by raw 2D vertices.
+    fn write_underlay(&mut self, e: &Underlay) {
+        // UNLISTED entity type â€” always resolve to the DXF class number (500+).
+        let dxf_name = e.entity_name();
+        let fallback = match e.underlay_type {
+            UnderlayType::Dwf => common::OBJ_DWFUNDERLAY,
+            UnderlayType::Dgn => common::OBJ_DGNUNDERLAY,
+            UnderlayType::Pdf => common::OBJ_PDFUNDERLAY,
+        };
+        let type_code = self.class_type_code(dxf_name, fallback);
+        self.entity_preamble(type_code, &e.common);
+
+        self.writer.write_3bit_double(e.normal);
+        self.writer.write_3bit_double(e.insertion_point);
+        self.writer.write_bit_double(e.rotation);
+        self.writer.write_bit_double(e.x_scale);
+        self.writer.write_bit_double(e.y_scale);
+        self.writer.write_bit_double(e.z_scale);
+        self.writer.write_byte(e.flags.bits());
+        self.writer.write_byte(e.contrast);
+        self.writer.write_byte(e.fade);
+
+        // Definition handle (hard pointer) â€” drawn from the handle stream, so
+        // it is emitted here mid-record without disturbing the data cursor.
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, e.definition_handle.value());
+
+        self.writer
+            .write_bit_long(e.clip_boundary_vertices.len() as i32);
+        for v in &e.clip_boundary_vertices {
+            self.writer.write_2raw_double(*v);
+        }
+
+        self.register_object(e.common.handle);
+    }
+
     // â”€â”€ RasterImage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_raster_image(&mut self, e: &RasterImage) {
@@ -3080,6 +3369,11 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ ACIS entities (3DSOLID, REGION, BODY) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_solid3d(&mut self, e: &Solid3D) {
+        // R2013+: mark the entity as data-store-backed when its geometry will be
+        // emitted as a SAB blob into the AcDs section (below), so readers pair
+        // the blob with this solid. Must precede the common-data preamble.
+        self.pending_has_ds_data =
+            self.needs_acds_section() && e.acis_data.contributes_sab();
         self.entity_preamble(common::OBJ_3DSOLID, &e.common);
 
         let acds = self.needs_acds_section();
@@ -3098,9 +3392,13 @@ impl<'a> DwgObjectWriter<'a> {
             // acis_empty_bit — must match acis_empty
             self.writer.write_bit(acds);
 
-            // R2007+: unknown BL field (COMMON_3DSOLID)
-            if self.version.r2007_plus() {
-                self.writer.write_bit_long(0);
+            // R2013+: modeler-geometry revision block (COMMON_3DSOLID).
+            // Empty / SAT bodies carry no materials block (materials only
+            // follow binary SAB, handled on the early-return path). Omitting
+            // this block corrupts the entity stream for R2013+ and prevents
+            // the file from opening in AutoCAD/TrueView/BricsCAD.
+            if self.version.r2013_plus(self.dxf_version) {
+                self.write_acis_revision(&e.acis_data.revision);
             }
         }
 
@@ -3114,6 +3412,8 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_region(&mut self, e: &Region) {
+        self.pending_has_ds_data =
+            self.needs_acds_section() && e.acis_data.contributes_sab();
         self.entity_preamble(common::OBJ_REGION, &e.common);
 
         let acds = self.needs_acds_section();
@@ -3130,16 +3430,28 @@ impl<'a> DwgObjectWriter<'a> {
             // acis_empty_bit — must match acis_empty
             self.writer.write_bit(acds);
 
-            // R2007+: unknown BL field (COMMON_3DSOLID)
-            if self.version.r2007_plus() {
-                self.writer.write_bit_long(0);
+            // R2013+: modeler-geometry revision block (COMMON_3DSOLID).
+            // Empty / SAT bodies carry no materials block (materials only
+            // follow binary SAB, handled on the early-return path). Omitting
+            // this block corrupts the entity stream for R2013+ and prevents
+            // the file from opening in AutoCAD/TrueView/BricsCAD.
+            if self.version.r2013_plus(self.dxf_version) {
+                self.write_acis_revision(&e.acis_data.revision);
             }
+        }
+
+        // REGION R2007+: history_id handle (same slot as 3DSOLID).
+        if self.version.r2007_plus() {
+            let h = e.history_handle.map(|h| h.value()).unwrap_or(0);
+            self.writer.write_handle(DwgReferenceType::SoftPointer, h);
         }
 
         self.register_object(e.common.handle);
     }
 
     fn write_body(&mut self, e: &Body) {
+        self.pending_has_ds_data =
+            self.needs_acds_section() && e.acis_data.contributes_sab();
         self.entity_preamble(common::OBJ_BODY, &e.common);
 
         let acds = self.needs_acds_section();
@@ -3156,10 +3468,20 @@ impl<'a> DwgObjectWriter<'a> {
             // acis_empty_bit — must match acis_empty
             self.writer.write_bit(acds);
 
-            // R2007+: unknown BL field (COMMON_3DSOLID)
-            if self.version.r2007_plus() {
-                self.writer.write_bit_long(0);
+            // R2013+: modeler-geometry revision block (COMMON_3DSOLID).
+            // Empty / SAT bodies carry no materials block (materials only
+            // follow binary SAB, handled on the early-return path). Omitting
+            // this block corrupts the entity stream for R2013+ and prevents
+            // the file from opening in AutoCAD/TrueView/BricsCAD.
+            if self.version.r2013_plus(self.dxf_version) {
+                self.write_acis_revision(&e.acis_data.revision);
             }
+        }
+
+        // BODY R2007+: history_id handle (same slot as 3DSOLID).
+        if self.version.r2007_plus() {
+            let h = e.history_handle.map(|h| h.value()).unwrap_or(0);
+            self.writer.write_handle(DwgReferenceType::SoftPointer, h);
         }
 
         self.register_object(e.common.handle);
@@ -3173,6 +3495,18 @@ impl<'a> DwgObjectWriter<'a> {
     fn write_acis_empty(&mut self) {
         self.writer.write_bit(true); // acis_empty = true (no inline data)
         self.writer.write_bit(false); // wireframe_present = false
+    }
+
+    /// Write the R2013+ modeler-geometry revision block (`COMMON_3DSOLID`).
+    ///
+    /// Layout: `B has_guid | BL major | BS minor1 | BS minor2 | RC×8 bytes | BL end_marker`.
+    fn write_acis_revision(&mut self, rev: &crate::entities::solid3d::AcisRevision) {
+        self.writer.write_bit(rev.has_guid);
+        self.writer.write_bit_long(rev.major as i32);
+        self.writer.write_bit_short(rev.minor1);
+        self.writer.write_bit_short(rev.minor2);
+        self.writer.write_bytes(&rev.bytes);
+        self.writer.write_bit_long(rev.end_marker as i32);
     }
 
     /// Queue SAB data for writing into the AcDsPrototype_1b section.
@@ -3366,6 +3700,7 @@ mod tests {
             location: Vector3::new(1.0, 2.0, 3.0),
             thickness: 0.0,
             normal: Vector3::UNIT_Z,
+            x_axis_angle: 0.0,
         };
         let doc = make_doc_with_entity(EntityType::Point(pt));
         let writer = DwgObjectWriter::new(&doc).unwrap();

@@ -246,6 +246,29 @@ impl From<u8> for AcisVersion {
 ///
 /// The ACIS data represents the actual 3D solid geometry in Spatial
 /// Corporation's proprietary format.
+/// Modeler-geometry revision block (`COMMON_3DSOLID`, R2013+).
+///
+/// Every 3DSOLID/REGION/BODY in an R2013+ (AC1027+) DWG carries a revision
+/// block identifying the ACIS/ShapeManager modeler revision. It must be
+/// preserved on write; omitting it corrupts the entity stream and prevents the
+/// file from opening in AutoCAD/TrueView/BricsCAD.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AcisRevision {
+    /// Whether a revision GUID is present.
+    pub has_guid: bool,
+    /// GUID major component (BitLong).
+    pub major: u32,
+    /// GUID minor component 1 (BitShort).
+    pub minor1: i16,
+    /// GUID minor component 2 (BitShort).
+    pub minor2: i16,
+    /// The 8 raw GUID bytes.
+    pub bytes: [u8; 8],
+    /// Trailing end marker (BitLong).
+    pub end_marker: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AcisData {
@@ -257,6 +280,8 @@ pub struct AcisData {
     pub sab_data: Vec<u8>,
     /// Whether this is binary SAB format.
     pub is_binary: bool,
+    /// R2013+ modeler-geometry revision block (preserved for round-trip).
+    pub revision: AcisRevision,
 }
 
 impl AcisData {
@@ -267,6 +292,7 @@ impl AcisData {
             sat_data: String::new(),
             sab_data: Vec::new(),
             is_binary: false,
+            revision: AcisRevision::default(),
         }
     }
 
@@ -280,6 +306,7 @@ impl AcisData {
             sat_data: Self::strip_sat_terminator(sat),
             sab_data: Vec::new(),
             is_binary: false,
+            revision: AcisRevision::default(),
         }
     }
 
@@ -290,12 +317,22 @@ impl AcisData {
             sat_data: String::new(),
             sab_data: sab,
             is_binary: true,
+            revision: AcisRevision::default(),
         }
     }
 
     /// Returns true if this contains valid data.
     pub fn has_data(&self) -> bool {
         !self.sat_data.is_empty() || !self.sab_data.is_empty()
+    }
+
+    /// Returns true when this ACIS data yields a SAB blob for the AcDs section
+    /// on write (binary SAB present, or SAT text convertible to SAB). Matches
+    /// the push condition in the DWG writer's `queue_sab_entry`, so the R2013+
+    /// `has_ds_data` entity flag stays in lockstep with the blobs actually
+    /// emitted — a mismatch would orphan a blob or a solid.
+    pub fn contributes_sab(&self) -> bool {
+        (self.is_binary && !self.sab_data.is_empty()) || !self.sat_data.is_empty()
     }
 
     /// Strip the `End-of-ACIS-data` / `End-of-ASM-data` terminator line
@@ -739,6 +776,9 @@ pub struct Region {
     pub wires: Vec<Wire>,
     /// Silhouette data for viewports.
     pub silhouettes: Vec<Silhouette>,
+    /// Handle of the associated history object (H 350, R2007+); NULL when the
+    /// region records no construction history.
+    pub history_handle: Option<Handle>,
 }
 
 impl Region {
@@ -751,6 +791,7 @@ impl Region {
             acis_data: AcisData::new(),
             wires: Vec::new(),
             silhouettes: Vec::new(),
+            history_handle: None,
         }
     }
 
@@ -900,6 +941,9 @@ pub struct Body {
     pub wires: Vec<Wire>,
     /// Silhouette data for viewports.
     pub silhouettes: Vec<Silhouette>,
+    /// Handle of the associated history object (H 350, R2007+); NULL when the
+    /// body records no construction history.
+    pub history_handle: Option<Handle>,
 }
 
 impl Body {
@@ -912,6 +956,7 @@ impl Body {
             acis_data: AcisData::new(),
             wires: Vec::new(),
             silhouettes: Vec::new(),
+            history_handle: None,
         }
     }
 

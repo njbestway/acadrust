@@ -841,6 +841,115 @@ fn dwg_roundtrip(doc: &CadDocument) -> CadDocument {
     reader.read().expect("DWG read failed")
 }
 
+// ── AcDs SAB round-trip (issue 225) ───────────────────────────────────────
+//
+// On R2013+ a 3DSOLID/REGION/BODY's geometry is not inline — it lives as a SAB
+// blob in the `AcDb:AcDsPrototype_1b` data-store section, and the entity carries
+// a `has_ds_data` flag telling readers to look there. Two regressions this
+// guards against: (1) the writer never set `has_ds_data`, so AutoCAD/BricsCAD
+// dropped every solid as "data stream is empty"; (2) blobs were paired with
+// entities positionally in handle-sorted order rather than object-stream order,
+// so each solid came back with the *wrong* geometry.
+
+/// Fabricate a minimal SAB blob the AcDs reader recognises: the ASM binary
+/// magic, a distinctive body, and the `End-of-ASM-data` terminator.
+fn fake_sab_blob(tag: u8, body_len: usize) -> Vec<u8> {
+    let mut b = b"ASM BinaryFile".to_vec();
+    b.extend(std::iter::repeat(tag).take(body_len));
+    b.extend_from_slice(b"\x0E\x03End\x0E\x02of\x0E\x03ASM\x0D\x04data");
+    b
+}
+
+fn solid_with_sab(sab: Vec<u8>) -> EntityType {
+    let mut s = acadrust::entities::solid3d::Solid3D::new();
+    s.acis_data.sab_data = sab;
+    s.acis_data.is_binary = true;
+    s.acis_data.version = acadrust::entities::solid3d::AcisVersion::Version2;
+    EntityType::Solid3D(s)
+}
+
+#[test]
+fn dwg_r2018_planar_body_solid_survives_roundtrip() {
+    // A 3DSOLID built from an exact planar B-rep (build_planar_body) must save
+    // to R2018 DWG and reload with its ACIS geometry intact and linked via the
+    // has_ds_data flag — the full exact-export path (issue 225 + Problem 1).
+    use acadrust::entities::acis::primitives::build_planar_body;
+    use acadrust::entities::solid3d::Solid3D;
+
+    let vertices = [
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 0.0, 2.0],
+        [2.0, 0.0, 2.0],
+        [2.0, 2.0, 2.0],
+        [0.0, 2.0, 2.0],
+    ];
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![3, 7, 6, 2],
+        vec![1, 2, 6, 5],
+        vec![0, 4, 7, 3],
+    ];
+    let sat = build_planar_body(&vertices, &faces).expect("cube builds");
+
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let mut solid = Solid3D::new();
+    solid.set_sat_document(&sat);
+    assert!(solid.acis_data.has_data(), "solid must carry ACIS data pre-save");
+    let handle = doc.add_entity(EntityType::Solid3D(solid)).unwrap();
+
+    let rt = dwg_roundtrip(&doc);
+    let e = rt.get_entity(handle).expect("solid present after roundtrip");
+    let EntityType::Solid3D(s) = e else {
+        panic!("entity is not a 3DSOLID after roundtrip");
+    };
+    assert!(
+        s.acis_data.has_data(),
+        "planar-body solid lost its ACIS geometry on DWG roundtrip"
+    );
+    assert!(
+        s.common.has_ds_data,
+        "planar-body solid was not linked to its AcDs SAB blob (would be dropped)"
+    );
+}
+
+#[test]
+fn dwg_r2018_acds_sab_pairs_with_correct_solid() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    // Distinct sizes so a mis-pairing (shift) fails the byte-equality assert.
+    let blobs = [
+        fake_sab_blob(0xA1, 300),
+        fake_sab_blob(0xB2, 900),
+        fake_sab_blob(0xC3, 150),
+    ];
+    let handles: Vec<Handle> = blobs
+        .iter()
+        .map(|b| doc.add_entity(solid_with_sab(b.clone())).unwrap())
+        .collect();
+
+    let rt = dwg_roundtrip(&doc);
+
+    for (h, expected) in handles.iter().zip(blobs.iter()) {
+        let e = rt.get_entity(*h).expect("solid missing after roundtrip");
+        let EntityType::Solid3D(s) = e else {
+            panic!("handle {h:?} is not a 3DSOLID after roundtrip");
+        };
+        assert_eq!(
+            &s.acis_data.sab_data, expected,
+            "solid {h:?} came back with the wrong SAB blob (mis-paired)"
+        );
+        assert!(
+            s.common.has_ds_data,
+            "solid {h:?} lost its has_ds_data link — other CAD apps would \
+             drop it as an empty data stream"
+        );
+    }
+}
+
 // ── DXF: Entity count preservation ────────────────────────────────────
 
 #[test]
@@ -2493,4 +2602,67 @@ fn dwg_roundtrip_complex_linetype_shape() {
     let c0 = rt_lt.elements[0].complex.as_ref().expect("complex lost");
     assert!(c0.is_shape());
     assert_eq!(c0.shape_number(), Some(10));
+}
+
+// ── DWG: structured XDATA (records) round-trip (issue 249) ─────────────
+// A plugin attaches XDATA to an entity via `write_record`, which lands in
+// `ExtendedData::records`. The DWG writer used to serialize only verbatim
+// `raw_dwg_eed` and drop `records`, so the data vanished on the first save.
+// These assert the values survive a full write → read cycle in both the
+// R2007+ UTF-16 string branch and the pre-R2007 codepage branch.
+fn xdata_record_survives_dwg_roundtrip(version: DxfVersion) {
+    use acadrust::tables::AppId;
+    use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+
+    let mut doc = CadDocument::with_version(version);
+    let mut app = AppId::new("DEMO_SURVEY");
+    app.handle = doc.allocate_handle();
+    let _ = doc.app_ids.add(app);
+    let h = doc
+        .add_entity(EntityType::Point(Point::from_coords(5.0, 6.0, 0.0)))
+        .expect("add point");
+
+    let mut rec = ExtendedDataRecord::new("DEMO_SURVEY");
+    rec.add_value(XDataValue::String("PNT-1".to_string()));
+    rec.add_value(XDataValue::Integer16(7));
+    rec.add_value(XDataValue::Integer32(123456));
+    rec.add_value(XDataValue::Real(1.25));
+    rec.add_value(XDataValue::Point3D(Vector3::new(9.0, 8.0, 7.0)));
+    doc.get_entity_mut(h)
+        .expect("entity")
+        .common_mut()
+        .extended_data
+        .add_record(rec);
+
+    let rt = dwg_roundtrip(&doc);
+    let got = rt
+        .entities()
+        .find_map(|e| match e {
+            EntityType::Point(_) => e.common().extended_data.get_record("DEMO_SURVEY"),
+            _ => None,
+        })
+        .expect("record survived save+reopen");
+    assert_eq!(
+        got.values,
+        vec![
+            XDataValue::String("PNT-1".to_string()),
+            XDataValue::Integer16(7),
+            XDataValue::Integer32(123456),
+            XDataValue::Real(1.25),
+            XDataValue::Point3D(Vector3::new(9.0, 8.0, 7.0)),
+        ],
+        "XDATA values changed across DWG roundtrip ({version:?})"
+    );
+    // The application must stay registered so other CAD apps accept the EED.
+    assert!(rt.app_ids.get("DEMO_SURVEY").is_some(), "APPID lost");
+}
+
+#[test]
+fn xdata_record_survives_dwg_roundtrip_r2018() {
+    xdata_record_survives_dwg_roundtrip(DxfVersion::AC1032);
+}
+
+#[test]
+fn xdata_record_survives_dwg_roundtrip_r2004() {
+    xdata_record_survives_dwg_roundtrip(DxfVersion::AC1018);
 }

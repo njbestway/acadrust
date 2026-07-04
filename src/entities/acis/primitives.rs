@@ -572,6 +572,231 @@ pub fn build_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Sa
     sat
 }
 
+// ── General planar polyhedron ────────────────────────────────────────────────
+
+fn vsub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn vcross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+fn vnorm(a: [f64; 3]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+/// Root, outward normal and u-direction of a planar face's supporting plane,
+/// derived from its (outward-CCW) vertex ring. `None` if the ring is degenerate
+/// (all points collinear).
+fn face_plane(vertices: &[[f64; 3]], ring: &[usize]) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+    let v0 = vertices[ring[0]];
+    let a = vsub(vertices[ring[1]], v0);
+    let alen = vnorm(a);
+    if alen < 1e-12 {
+        return None;
+    }
+    let u = [a[0] / alen, a[1] / alen, a[2] / alen];
+    for &k in &ring[2..] {
+        let b = vsub(vertices[k], v0);
+        let n = vcross(a, b);
+        let nl = vnorm(n);
+        if nl > 1e-9 {
+            return Some((v0, [n[0] / nl, n[1] / nl, n[2] / nl], u));
+        }
+    }
+    None
+}
+
+fn set_coedge_partner(sat: &mut SatDocument, coedge_idx: i32, partner_idx: i32) {
+    if let Some(rec) = sat.record_mut(coedge_idx as usize) {
+        // coedge tokens: [0]=sentinel [1]=next [2]=prev [3]=partner [4]=edge …
+        rec.tokens[3] = SatToken::Pointer(SatPointer::new(partner_idx));
+    }
+}
+
+/// Build an exact ACIS B-rep for a closed polyhedron whose faces are all planar
+/// polygons — the general form of [`build_box`], used to export a faceted or
+/// natively-planar solid.
+///
+/// * `vertices` — the distinct corner positions.
+/// * `faces` — each face is an ordered ring of indices into `vertices`, wound
+///   counter-clockwise **as seen from outside** the solid, so the outward
+///   normal is `(v1-v0) × (v2-v0)`. Only single (outer) loops are supported;
+///   faces with holes are not.
+///
+/// The mesh must be a closed 2-manifold: every polygon edge is shared by exactly
+/// two faces. Returns `None` (leaving the caller's geometry untouched) on any
+/// degeneracy — a face with fewer than 3 vertices, an out-of-range or repeated
+/// index, a collinear face, a zero-length edge, a non-manifold edge, or a body
+/// that fails [`SatDocument::validate`] — so a malformed solid is never emitted.
+pub fn build_planar_body(vertices: &[[f64; 3]], faces: &[Vec<usize>]) -> Option<SatDocument> {
+    use std::collections::HashMap;
+
+    if faces.is_empty() || vertices.len() < 4 {
+        return None;
+    }
+    for f in faces {
+        if f.len() < 3 {
+            return None;
+        }
+        for &vi in f {
+            if vi >= vertices.len() {
+                return None;
+            }
+        }
+    }
+
+    let mut sat = SatDocument::new_body();
+    let body_idx = SatPointer::new(0);
+
+    // Points + vertices (one per distinct corner).
+    let mut vert_idx = Vec::with_capacity(vertices.len());
+    for &[x, y, z] in vertices {
+        let p = sat.add_point(x, y, z);
+        vert_idx.push(sat.add_vertex(SatPointer::NULL, ptr(p)));
+    }
+
+    // Unique undirected edges. Canonical direction = first directed occurrence;
+    // the two coedges that later reference it get opposite senses.
+    struct EdgeInfo {
+        edge_idx: i32,
+        start: usize,
+        end: usize,
+        coedges: Vec<i32>,
+    }
+    let mut edges: HashMap<(usize, usize), EdgeInfo> = HashMap::new();
+    let mut edge_order: Vec<(usize, usize)> = Vec::new();
+    for f in faces {
+        let n = f.len();
+        for i in 0..n {
+            let a = f[i];
+            let b = f[(i + 1) % n];
+            if a == b {
+                return None;
+            }
+            let key = if a < b { (a, b) } else { (b, a) };
+            if !edges.contains_key(&key) {
+                let sp = vertices[a];
+                let dir = vsub(vertices[b], sp);
+                let len = vnorm(dir);
+                if len < 1e-12 {
+                    return None;
+                }
+                let ud = [dir[0] / len, dir[1] / len, dir[2] / len];
+                let crv = sat.add_straight_curve(sp, ud);
+                let e = sat.add_edge(
+                    ptr(vert_idx[a]),
+                    0.0,
+                    ptr(vert_idx[b]),
+                    len,
+                    SatPointer::NULL,
+                    ptr(crv),
+                    Sense::Forward,
+                );
+                edges.insert(
+                    key,
+                    EdgeInfo { edge_idx: e, start: a, end: b, coedges: Vec::new() },
+                );
+                edge_order.push(key);
+            }
+        }
+    }
+
+    // One plane surface per face.
+    let mut surf_idx = Vec::with_capacity(faces.len());
+    for f in faces {
+        let (root, normal, u_dir) = face_plane(vertices, f)?;
+        surf_idx.push(sat.add_plane_surface(root, normal, u_dir));
+    }
+
+    // Contiguous index layout: coedges, then loops, faces, shell, lump.
+    let co_base = sat.records.len() as i32;
+    let num_coedges: usize = faces.iter().map(|f| f.len()).sum();
+    let loop_base = co_base + num_coedges as i32;
+    let face_base = loop_base + faces.len() as i32;
+    let shell_idx = face_base + faces.len() as i32;
+    let lump_idx = shell_idx + 1;
+
+    // Coedges: a next/prev ring per face loop; partner filled in afterwards.
+    let mut co_cursor = co_base;
+    let mut face_first_co = Vec::with_capacity(faces.len());
+    for (fi, f) in faces.iter().enumerate() {
+        let n = f.len() as i32;
+        let start = co_cursor;
+        face_first_co.push(start);
+        for i in 0..f.len() {
+            let a = f[i];
+            let b = f[(i + 1) % f.len()];
+            let key = if a < b { (a, b) } else { (b, a) };
+            let info = edges.get_mut(&key).unwrap();
+            let sense = if info.start == a && info.end == b {
+                Sense::Forward
+            } else {
+                Sense::Reversed
+            };
+            let next = start + ((i as i32 + 1) % n);
+            let prev = start + ((i as i32 + n - 1) % n);
+            let owner_loop = loop_base + fi as i32;
+            let idx = sat.add_coedge(
+                ptr(next),
+                ptr(prev),
+                SatPointer::NULL,
+                ptr(info.edge_idx),
+                sense,
+                ptr(owner_loop),
+            );
+            info.coedges.push(idx);
+            co_cursor += 1;
+        }
+    }
+
+    // Partner-link the two coedges of every edge (must be exactly two).
+    for key in &edge_order {
+        let info = &edges[key];
+        if info.coedges.len() != 2 {
+            return None; // open or non-manifold edge
+        }
+        let (c0, c1) = (info.coedges[0], info.coedges[1]);
+        set_coedge_partner(&mut sat, c0, c1);
+        set_coedge_partner(&mut sat, c1, c0);
+    }
+
+    // Loops + faces (each face's normal already matches its plane → Forward).
+    for fi in 0..faces.len() {
+        sat.add_loop(SatPointer::NULL, ptr(face_first_co[fi]), ptr(face_base + fi as i32));
+    }
+    for fi in 0..faces.len() {
+        let next_face = if fi + 1 < faces.len() {
+            ptr(face_base + fi as i32 + 1)
+        } else {
+            SatPointer::NULL
+        };
+        sat.add_face(
+            next_face,
+            ptr(loop_base + fi as i32),
+            ptr(shell_idx),
+            ptr(surf_idx[fi]),
+            Sense::Forward,
+            Sidedness::Single,
+        );
+    }
+
+    sat.add_shell(ptr(face_base), ptr(lump_idx));
+    sat.add_lump(ptr(shell_idx), body_idx);
+    if let Some(body_rec) = sat.record_mut(0) {
+        body_rec.tokens[1] = SatToken::Pointer(ptr(lump_idx));
+    }
+
+    if sat.validate().is_empty() {
+        Some(sat)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,5 +869,46 @@ mod tests {
         assert_eq!(sat.edges().len(), 0);
         assert_eq!(sat.vertices().len(), 0);
         assert!(sat.validate().is_empty(), "torus validation errors: {:?}", sat.validate());
+    }
+
+    #[test]
+    fn planar_body_cube() {
+        // Unit cube; every face wound CCW as seen from outside.
+        let vertices = [
+            [0.0, 0.0, 0.0], // 0
+            [1.0, 0.0, 0.0], // 1
+            [1.0, 1.0, 0.0], // 2
+            [0.0, 1.0, 0.0], // 3
+            [0.0, 0.0, 1.0], // 4
+            [1.0, 0.0, 1.0], // 5
+            [1.0, 1.0, 1.0], // 6
+            [0.0, 1.0, 1.0], // 7
+        ];
+        let faces = vec![
+            vec![0, 3, 2, 1], // bottom -Z
+            vec![4, 5, 6, 7], // top    +Z
+            vec![0, 1, 5, 4], // front  -Y
+            vec![3, 7, 6, 2], // back   +Y
+            vec![1, 2, 6, 5], // right  +X
+            vec![0, 4, 7, 3], // left   -X
+        ];
+        let sat = build_planar_body(&vertices, &faces).expect("cube should build");
+        assert_eq!(sat.faces().len(), 6);
+        assert_eq!(sat.edges().len(), 12);
+        assert_eq!(sat.vertices().len(), 8);
+        assert!(sat.validate().is_empty(), "cube validation errors: {:?}", sat.validate());
+    }
+
+    #[test]
+    fn planar_body_rejects_open_mesh() {
+        // A single square is not a closed manifold — its edges are used once.
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let faces = vec![vec![0, 1, 2, 3]];
+        assert!(build_planar_body(&vertices, &faces).is_none());
     }
 }

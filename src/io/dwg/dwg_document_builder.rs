@@ -173,6 +173,10 @@ impl DwgDocumentBuilder {
             Ucs(u64, tables::UcsData),
             VPort(u64, tables::VPortData),
             AppId(u64, tables::AppIdData),
+            /// BLOCK_CONTROL hard-owner refs: (model_space_handle, paper_space_handle).
+            /// These are the authoritative active model/paper space designation —
+            /// the file header's block handles are unreliable on some versions.
+            BlockControl(u64, u64),
         }
         let mut parsed_entries: Vec<ParsedEntry> = Vec::new();
 
@@ -244,6 +248,16 @@ impl DwgDocumentBuilder {
                             );
                             Some(ParsedEntry::Block(obj_handle, data))
                         },
+                        OBJ_BLOCK_CONTROL => {
+                            // Capture the authoritative *Model_Space / *Paper_Space
+                            // designation (hard-owner refs) so block-name dedup can
+                            // keep the canonical names on the correct records.
+                            let data = tables::read_block_control(&mut reader);
+                            Some(ParsedEntry::BlockControl(
+                                data.model_space_handle,
+                                data.paper_space_handle,
+                            ))
+                        },
                         OBJ_STYLE => {
                             let data = tables::read_text_style(
                                 &mut reader,
@@ -310,8 +324,21 @@ impl DwgDocumentBuilder {
                             ParsedEntry::Ucs(_, _) => {},
                             ParsedEntry::VPort(_, _) => {},
                             ParsedEntry::AppId(_, _) => {},
+                            ParsedEntry::BlockControl(m, p) => {
+                                // Seed the authoritative active model/paper space
+                                // handles (used by the block-name dedup below).
+                                if *m != 0 {
+                                    document.header.model_space_block_handle = Handle::from(*m);
+                                }
+                                if *p != 0 {
+                                    document.header.paper_space_block_handle = Handle::from(*p);
+                                }
+                            },
                         }
-                        parsed_entries.push(entry);
+                        // The block control is not a table record — don't store it.
+                        if !matches!(entry, ParsedEntry::BlockControl(..)) {
+                            parsed_entries.push(entry);
+                        }
                     }
                     Ok(None) => {}
                     Err(_) => {
@@ -719,6 +746,9 @@ impl DwgDocumentBuilder {
                     let _ = document.app_ids.remove(&data.name);
                     let _ = document.app_ids.add(app);
                 },
+                // Block control is consumed during Pass 1 (header seeding); it is
+                // never stored as a parsed table entry.
+                ParsedEntry::BlockControl(..) => {},
             }
         }
 
@@ -1029,6 +1059,117 @@ impl DwgDocumentBuilder {
             }
         }
 
+        // ── Decode entity EED blobs into structured records ──────────────────
+        // The object reader keeps every EED block as verbatim `raw_dwg_eed`
+        // bytes (preserved for a byte-exact re-save). Additionally decode each
+        // block whose application is known into `records`, so callers — plugins
+        // reading XDATA via `read_record`, the DXF writer — see the same values
+        // a DXF read would surface. The raw blob is kept, so a plain round-trip
+        // still emits it verbatim; the writer prefers raw over records per app.
+        {
+            let wide = self.obj_reader.version().r2007_plus();
+            let app_name_by_handle: std::collections::HashMap<u64, String> = document
+                .app_ids
+                .iter()
+                .map(|a| (a.handle.value(), a.name.clone()))
+                .collect();
+            let layer_name_by_handle: std::collections::HashMap<u64, String> = document
+                .layers
+                .iter()
+                .map(|l| (l.handle.value(), l.name.clone()))
+                .collect();
+            if !app_name_by_handle.is_empty() {
+                for entity in document.entities.iter_mut() {
+                    let xd = &mut entity.common_mut().extended_data;
+                    if xd.raw_dwg_eed.is_empty() {
+                        continue;
+                    }
+                    let blocks = xd.raw_dwg_eed.clone();
+                    for (app_handle, bytes) in &blocks {
+                        let Some(name) = app_name_by_handle.get(app_handle) else {
+                            continue;
+                        };
+                        if xd.get_record(name).is_some() {
+                            continue;
+                        }
+                        if let Some(values) = crate::io::dwg::eed_codec::decode_values(
+                            bytes,
+                            wide,
+                            |h| layer_name_by_handle.get(&h).cloned(),
+                        ) {
+                            let mut rec = crate::xdata::ExtendedDataRecord::new(name.clone());
+                            rec.values = values;
+                            xd.add_record(rec);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── AcDs SAB ordering ──────────────────────────────────────────────
+        // R2013+ modeler geometry (3DSOLID/REGION/BODY/SURFACE) is stored as
+        // SAB blobs in the AcDs section, one per entity whose `has_ds_data` bit
+        // is set. The AcDs data-store indexes those blobs through a search
+        // segment sorted ascending by owning-entity handle, and the blobs are
+        // laid out in that same record order — so the i-th blob (in file order)
+        // belongs to the i-th flagged modeler entity taken in ascending handle
+        // order. `attach_acds_sab_blobs` pairs blob[i] with this list's i-th
+        // handle. (Ordering by object-stream file offset instead mispaired
+        // blobs whenever the object-stream order diverged from handle order.)
+        {
+            let mut ordered: Vec<Handle> = document
+                .entities()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        EntityType::Solid3D(_)
+                            | EntityType::Region(_)
+                            | EntityType::Body(_)
+                            | EntityType::Surface(_)
+                    ) && e.common().has_ds_data
+                })
+                .map(|e| e.common().handle)
+                .collect();
+            ordered.sort_by_key(|h| h.value());
+            document.acis_sab_handles = ordered;
+        }
+
+        // ── Handle-collision repair ────────────────────────────────────────
+        // The document is seeded with standard table entries (Standard dim
+        // style, default block records, …) at low handles before the file's
+        // objects are read, so a synthesized entry can end up sharing a handle
+        // with a file object that legitimately owns it — e.g. the Standard dim
+        // style vs a paper-space block record. A duplicate handle makes that
+        // reference ambiguous and a strict reader rejects the owning object
+        // ("improperly read"). Re-home any dim-style entry whose handle also
+        // belongs to a block record, following the header references so the
+        // Standard style stays reachable.
+        {
+            use std::collections::HashSet;
+            let block_handles: HashSet<u64> =
+                document.block_records.iter().map(|b| b.handle.value()).collect();
+            let colliding: Vec<u64> = document
+                .dim_styles
+                .iter()
+                .map(|d| d.handle.value())
+                .filter(|h| block_handles.contains(h))
+                .collect();
+            for old in colliding {
+                let new_h = document.allocate_handle();
+                for d in document.dim_styles.iter_mut() {
+                    if d.handle.value() == old {
+                        d.handle = new_h;
+                    }
+                }
+                if document.header.current_dimstyle_handle.value() == old {
+                    document.header.current_dimstyle_handle = new_h;
+                }
+                if document.header.dim_text_style_handle.value() == old {
+                    document.header.dim_text_style_handle = new_h;
+                }
+            }
+        }
+
         self.notifications
     }
 
@@ -1080,6 +1221,7 @@ impl DwgDocumentBuilder {
                     e.location = data.location;
                     e.thickness = data.thickness;
                     e.normal = data.normal;
+                    e.x_axis_angle = data.x_axis_angle;
                     let _ = document.add_entity(EntityType::Point(e));
                 },
                 OBJ_CIRCLE => {
@@ -1150,6 +1292,12 @@ impl DwgDocumentBuilder {
                         data.third_corner,
                         data.fourth_corner,
                     );
+                    // The reader already decoded the invisible-edge flags; the
+                    // DXF path applies them but the DWG builder used to drop
+                    // them, so file-hidden 3DFACE edges rendered visible.
+                    e.invisible_edges = crate::entities::face3d::InvisibleEdgeFlags::from_bits(
+                        data.invisible_edges as u8,
+                    );
                     e.common = entity_common;
                     let _ = document.add_entity(EntityType::Face3D(e));
                 },
@@ -1198,6 +1346,30 @@ impl DwgDocumentBuilder {
                     e.row_spacing = data.row_spacing;
                     let _ = document.add_entity(EntityType::Insert(e));
                 },
+                OBJ_TABLE => {
+                    // ACAD_TABLE is INSERT-derived: the insert base positions the
+                    // table and links it to the block that renders its cells; on
+                    // R2010+ the inline table content (columns/rows/cells) follows.
+                    let data = entities::read_table(
+                        &mut reader,
+                        self.obj_reader.version(),
+                        self.obj_reader.dxf_version(),
+                    );
+                    let mut e = crate::entities::Table::default();
+                    e.common = entity_common;
+                    e.insertion_point = data.insert.insert_point;
+                    e.normal = data.insert.normal;
+                    e.horizontal_direction = data.horizontal_direction;
+                    if data.insert.block_handle != 0 {
+                        e.block_record_handle = Some(Handle::from(data.insert.block_handle));
+                    }
+                    if data.style_handle != 0 {
+                        e.table_style_handle = Some(Handle::from(data.style_handle));
+                    }
+                    e.columns = data.columns;
+                    e.rows = data.rows;
+                    let _ = document.add_entity(EntityType::Table(e));
+                },
                 OBJ_LWPOLYLINE => {
                     let data = entities::read_lwpolyline(&mut reader, self.obj_reader.version());
                     let mut e = LwPolyline::new();
@@ -1232,7 +1404,48 @@ impl DwgDocumentBuilder {
                     e.control_points = data.control_points;
                     e.weights = data.weights;
                     e.fit_points = data.fit_points;
+                    e.knot_tolerance = data.knot_tolerance;
+                    e.control_tolerance = data.control_tolerance;
+                    e.fit_tolerance = data.fit_tolerance;
+                    e.begin_tangent = data.begin_tangent;
+                    e.end_tangent = data.end_tangent;
+                    e.knot_parameterization = data.knot_param;
                     let _ = document.add_entity(EntityType::Spline(e));
+                },
+                OBJ_HELIX => {
+                    // HELIX = full spline record + helix parameters.
+                    let data = entities::read_spline(
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
+                    );
+                    let mut e = crate::entities::Helix::new();
+                    e.common = entity_common;
+                    e.spline.degree = data.degree;
+                    e.spline.flags.rational = data.rational;
+                    e.spline.flags.closed = data.closed;
+                    e.spline.flags.periodic = data.periodic;
+                    e.spline.knots = data.knots;
+                    e.spline.control_points = data.control_points;
+                    e.spline.weights = data.weights;
+                    e.spline.fit_points = data.fit_points;
+                    e.spline.knot_tolerance = data.knot_tolerance;
+                    e.spline.control_tolerance = data.control_tolerance;
+                    e.spline.fit_tolerance = data.fit_tolerance;
+                    e.spline.begin_tangent = data.begin_tangent;
+                    e.spline.end_tangent = data.end_tangent;
+                    e.spline.knot_parameterization = data.knot_param;
+                    // AcDbHelix parameters follow the spline record.
+                    e.major_version = reader.read_bit_long();
+                    e.maintenance_version = reader.read_bit_long();
+                    e.axis_base_point = reader.read_3bit_double();
+                    e.start_point = reader.read_3bit_double();
+                    e.axis_vector = reader.read_3bit_double();
+                    e.radius = reader.read_bit_double();
+                    e.turns = reader.read_bit_double();
+                    e.turn_height = reader.read_bit_double();
+                    e.handedness = reader.read_bit();
+                    e.constraint =
+                        crate::entities::HelixConstraint::from_code(reader.read_byte());
+                    let _ = document.add_entity(EntityType::Helix(e));
                 },
                 OBJ_TEXT => {
                     let data = entities::read_text(&mut reader, self.obj_reader.version());
@@ -1266,6 +1479,8 @@ impl DwgDocumentBuilder {
                     e.width_factor = data.width_factor;
                     e.normal = data.normal;
                     e.style = maps.style_name(data.style_handle);
+                    e.thickness = data.thickness;
+                    e.generation_flags = data.generation;
                     let _ = document.add_entity(EntityType::Text(e));
                 },
                 OBJ_MTEXT => {
@@ -1301,6 +1516,8 @@ impl DwgDocumentBuilder {
                     // Compute rotation from x_direction vector
                     e.rotation = data.x_direction.y.atan2(data.x_direction.x);
                     e.line_spacing_factor = data.linespacing_factor;
+                    e.line_spacing_style =
+                        crate::entities::LineSpacingStyle::from(data.linespacing_style);
                     e.background_fill_flags = data.background_flags;
                     e.background_scale = data.background_scale;
                     e.background_color = data.background_color;
@@ -1520,6 +1737,13 @@ impl DwgDocumentBuilder {
                             e.frozen_layers.push(Handle::new(h));
                         }
                     }
+                    // Clip-boundary handle (H 340): first entity-specific handle
+                    // after the frozen layers. Non-NULL => the viewport is
+                    // clipped by a boundary entity.
+                    let clip = reader.read_handle();
+                    if clip != 0 {
+                        e.clip_boundary_handle = Handle::new(clip);
+                    }
                     let _ = document.add_entity(EntityType::Viewport(e));
                 },
                 OBJ_POLYLINE_2D => {
@@ -1541,6 +1765,12 @@ impl DwgDocumentBuilder {
                     let mut e = Polyline3D::new();
                     e.common = entity_common;
                     e.flags.closed = (data.closed_flag & 1) != 0;
+                    // smooth_type was decoded by the reader but the builder used
+                    // to drop it (spline/curve-fit 3D polylines lost their fit).
+                    e.smooth_type = crate::entities::polyline3d::SmoothSurfaceType::from_value(
+                        data.smooth_type as i16,
+                    );
+                    e.flags.spline_fit = data.smooth_type != 0;
                     let h = e.common.handle.value();
                     pending.polylines.push((h, EntityType::Polyline3D(e)));
                 },
@@ -1764,7 +1994,7 @@ impl DwgDocumentBuilder {
                     );
                     let mut e = AttributeDefinition::new(
                         data.tag.clone(),
-                        String::new(), // prompt (consumed by reader, not returned separately)
+                        data.prompt.clone(),
                         data.text_data.value.clone(),
                     );
                     e.common = entity_common;
@@ -1886,6 +2116,38 @@ impl DwgDocumentBuilder {
                         .push(PendingVertex::PfaceFace(data, entity_common));
                 },
 
+                // ── Underlay reference (PDF / DWF / DGN) ───────────
+                code @ (OBJ_PDFUNDERLAY | OBJ_DWFUNDERLAY | OBJ_DGNUNDERLAY) => {
+                    use crate::entities::underlay::{Underlay, UnderlayDisplayFlags, UnderlayType};
+                    let utype = if code == OBJ_DWFUNDERLAY {
+                        UnderlayType::Dwf
+                    } else if code == OBJ_DGNUNDERLAY {
+                        UnderlayType::Dgn
+                    } else {
+                        UnderlayType::Pdf
+                    };
+                    let data = entities::read_underlay(&mut reader);
+                    let mut e = Underlay::new(utype);
+                    e.common = entity_common;
+                    e.normal = data.normal;
+                    e.insertion_point = data.insertion_point;
+                    e.rotation = data.rotation;
+                    e.x_scale = data.x_scale;
+                    e.y_scale = data.y_scale;
+                    e.z_scale = data.z_scale;
+                    let eflags = UnderlayDisplayFlags::from_bits_truncate(data.flags);
+                    e.flags = eflags;
+                    // The "clip inside" bit doubles as the clip-inversion flag.
+                    e.clip_inverted = eflags.contains(UnderlayDisplayFlags::CLIP_INSIDE);
+                    e.contrast = data.contrast;
+                    e.fade = data.fade;
+                    if data.definition_handle != 0 {
+                        e.definition_handle = Handle::from(data.definition_handle);
+                    }
+                    e.clip_boundary_vertices = data.clip_boundary_vertices;
+                    let _ = document.add_entity(EntityType::Underlay(e));
+                },
+
                 // ── Raster image / Wipeout ─────────────────────────
                 OBJ_IMAGE => {
                     let data = entities::read_raster_image(
@@ -1991,7 +2253,7 @@ impl DwgDocumentBuilder {
                 // ── ACIS entities (3DSOLID, REGION, BODY) ───────────
                 OBJ_3DSOLID => {
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Solid3D::new();
                     e.common = entity_common;
@@ -2003,6 +2265,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     // A 3D solid has no insertion point of its own; the file's
                     // point field is usually zero. Prefer the ACIS placement
                     // origin so the reference reflects where the body sits.
@@ -2024,7 +2287,7 @@ impl DwgDocumentBuilder {
                 },
                 OBJ_REGION => {
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Region::new();
                     e.common = entity_common;
@@ -2036,15 +2299,23 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     e.point_of_reference =
                         e.acis_data.placement_origin().unwrap_or(data.point);
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
+                    // REGION R2007+: history_id handle (same slot as 3DSOLID).
+                    if self.obj_reader.version().r2007_plus() {
+                        let h = reader.read_handle();
+                        if h != 0 {
+                            e.history_handle = Some(Handle::new(h));
+                        }
+                    }
                     let _ = document.add_entity(EntityType::Region(e));
                 },
                 OBJ_BODY => {
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Body::new();
                     e.common = entity_common;
@@ -2056,10 +2327,18 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     e.point_of_reference =
                         e.acis_data.placement_origin().unwrap_or(data.point);
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
+                    // BODY R2007+: history_id handle (same slot as 3DSOLID).
+                    if self.obj_reader.version().r2007_plus() {
+                        let h = reader.read_handle();
+                        if h != 0 {
+                            e.history_handle = Some(Handle::new(h));
+                        }
+                    }
                     let _ = document.add_entity(EntityType::Body(e));
                 },
 
@@ -2077,7 +2356,7 @@ impl DwgDocumentBuilder {
                         _ => crate::entities::SurfaceKind::Generic,
                     };
                     let data = entities::read_acis_entity(
-                        &mut reader, self.obj_reader.version(),
+                        &mut reader, self.obj_reader.version(), self.obj_reader.dxf_version(),
                     );
                     let mut e = Surface::new(kind);
                     e.common = entity_common;
@@ -2089,6 +2368,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
+                    e.acis_data.revision = data.revision;
                     e.wires = data.wires;
                     e.silhouettes = data.silhouettes;
                     // Preserve the raw object verbatim so DWG write-back keeps
@@ -2431,6 +2711,26 @@ impl DwgDocumentBuilder {
                         crate::objects::ObjectType::ImageDefinition(obj),
                     );
                 },
+                code @ (OBJ_PDFDEFINITION | OBJ_DWFDEFINITION | OBJ_DGNDEFINITION) => {
+                    use crate::entities::underlay::UnderlayType;
+                    let utype = if code == OBJ_DWFDEFINITION {
+                        UnderlayType::Dwf
+                    } else if code == OBJ_DGNDEFINITION {
+                        UnderlayType::Dgn
+                    } else {
+                        UnderlayType::Pdf
+                    };
+                    let data = objects::read_underlay_definition(&mut reader);
+                    let mut obj = crate::objects::UnderlayDefinition::new(utype);
+                    obj.handle = Handle::from(handle);
+                    obj.owner_handle = owner_handle;
+                    obj.file_path = data.file_path;
+                    obj.page_name = data.page_name;
+                    document.objects.insert(
+                        Handle::from(handle),
+                        crate::objects::ObjectType::UnderlayDefinition(obj),
+                    );
+                },
                 OBJ_IMAGEDEFREACTOR => {
                     let _data = objects::read_image_definition_reactor(&mut reader);
                     document.objects.insert(
@@ -2771,5 +3071,8 @@ fn map_entity_common(
     common.shadow_flags = data.shadow_flags;
     common.plotstyle_flags = data.plotstyle_flags;
     common.plotstyle_handle = data.plotstyle_handle.map(Handle::from);
+    // R2013+: geometry-in-AcDs flag, needed to pair AcDs SAB blobs with the
+    // right modeler entity in object-stream order.
+    common.has_ds_data = data.has_ds_data;
     common
 }

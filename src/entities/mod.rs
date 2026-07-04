@@ -24,6 +24,7 @@ pub mod text;
 pub mod mtext;
 pub mod mtext_format;
 pub mod spline;
+pub mod helix;
 pub mod dimension;
 pub mod hatch;
 pub mod solid;
@@ -69,6 +70,7 @@ pub use lwpolyline::{LwPolyline, LwVertex};
 pub use text::{Text, TextHorizontalAlignment, TextVerticalAlignment};
 pub use mtext::{MText, MTextColumnData, AttachmentPoint, DrawingDirection};
 pub use spline::{Spline, SplineFlags};
+pub use helix::{Helix, HelixConstraint};
 pub use dimension::*;
 pub use hatch::*;
 pub use solid::Solid;
@@ -295,6 +297,13 @@ pub struct EntityCommon {
     /// Entity mode (0=owned, 1=paper, 2=model) — raw DWG value for round-trip
     #[cfg_attr(feature = "serde", serde(skip))]
     pub entity_mode: Option<u8>,
+    /// R2013+ `has_ds_data` bit: the entity's modeler geometry (3DSOLID/REGION/
+    /// BODY/SURFACE) is stored as a SAB blob in the `AcDb:AcDsPrototype_1b`
+    /// data-store section rather than inline. Set by the DWG reader; the writer
+    /// re-derives it from the presence of ACIS data. Not part of the logical
+    /// model, so skipped for serde.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub has_ds_data: bool,
 }
 
 impl EntityCommon {
@@ -320,6 +329,7 @@ impl EntityCommon {
             plotstyle_flags: 0,
             plotstyle_handle: None,
             entity_mode: None,
+            has_ds_data: false,
         }
     }
 
@@ -371,6 +381,8 @@ pub enum EntityType {
     MText(MText),
     /// Spline entity
     Spline(Spline),
+    /// Helix entity (spline-derived 3D spiral)
+    Helix(Helix),
     /// Dimension entity
     Dimension(Dimension),
     /// Hatch entity
@@ -451,6 +463,7 @@ impl EntityType {
             EntityType::Text(e) => e,
             EntityType::MText(e) => e,
             EntityType::Spline(e) => e,
+            EntityType::Helix(e) => e,
             EntityType::Dimension(e) => e,
             EntityType::Hatch(e) => e,
             EntityType::Solid(e) => e,
@@ -500,6 +513,7 @@ impl EntityType {
             EntityType::MText(e) => e,
             EntityType::Text(e) => e,
             EntityType::Spline(e) => e,
+            EntityType::Helix(e) => e,
             EntityType::Dimension(e) => e,
             EntityType::Hatch(e) => e,
             EntityType::Solid(e) => e,
@@ -549,6 +563,7 @@ impl EntityType {
             EntityType::Text(e) => &e.common,
             EntityType::MText(e) => &e.common,
             EntityType::Spline(e) => &e.common,
+            EntityType::Helix(e) => &e.common,
             EntityType::Dimension(e) => &e.base().common,
             EntityType::Hatch(e) => &e.common,
             EntityType::Solid(e) => &e.common,
@@ -598,6 +613,7 @@ impl EntityType {
             EntityType::Text(e) => &mut e.common,
             EntityType::MText(e) => &mut e.common,
             EntityType::Spline(e) => &mut e.common,
+            EntityType::Helix(e) => &mut e.common,
             EntityType::Dimension(e) => &mut e.base_mut().common,
             EntityType::Hatch(e) => &mut e.common,
             EntityType::Solid(e) => &mut e.common,

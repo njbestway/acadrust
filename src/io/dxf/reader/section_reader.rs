@@ -684,6 +684,11 @@ impl<'a> SectionReader<'a> {
                             block_entities.push(EntityType::Spline(entity));
                         }
                     }
+                    "HELIX" => {
+                        if let Some(entity) = self.read_helix()? {
+                            block_entities.push(EntityType::Helix(entity));
+                        }
+                    }
                     "DIMENSION" => {
                         if let Some(entity) = self.read_dimension()? {
                             block_entities.push(EntityType::Dimension(entity));
@@ -918,6 +923,11 @@ impl<'a> SectionReader<'a> {
                             let _ = document.add_entity(EntityType::Spline(entity));
                         }
                     }
+                    "HELIX" => {
+                        if let Some(entity) = self.read_helix()? {
+                            let _ = document.add_entity(EntityType::Helix(entity));
+                        }
+                    }
                     "DIMENSION" => {
                         if let Some(entity) = self.read_dimension()? {
                             let _ = document.add_entity(EntityType::Dimension(entity));
@@ -1102,6 +1112,19 @@ impl<'a> SectionReader<'a> {
                     "IMAGEDEF" => {
                         if let Some(obj) = self.read_image_definition()? {
                             document.objects.insert(obj.handle, ObjectType::ImageDefinition(obj));
+                        }
+                    }
+                    "PDFDEFINITION" | "DWFDEFINITION" | "DGNDEFINITION" => {
+                        use crate::entities::underlay::UnderlayType;
+                        let utype = match pair.value_string.as_str() {
+                            "DWFDEFINITION" => UnderlayType::Dwf,
+                            "DGNDEFINITION" => UnderlayType::Dgn,
+                            _ => UnderlayType::Pdf,
+                        };
+                        if let Some(obj) = self.read_underlay_definition(utype)? {
+                            document
+                                .objects
+                                .insert(obj.handle, ObjectType::UnderlayDefinition(obj));
                         }
                     }
                     "MLEADERSTYLE" => {
@@ -2592,6 +2615,11 @@ impl<'a> SectionReader<'a> {
                         point.thickness = thickness;
                     }
                 }
+                50 => {
+                    if let Some(a) = pair.as_double() {
+                        point.x_axis_angle = a;
+                    }
+                }
                 210 | 220 | 230 => { normal.add_coordinate(&pair); }
                 _ => { self.try_read_common_entity_code(&pair, &mut point.common)?; }
             }
@@ -2830,20 +2858,43 @@ impl<'a> SectionReader<'a> {
 
     /// Read a POLYLINE or POLYFACE MESH entity, returning the appropriate EntityType.
     fn read_polyline_entity(&mut self) -> Result<Option<EntityType>> {
-        use crate::entities::polyline::Vertex3D;
+        use crate::entities::polyline::{Vertex2D, VertexFlags, PolylineFlags, SmoothSurfaceType};
+        use crate::entities::polyline3d::{
+            Polyline3D, Vertex3DPolyline, Polyline3DFlags,
+            SmoothSurfaceType as SmoothSurface3D,
+        };
+        use crate::entities::polygon_mesh::{
+            PolygonMesh, PolygonMeshVertex, PolygonMeshFlags, SurfaceSmoothType,
+        };
         use crate::entities::polyface_mesh::{
             PolyfaceMesh, PolyfaceVertex, PolyfaceFace,
             PolyfaceMeshFlags, PolyfaceVertexFlags,
         };
 
+        // One captured geometry vertex — mapped to the target vertex type once
+        // the POLYLINE flags (code 70) tell us which kind of polyline this is.
+        struct RawVertex {
+            loc: crate::types::Vector3,
+            vflags: i16,
+            start_width: f64,
+            end_width: f64,
+            bulge: f64,
+            tangent: f64,
+        }
+
         let mut common = EntityCommon::new();
         let mut flags: i16 = 0;
         let mut elevation = 0.0f64;
-        let mut _vertex_count: i16 = 0;
-        let mut _face_count: i16 = 0;
-        // Polyline plain fields
-        let mut polyline_vertices: Vec<Vertex3D> = Vec::new();
-        // Polyface fields
+        let mut thickness = 0.0f64;
+        let mut def_start_width = 0.0f64;
+        let mut def_end_width = 0.0f64;
+        let mut count_m: i16 = 0; // 71 (mesh M / pface vert count)
+        let mut count_n: i16 = 0; // 72 (mesh N / pface face count)
+        let mut density_m: i16 = 0; // 73
+        let mut density_n: i16 = 0; // 74
+        let mut smooth: i16 = 0; // 75 (smooth surface type)
+        let mut normal = PointReader::new();
+        let mut geom_vertices: Vec<RawVertex> = Vec::new();
         let mut pface_vertices: Vec<PolyfaceVertex> = Vec::new();
         let mut pface_faces: Vec<PolyfaceFace> = Vec::new();
 
@@ -2851,23 +2902,32 @@ impl<'a> SectionReader<'a> {
             if pair.code == 0 {
                 if pair.value_string == "VERTEX" {
                     // --- Read one VERTEX subentity ---
-                    let mut vx = 0.0f64;
-                    let mut vy = 0.0f64;
-                    let mut vz = 0.0f64;
+                    let mut loc = crate::types::Vector3::ZERO;
                     let mut vflags: i16 = 0;
+                    let mut sw = 0.0f64;
+                    let mut ew = 0.0f64;
+                    let mut bulge = 0.0f64;
+                    let mut tangent = 0.0f64;
                     let mut vi1: i16 = 0;
                     let mut vi2: i16 = 0;
                     let mut vi3: i16 = 0;
                     let mut vi4: i16 = 0;
+                    let mut vcolor: Option<Color> = None;
                     while let Some(vpair) = self.reader.read_pair()? {
                         if vpair.code == 0 {
                             self.reader.push_back(vpair);
                             break;
                         }
                         match vpair.code {
-                            10 => { if let Some(v) = vpair.as_double() { vx = v; } }
-                            20 => { if let Some(v) = vpair.as_double() { vy = v; } }
-                            30 => { if let Some(v) = vpair.as_double() { vz = v; } }
+                            10 => { if let Some(v) = vpair.as_double() { loc.x = v; } }
+                            20 => { if let Some(v) = vpair.as_double() { loc.y = v; } }
+                            30 => { if let Some(v) = vpair.as_double() { loc.z = v; } }
+                            40 => { if let Some(v) = vpair.as_double() { sw = v; } }
+                            41 => { if let Some(v) = vpair.as_double() { ew = v; } }
+                            42 => { if let Some(v) = vpair.as_double() { bulge = v; } }
+                            50 => { if let Some(v) = vpair.as_double() { tangent = v; } }
+                            62 => { if let Some(ci) = vpair.as_i16() { vcolor = Some(Color::from_index(ci)); } }
+                            420 => { if let Some(tc) = vpair.as_i32() { vcolor = Some(Color::from_true_color_value(tc)); } }
                             70 => { if let Some(v) = vpair.as_i16() { vflags = v; } }
                             71 => { if let Some(v) = vpair.as_i16() { vi1 = v; } }
                             72 => { if let Some(v) = vpair.as_i16() { vi2 = v; } }
@@ -2882,10 +2942,10 @@ impl<'a> SectionReader<'a> {
                     // Face records are written with flag=128 only.
                     // Therefore: check bit 64 FIRST.
                     if (vflags & 64) != 0 {
-                        // Geometry vertex
+                        // Polyface geometry vertex
                         pface_vertices.push(PolyfaceVertex {
                             common: EntityCommon::default(),
-                            location: crate::types::Vector3::new(vx, vy, vz),
+                            location: loc,
                             flags: PolyfaceVertexFlags::from_bits_truncate(vflags),
                             bulge: 0.0,
                             start_width: 0.0,
@@ -2895,21 +2955,26 @@ impl<'a> SectionReader<'a> {
                         });
                     } else if (vflags & 128) != 0 {
                         // Face record (only bit 128 set, no bit 64)
-                        let mut face = PolyfaceFace {
+                        pface_faces.push(PolyfaceFace {
                             common: EntityCommon::default(),
-                            flags: PolyfaceVertexFlags::NONE,
+                            flags: PolyfaceVertexFlags::from_bits_truncate(vflags),
                             index1: vi1,
                             index2: vi2,
                             index3: vi3,
                             index4: vi4,
-                            color: None,
-                        };
-                        face.flags = PolyfaceVertexFlags::from_bits_truncate(vflags);
-                        pface_faces.push(face);
+                            color: vcolor,
+                        });
                     } else {
-                        polyline_vertices.push(Vertex3D::new(
-                            crate::types::Vector3::new(vx, vy, vz),
-                        ));
+                        // Plain polyline / polygon-mesh vertex — keep every field
+                        // so the type-specific mapping below can use them.
+                        geom_vertices.push(RawVertex {
+                            loc,
+                            vflags,
+                            start_width: sw,
+                            end_width: ew,
+                            bulge,
+                            tangent,
+                        });
                     }
                 } else if pair.value_string == "SEQEND" {
                     while let Some(seqend_pair) = self.reader.read_pair()? {
@@ -2946,25 +3011,61 @@ impl<'a> SectionReader<'a> {
                             elevation = z;
                         }
                     }
+                    39 => {
+                        if let Some(t) = pair.as_double() {
+                            thickness = t;
+                        }
+                    }
+                    40 => {
+                        if let Some(w) = pair.as_double() {
+                            def_start_width = w;
+                        }
+                    }
+                    41 => {
+                        if let Some(w) = pair.as_double() {
+                            def_end_width = w;
+                        }
+                    }
                     71 => {
-                        if let Some(vc) = pair.as_i16() {
-                            _vertex_count = vc;
+                        if let Some(v) = pair.as_i16() {
+                            count_m = v;
                         }
                     }
                     72 => {
-                        if let Some(fc) = pair.as_i16() {
-                            _face_count = fc;
+                        if let Some(v) = pair.as_i16() {
+                            count_n = v;
                         }
                     }
+                    73 => {
+                        if let Some(v) = pair.as_i16() {
+                            density_m = v;
+                        }
+                    }
+                    74 => {
+                        if let Some(v) = pair.as_i16() {
+                            density_n = v;
+                        }
+                    }
+                    75 => {
+                        if let Some(v) = pair.as_i16() {
+                            smooth = v;
+                        }
+                    }
+                    210 | 220 | 230 => { normal.add_coordinate(&pair); }
                     _ => { self.try_read_common_entity_code(&pair, &mut common)?; }
                 }
             }
         }
 
-        // PolyfaceMeshFlags::POLYFACE_MESH = 64 (bit 6)
-        let is_polyface = (flags & 64) != 0;
+        let normal_v = normal
+            .get_point()
+            .unwrap_or(crate::types::Vector3::new(0.0, 0.0, 1.0));
 
-        if is_polyface || !pface_vertices.is_empty() || !pface_faces.is_empty() {
+        // Route by POLYLINE flag bits (code 70): 64 = polyface mesh, 16 = polygon
+        // mesh, 8 = 3D polyline, otherwise a 2D (heavy) polyline. Previously
+        // every non-polyface POLYLINE collapsed to a generic Polyline, dropping
+        // the 2D widths/bulge, the polygon-mesh grid and the 3D-polyline type.
+        if (flags & 64) != 0 || !pface_vertices.is_empty() || !pface_faces.is_empty() {
             let mut mesh = PolyfaceMesh::new();
             mesh.common = common;
             mesh.flags = PolyfaceMeshFlags::from_bits_truncate(flags);
@@ -2972,14 +3073,67 @@ impl<'a> SectionReader<'a> {
             mesh.vertices = pface_vertices;
             mesh.faces = pface_faces;
             Ok(Some(EntityType::PolyfaceMesh(mesh)))
+        } else if (flags & 16) != 0 {
+            let mut mesh = PolygonMesh::new();
+            mesh.common = common;
+            mesh.flags = PolygonMeshFlags::from_bits_truncate(flags);
+            mesh.m_vertex_count = count_m;
+            mesh.n_vertex_count = count_n;
+            mesh.m_smooth_density = density_m;
+            mesh.n_smooth_density = density_n;
+            mesh.smooth_type = SurfaceSmoothType::from_i16(smooth);
+            mesh.elevation = elevation;
+            mesh.normal = normal_v;
+            mesh.vertices = geom_vertices
+                .iter()
+                .map(|rv| PolygonMeshVertex {
+                    common: EntityCommon::default(),
+                    location: rv.loc,
+                    flags: rv.vflags,
+                })
+                .collect();
+            Ok(Some(EntityType::PolygonMesh(mesh)))
+        } else if (flags & 8) != 0 {
+            let mut pl = Polyline3D::new();
+            pl.common = common;
+            pl.flags = Polyline3DFlags::from_bits(flags as i32);
+            pl.smooth_type = SmoothSurface3D::from_value(smooth);
+            pl.default_start_width = def_start_width;
+            pl.default_end_width = def_end_width;
+            pl.elevation = elevation;
+            pl.normal = normal_v;
+            pl.vertices = geom_vertices
+                .iter()
+                .map(|rv| {
+                    let mut v = Vertex3DPolyline::new(rv.loc);
+                    v.flags = rv.vflags as i32;
+                    v
+                })
+                .collect();
+            Ok(Some(EntityType::Polyline3D(pl)))
         } else {
-            let mut polyline = Polyline::new();
-            polyline.common = common;
-            if (flags & 1) != 0 {
-                polyline.close();
-            }
-            polyline.vertices = polyline_vertices;
-            Ok(Some(EntityType::Polyline(polyline)))
+            let mut pl = Polyline2D::new();
+            pl.common = common;
+            pl.flags = PolylineFlags::from_bits(flags as u16);
+            pl.smooth_surface = SmoothSurfaceType::from(smooth);
+            pl.start_width = def_start_width;
+            pl.end_width = def_end_width;
+            pl.thickness = thickness;
+            pl.elevation = elevation;
+            pl.normal = normal_v;
+            pl.vertices = geom_vertices
+                .iter()
+                .map(|rv| {
+                    let mut v = Vertex2D::new(rv.loc);
+                    v.flags = VertexFlags::from_bits(rv.vflags as u8);
+                    v.start_width = rv.start_width;
+                    v.end_width = rv.end_width;
+                    v.bulge = rv.bulge;
+                    v.curve_tangent = rv.tangent;
+                    v
+                })
+                .collect();
+            Ok(Some(EntityType::Polyline2D(pl)))
         }
     }
 
@@ -3140,6 +3294,16 @@ impl<'a> SectionReader<'a> {
                         text.oblique_angle = oblique.to_radians();
                     }
                 }
+                39 => {
+                    if let Some(t) = pair.as_double() {
+                        text.thickness = t;
+                    }
+                }
+                71 => {
+                    if let Some(g) = pair.as_i16() {
+                        text.generation_flags = g;
+                    }
+                }
                 72 => {
                     if let Some(h) = pair.as_i16() {
                         text.horizontal_alignment = match h {
@@ -3188,6 +3352,7 @@ impl<'a> SectionReader<'a> {
         let mut mtext = MText::new();
         let mut insertion = PointReader::new();
         let mut normal = PointReader::new();
+        let mut x_direction = PointReader::new();
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -3256,7 +3421,48 @@ impl<'a> SectionReader<'a> {
                         mtext.line_spacing_factor = lsf;
                     }
                 }
+                73 => {
+                    if let Some(ls) = pair.as_i16() {
+                        mtext.line_spacing_style =
+                            crate::entities::LineSpacingStyle::from(ls);
+                    }
+                }
                 7 => mtext.style = pair.value_string.clone(),
+                // X-axis direction vector (takes priority over rotation 50).
+                11 | 21 | 31 => { x_direction.add_coordinate(&pair); }
+                // Defined rectangle height (0 = auto).
+                46 => {
+                    if let Some(h) = pair.as_double() {
+                        mtext.rectangle_height = if h != 0.0 { Some(h) } else { None };
+                    }
+                }
+                // Background fill: flags / scale / colour (ACI or true colour) /
+                // transparency.
+                90 => {
+                    if let Some(f) = pair.as_i32() {
+                        mtext.background_fill_flags = f;
+                    }
+                }
+                45 => {
+                    if let Some(s) = pair.as_double() {
+                        mtext.background_scale = s;
+                    }
+                }
+                63 => {
+                    if let Some(ci) = pair.as_i16() {
+                        mtext.background_color = Color::from_index(ci);
+                    }
+                }
+                421 => {
+                    if let Some(v) = pair.as_i32() {
+                        mtext.background_color = Color::from_true_color_value(v);
+                    }
+                }
+                441 => {
+                    if let Some(t) = pair.as_i32() {
+                        mtext.background_transparency = t;
+                    }
+                }
                 210 | 220 | 230 => { normal.add_coordinate(&pair); }
                 _ => { self.try_read_common_entity_code(&pair, &mut mtext.common)?; }
             }
@@ -3268,6 +3474,13 @@ impl<'a> SectionReader<'a> {
         if let Some(n) = normal.get_point() {
             mtext.normal = n;
         }
+        // When an explicit X-axis direction is given it defines the rotation
+        // (DXF prefers 11/21/31 over the rotation angle in code 50).
+        if let Some(xd) = x_direction.get_point() {
+            if xd.x != 0.0 || xd.y != 0.0 {
+                mtext.rotation = xd.y.atan2(xd.x);
+            }
+        }
 
         Ok(Some(mtext))
     }
@@ -3278,6 +3491,8 @@ impl<'a> SectionReader<'a> {
         let mut normal = PointReader::new();
         let mut current_control_point = PointReader::new();
         let mut current_fit_point = PointReader::new();
+        let mut begin_tangent = PointReader::new();
+        let mut end_tangent = PointReader::new();
         let mut reading_control = false;
         let mut reading_fit = false;
 
@@ -3304,6 +3519,8 @@ impl<'a> SectionReader<'a> {
                         spline.flags.closed = (flags_val & 1) != 0;
                         spline.flags.periodic = (flags_val & 2) != 0;
                         spline.flags.rational = (flags_val & 4) != 0;
+                        spline.flags.planar = (flags_val & 8) != 0;
+                        spline.flags.linear = (flags_val & 16) != 0;
                     }
                 }
                 71 => {
@@ -3321,6 +3538,23 @@ impl<'a> SectionReader<'a> {
                         spline.weights.push(weight);
                     }
                 }
+                42 => {
+                    if let Some(t) = pair.as_double() {
+                        spline.knot_tolerance = t;
+                    }
+                }
+                43 => {
+                    if let Some(t) = pair.as_double() {
+                        spline.control_tolerance = t;
+                    }
+                }
+                44 => {
+                    if let Some(t) = pair.as_double() {
+                        spline.fit_tolerance = t;
+                    }
+                }
+                12 | 22 | 32 => { begin_tangent.add_coordinate(&pair); }
+                13 | 23 | 33 => { end_tangent.add_coordinate(&pair); }
                 10 | 20 | 30 => {
                     // Control point coordinates
                     if pair.code == 10 {
@@ -3371,8 +3605,213 @@ impl<'a> SectionReader<'a> {
         if let Some(n) = normal.get_point() {
             spline.normal = n;
         }
+        if let Some(t) = begin_tangent.get_point() {
+            spline.begin_tangent = t;
+        }
+        if let Some(t) = end_tangent.get_point() {
+            spline.end_tangent = t;
+        }
 
         Ok(Some(spline))
+    }
+
+    /// Read a HELIX entity: AcDbSpline geometry followed by AcDbHelix
+    /// parameters. Group codes shared by the two subclasses (10/11/12/40/41/42)
+    /// are disambiguated by the active `100` subclass marker.
+    fn read_helix(&mut self) -> Result<Option<crate::entities::Helix>> {
+        use crate::entities::HelixConstraint;
+        let mut helix = crate::entities::Helix::new();
+        let mut in_helix = false;
+
+        // Spline accumulators (mirror read_spline).
+        let mut normal = PointReader::new();
+        let mut current_control_point = PointReader::new();
+        let mut current_fit_point = PointReader::new();
+        let mut begin_tangent = PointReader::new();
+        let mut end_tangent = PointReader::new();
+        let mut reading_control = false;
+        let mut reading_fit = false;
+
+        // Helix point accumulators.
+        let mut axis_base = PointReader::new();
+        let mut start_pt = PointReader::new();
+        let mut axis_vec = PointReader::new();
+
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
+            }
+
+            match pair.code {
+                100 => in_helix = pair.value_string == "AcDbHelix",
+                8 => helix.common.layer = pair.value_string.clone(),
+                62 => {
+                    if let Some(ci) = pair.as_i16() {
+                        helix.common.color = Color::from_index(ci);
+                    }
+                }
+                370 => {
+                    if let Some(lw) = pair.as_i16() {
+                        helix.common.line_weight = LineWeight::from_value(lw);
+                    }
+                }
+
+                // ── AcDbHelix parameters ──
+                90 if in_helix => {
+                    if let Some(v) = pair.as_i32() {
+                        helix.major_version = v;
+                    }
+                }
+                91 if in_helix => {
+                    if let Some(v) = pair.as_i32() {
+                        helix.maintenance_version = v;
+                    }
+                }
+                290 => {
+                    if let Some(v) = pair.as_i16() {
+                        helix.handedness = v != 0;
+                    }
+                }
+                280 => {
+                    if let Some(v) = pair.as_i16() {
+                        helix.constraint = HelixConstraint::from_code(v as u8);
+                    }
+                }
+                10 | 20 | 30 if in_helix => {
+                    axis_base.add_coordinate(&pair);
+                }
+                11 | 21 | 31 if in_helix => {
+                    start_pt.add_coordinate(&pair);
+                }
+                12 | 22 | 32 if in_helix => {
+                    axis_vec.add_coordinate(&pair);
+                }
+                40 if in_helix => {
+                    if let Some(v) = pair.as_double() {
+                        helix.radius = v;
+                    }
+                }
+                41 if in_helix => {
+                    if let Some(v) = pair.as_double() {
+                        helix.turns = v;
+                    }
+                }
+                42 if in_helix => {
+                    if let Some(v) = pair.as_double() {
+                        helix.turn_height = v;
+                    }
+                }
+
+                // ── AcDbSpline geometry ──
+                70 => {
+                    if let Some(f) = pair.as_i16() {
+                        helix.spline.flags.closed = (f & 1) != 0;
+                        helix.spline.flags.periodic = (f & 2) != 0;
+                        helix.spline.flags.rational = (f & 4) != 0;
+                        helix.spline.flags.planar = (f & 8) != 0;
+                        helix.spline.flags.linear = (f & 16) != 0;
+                    }
+                }
+                71 => {
+                    if let Some(d) = pair.as_i16() {
+                        helix.spline.degree = d as i32;
+                    }
+                }
+                40 => {
+                    if let Some(k) = pair.as_double() {
+                        helix.spline.knots.push(k);
+                    }
+                }
+                41 => {
+                    if let Some(w) = pair.as_double() {
+                        helix.spline.weights.push(w);
+                    }
+                }
+                42 => {
+                    if let Some(t) = pair.as_double() {
+                        helix.spline.knot_tolerance = t;
+                    }
+                }
+                43 => {
+                    if let Some(t) = pair.as_double() {
+                        helix.spline.control_tolerance = t;
+                    }
+                }
+                44 => {
+                    if let Some(t) = pair.as_double() {
+                        helix.spline.fit_tolerance = t;
+                    }
+                }
+                12 | 22 | 32 => {
+                    begin_tangent.add_coordinate(&pair);
+                }
+                13 | 23 | 33 => {
+                    end_tangent.add_coordinate(&pair);
+                }
+                10 | 20 | 30 => {
+                    if pair.code == 10 {
+                        if reading_control {
+                            if let Some(pt) = current_control_point.get_point() {
+                                helix.spline.control_points.push(pt);
+                            }
+                        }
+                        current_control_point = PointReader::new();
+                        reading_control = true;
+                    }
+                    current_control_point.add_coordinate(&pair);
+                }
+                11 | 21 | 31 => {
+                    if pair.code == 11 {
+                        if reading_fit {
+                            if let Some(pt) = current_fit_point.get_point() {
+                                helix.spline.fit_points.push(pt);
+                            }
+                        }
+                        current_fit_point = PointReader::new();
+                        reading_fit = true;
+                    }
+                    current_fit_point.add_coordinate(&pair);
+                }
+                210 | 220 | 230 => {
+                    normal.add_coordinate(&pair);
+                }
+                _ => {
+                    self.try_read_common_entity_code(&pair, &mut helix.common)?;
+                }
+            }
+        }
+
+        if reading_control {
+            if let Some(pt) = current_control_point.get_point() {
+                helix.spline.control_points.push(pt);
+            }
+        }
+        if reading_fit {
+            if let Some(pt) = current_fit_point.get_point() {
+                helix.spline.fit_points.push(pt);
+            }
+        }
+        if let Some(n) = normal.get_point() {
+            helix.spline.normal = n;
+        }
+        if let Some(t) = begin_tangent.get_point() {
+            helix.spline.begin_tangent = t;
+        }
+        if let Some(t) = end_tangent.get_point() {
+            helix.spline.end_tangent = t;
+        }
+        if let Some(p) = axis_base.get_point() {
+            helix.axis_base_point = p;
+        }
+        if let Some(p) = start_pt.get_point() {
+            helix.start_point = p;
+        }
+        if let Some(p) = axis_vec.get_point() {
+            helix.axis_vector = p;
+        }
+
+        Ok(Some(helix))
     }
 
     /// Read a DIMENSION entity
@@ -4532,6 +4971,7 @@ impl<'a> SectionReader<'a> {
     fn read_shape(&mut self) -> Result<Option<Shape>> {
         let mut shape = Shape::new();
         let mut insertion_point = PointReader::new();
+        let mut normal = PointReader::new();
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -4558,11 +4998,32 @@ impl<'a> SectionReader<'a> {
                         shape.rotation = r;
                     }
                 }
+                // Previously dropped: thickness, relative X scale, oblique
+                // angle, extrusion — all present on the struct + DWG path.
+                39 => {
+                    if let Some(t) = pair.as_double() {
+                        shape.thickness = t;
+                    }
+                }
+                41 => {
+                    if let Some(s) = pair.as_double() {
+                        shape.relative_x_scale = s;
+                    }
+                }
+                51 => {
+                    if let Some(o) = pair.as_double() {
+                        shape.oblique_angle = o;
+                    }
+                }
+                210 | 220 | 230 => { normal.add_coordinate(&pair); }
                 _ => { self.try_read_common_entity_code(&pair, &mut shape.common)?; }
             }
         }
 
         shape.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
+        if let Some(n) = normal.get_point() {
+            shape.normal = n;
+        }
 
         Ok(Some(shape))
     }
@@ -5372,27 +5833,220 @@ impl<'a> SectionReader<'a> {
 
     /// Read a TABLE entity (basic properties)
     fn read_table_entity(&mut self) -> Result<Option<crate::entities::Table>> {
-        let mut insertion_point = PointReader::new();
-        let mut table = crate::entities::Table::new(Vector3::zero(), 1, 1);
+        use crate::entities::table::{
+            CellContent, CellType, CellValue, CellValueType, TableCell, TableCellContentType,
+            TableColumn, TableRow,
+        };
 
-        while let Some(pair) = self.reader.read_pair()? {
-            if pair.code == 0 { self.reader.push_back(pair); break; }
-            match pair.code {
-                8 => table.common.layer = pair.value_string.clone(),
-                62 => { if let Some(v) = pair.as_i16() { table.common.color = Color::from_index(v); } }
-                370 => { if let Some(v) = pair.as_i16() { table.common.line_weight = LineWeight::from_value(v); } }
-                10 | 20 | 30 => { insertion_point.add_coordinate(&pair); }
-                342 => {
-                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { table.table_style_handle = Some(Handle::new(h)); }
-                }
-                343 => {
-                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { table.block_record_handle = Some(Handle::new(h)); }
-                }
-                _ => { self.try_read_common_entity_code(&pair, &mut table.common)?; }
+        let mut insertion_point = PointReader::new();
+        let mut horizontal = PointReader::new();
+        let mut table = crate::entities::Table::new(Vector3::zero(), 0, 0);
+        table.rows.clear();
+        table.columns.clear();
+
+        let mut row_heights: Vec<f64> = Vec::new();
+        let mut col_widths: Vec<f64> = Vec::new();
+        let mut cells: Vec<TableCell> = Vec::new();
+        let mut ncols: usize = 0;
+        let mut cur: Option<TableCell> = None;
+
+        // Ensure the current cell has at least one content to receive a value.
+        fn ensure_content(cell: &mut TableCell) {
+            if cell.contents.is_empty() {
+                cell.contents.push(CellContent::new());
             }
         }
 
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
+            }
+            match pair.code {
+                8 => table.common.layer = pair.value_string.clone(),
+                62 if cur.is_none() => {
+                    if let Some(v) = pair.as_i16() {
+                        table.common.color = Color::from_index(v);
+                    }
+                }
+                370 if cur.is_none() => {
+                    if let Some(v) = pair.as_i16() {
+                        table.common.line_weight = LineWeight::from_value(v);
+                    }
+                }
+                // Block record handle: acadrust writes it under 2, AutoCAD under 343.
+                2 | 343 => {
+                    if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                        table.block_record_handle = Some(Handle::new(h));
+                    }
+                }
+                342 => {
+                    if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                        table.table_style_handle = Some(Handle::new(h));
+                    }
+                }
+                280 if cur.is_none() => {
+                    if let Some(v) = pair.as_i16() {
+                        table.data_version = v;
+                    }
+                }
+                10 | 20 | 30 => {
+                    insertion_point.add_coordinate(&pair);
+                }
+                11 | 21 | 31 => {
+                    horizontal.add_coordinate(&pair);
+                }
+                92 => {
+                    if let Some(v) = pair.as_i32() {
+                        ncols = v.max(0) as usize;
+                    }
+                }
+                141 => {
+                    if let Some(v) = pair.as_double() {
+                        row_heights.push(v);
+                    }
+                }
+                142 => {
+                    if let Some(v) = pair.as_double() {
+                        col_widths.push(v);
+                    }
+                }
+                // ── Cells ──
+                171 => {
+                    if let Some(c) = cur.take() {
+                        cells.push(c);
+                    }
+                    let mut c = TableCell::new();
+                    if let Some(v) = pair.as_i16() {
+                        c.cell_type = if v == 2 { CellType::Block } else { CellType::Text };
+                    }
+                    cur = Some(c);
+                }
+                174 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.merged = v as i32;
+                    }
+                }
+                175 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.merge_width = v as i32;
+                    }
+                }
+                176 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.merge_height = v as i32;
+                    }
+                }
+                177 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
+                        c.virtual_edge = v;
+                    }
+                }
+                144 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_double()) {
+                        c.rotation = v;
+                    }
+                }
+                170 => {
+                    if let Some(c) = cur.as_mut() {
+                        let mut content = CellContent::new();
+                        if let Some(v) = pair.as_i16() {
+                            content.content_type = match v {
+                                1 => TableCellContentType::Value,
+                                2 => TableCellContentType::Field,
+                                4 => TableCellContentType::Block,
+                                _ => TableCellContentType::Unknown,
+                            };
+                        }
+                        c.contents.push(content);
+                    }
+                }
+                1 => {
+                    if let Some(c) = cur.as_mut() {
+                        ensure_content(c);
+                        c.contents.last_mut().unwrap().value =
+                            CellValue::text(&pair.value_string);
+                    }
+                }
+                140 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_double()) {
+                        ensure_content(c);
+                        let cv = &mut c.contents.last_mut().unwrap().value;
+                        cv.numeric_value = v;
+                        cv.value_type = CellValueType::Double;
+                    }
+                }
+                90 => {
+                    if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i32()) {
+                        ensure_content(c);
+                        let cv = &mut c.contents.last_mut().unwrap().value;
+                        cv.numeric_value = v as f64;
+                        cv.value_type = CellValueType::Long;
+                    }
+                }
+                300 => {
+                    if let Some(c) = cur.as_mut() {
+                        if let Some(content) = c.contents.last_mut() {
+                            content.value.format = pair.value_string.clone();
+                        }
+                    }
+                }
+                340 => {
+                    if let Some(c) = cur.as_mut() {
+                        if let (Some(content), Ok(h)) = (
+                            c.contents.last_mut(),
+                            u64::from_str_radix(pair.value_string.trim(), 16),
+                        ) {
+                            content.block_handle = Some(Handle::new(h));
+                        }
+                    }
+                }
+                _ => {
+                    if cur.is_none() {
+                        self.try_read_common_entity_code(&pair, &mut table.common)?;
+                    }
+                }
+            }
+        }
+        if let Some(c) = cur.take() {
+            cells.push(c);
+        }
+
+        // Assemble columns/rows and distribute the row-major cell stream.
+        for w in col_widths {
+            table.columns.push(TableColumn {
+                name: String::new(),
+                width: w,
+                style: None,
+                custom_data: 0,
+            });
+        }
+        if ncols == 0 {
+            ncols = table.columns.len();
+        }
+        for h in row_heights {
+            table.rows.push(TableRow {
+                height: h,
+                cells: Vec::new(),
+                style: None,
+                custom_data: 0,
+            });
+        }
+        if ncols > 0 && !table.rows.is_empty() {
+            for (i, cell) in cells.into_iter().enumerate() {
+                let r = i / ncols;
+                if r < table.rows.len() {
+                    table.rows[r].cells.push(cell);
+                }
+            }
+        } else if !table.rows.is_empty() {
+            table.rows[0].cells = cells;
+        }
+
         table.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
+        if let Some(h) = horizontal.get_point() {
+            table.horizontal_direction = h;
+        }
         Ok(Some(table))
     }
 
@@ -5588,6 +6242,27 @@ impl<'a> SectionReader<'a> {
                 11 => { if let Some(v) = pair.as_double() { def.pixel_size.0 = v; } }
                 21 => { if let Some(v) = pair.as_double() { def.pixel_size.1 = v; } }
                 280 => { if let Some(v) = pair.as_i16() { def.is_loaded = v != 0; } }
+                _ => {}
+            }
+        }
+
+        Ok(Some(def))
+    }
+
+    /// Read a PDF/DWF/DGN underlay definition object.
+    fn read_underlay_definition(
+        &mut self,
+        utype: crate::entities::underlay::UnderlayType,
+    ) -> Result<Option<crate::objects::UnderlayDefinition>> {
+        let mut def = crate::objects::UnderlayDefinition::new(utype);
+
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 { self.reader.push_back(pair); break; }
+            match pair.code {
+                5 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { def.handle = Handle::new(h); } }
+                330 => { if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) { def.owner_handle = Handle::new(h); } }
+                1 => def.file_path = pair.value_string.clone(),
+                2 => def.page_name = pair.value_string.clone(),
                 _ => {}
             }
         }
