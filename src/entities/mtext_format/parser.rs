@@ -109,49 +109,104 @@ impl MTextParser {
         if self.chars.is_empty() {
             return;
         }
+        // TEXT entities: backslash is literal (no MTEXT `\` codes); only `%%`
+        // control codes apply. `%%u`/`%%o` toggle underline/overline (each toggle
+        // starts a new span), `%%d`/`%%p`/`%%c` and `%%%%` resolve to symbols,
+        // `%%nnn` is a decimal character code, and `\P`/`\p` break paragraphs.
+        // Underscoring/overscoring turn off automatically at the string end.
+        let flush = |para: &mut MTextParagraph, text: &mut String, u: bool, o: bool| {
+            if text.is_empty() {
+                return;
+            }
+            let mut props = SpanProperties::default();
+            props.set_underline(u);
+            props.set_overline(o);
+            para.push_span(MTextSpan::new(std::mem::take(text), props));
+        };
+
+        let n = self.chars.len();
+        let mut para = MTextParagraph::new();
         let mut text = String::new();
-        while self.pos < self.chars.len() {
-            // Handle %% special chars
-            if self.chars[self.pos] == '%'
-                && self.pos + 2 < self.chars.len()
-                && self.chars[self.pos + 1] == '%'
-            {
-                self.pos += 2;
-                let code = self.chars[self.pos].to_ascii_lowercase();
-                if let Some(special) = SpecialChar::from_char(code) {
-                    text.push(special.to_char());
-                    self.pos += 1;
+        let mut underline = false;
+        let mut overline = false;
+
+        while self.pos < n {
+            let ch = self.chars[self.pos];
+
+            if ch == '%' && self.pos + 1 < n && self.chars[self.pos + 1] == '%' {
+                // `%%%%` → literal `%`.
+                if self.pos + 3 < n
+                    && self.chars[self.pos + 2] == '%'
+                    && self.chars[self.pos + 3] == '%'
+                {
+                    self.pos += 4;
+                    text.push('%');
                     continue;
                 }
-                // Unknown %%? — pass through literally
+                if self.pos + 2 < n {
+                    let code = self.chars[self.pos + 2];
+                    match code.to_ascii_lowercase() {
+                        'u' => {
+                            self.pos += 3;
+                            flush(&mut para, &mut text, underline, overline);
+                            underline = !underline;
+                            continue;
+                        }
+                        'o' => {
+                            self.pos += 3;
+                            flush(&mut para, &mut text, underline, overline);
+                            overline = !overline;
+                            continue;
+                        }
+                        lc @ ('d' | 'p' | 'c') => {
+                            if let Some(sp) = SpecialChar::from_char(lc) {
+                                self.pos += 3;
+                                text.push(sp.to_char());
+                                continue;
+                            }
+                        }
+                        _ if code.is_ascii_digit() => {
+                            // `%%nnn` — up to three decimal digits → character.
+                            self.pos += 2;
+                            let mut digits = String::new();
+                            while digits.len() < 3
+                                && self.pos < n
+                                && self.chars[self.pos].is_ascii_digit()
+                            {
+                                digits.push(self.chars[self.pos]);
+                                self.pos += 1;
+                            }
+                            if let Some(c) = digits.parse::<u32>().ok().and_then(char::from_u32) {
+                                text.push(c);
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                // Unknown `%%` code — pass the pair through literally.
+                self.pos += 2;
                 text.push('%');
                 text.push('%');
                 continue;
             }
 
-            // Handle \P paragraph breaks
-            if self.chars[self.pos] == '\\'
-                && self.pos + 1 < self.chars.len()
+            if ch == '\\'
+                && self.pos + 1 < n
                 && (self.chars[self.pos + 1] == 'P' || self.chars[self.pos + 1] == 'p')
             {
-                if !text.is_empty() {
-                    self.current_paragraph = MTextParagraph::from_text(&text);
-                    text.clear();
-                }
-                self.document
-                    .push_paragraph(std::mem::take(&mut self.current_paragraph));
+                flush(&mut para, &mut text, underline, overline);
+                self.document.push_paragraph(std::mem::take(&mut para));
                 self.pos += 2;
                 continue;
             }
 
-            text.push(self.chars[self.pos]);
+            text.push(ch);
             self.pos += 1;
         }
-        if !text.is_empty() {
-            self.current_paragraph = MTextParagraph::from_text(&text);
-        }
-        self.document
-            .push_paragraph(std::mem::take(&mut self.current_paragraph));
+
+        flush(&mut para, &mut text, underline, overline);
+        self.document.push_paragraph(para);
     }
 
     /// Push a copy of the current context onto the stack.
@@ -196,6 +251,30 @@ impl MTextParser {
                 }
                 '%' => {
                     self.handle_special_char();
+                }
+                '^' => {
+                    // Caret-encoded controls: `^I` tab, `^J` line break,
+                    // `^M` carriage return (ignored). Anything else is a
+                    // literal caret.
+                    match self.chars.get(self.pos + 1).copied() {
+                        Some('I') => {
+                            self.text_buf.push('\t');
+                            self.pos += 2;
+                        }
+                        Some('J') => {
+                            self.pos += 2;
+                            self.flush_current_span(merge_spans);
+                            self.document
+                                .push_paragraph(std::mem::take(&mut self.current_paragraph));
+                        }
+                        Some('M') => {
+                            self.pos += 2;
+                        }
+                        _ => {
+                            self.text_buf.push('^');
+                            self.pos += 1;
+                        }
+                    }
                 }
                 _ => {
                     self.text_buf.push(ch);
@@ -298,6 +377,12 @@ impl MTextParser {
             }
             '}' => {
                 self.text_buf.push('}');
+                self.pos += 1;
+            }
+            // Escaped semicolon → literal `;` (so a `;` can appear in text
+            // without terminating a control code).
+            ';' => {
+                self.text_buf.push(';');
                 self.pos += 1;
             }
 
@@ -593,12 +678,19 @@ impl MTextParser {
         };
 
         if let Ok(f) = num_str.trim().parse::<f64>() {
-            if is_relative {
-                let cur = self.current_props().height.unwrap_or(1.0);
-                self.current_props_mut().height = Some(cur * f.abs());
+            // Relative multiplies the current height, preserving whether that
+            // current height is a factor or an absolute value; a fresh relative
+            // is a factor over the implicit 1.0. Absolute always resets.
+            let scalar = if is_relative {
+                match self.current_props().height {
+                    Some(MTextScalar::Absolute(c)) => MTextScalar::Absolute(c * f.abs()),
+                    Some(MTextScalar::Factor(c)) => MTextScalar::Factor(c * f.abs()),
+                    None => MTextScalar::Factor(f.abs()),
+                }
             } else {
-                self.current_props_mut().height = Some(f.abs());
-            }
+                MTextScalar::Absolute(f.abs())
+            };
+            self.current_props_mut().height = Some(scalar);
         }
     }
 
@@ -1211,13 +1303,68 @@ mod tests {
     #[test]
     fn test_parse_height_absolute() {
         let doc = parse_mtext(r"{\H2;Big}", false);
-        assert_eq!(doc.paragraphs[0].spans[0].properties.height, Some(2.0));
+        assert_eq!(
+            doc.paragraphs[0].spans[0].properties.height,
+            Some(MTextScalar::Absolute(2.0))
+        );
     }
 
     #[test]
     fn test_parse_height_relative() {
         let doc = parse_mtext(r"{\H2x;Bigger}", false);
-        assert_eq!(doc.paragraphs[0].spans[0].properties.height, Some(2.0));
+        assert_eq!(
+            doc.paragraphs[0].spans[0].properties.height,
+            Some(MTextScalar::Factor(2.0))
+        );
+    }
+
+    #[test]
+    fn test_plain_text_underline_toggle() {
+        // TEXT `%%u` toggles underline; each toggle starts a new span.
+        let doc = parse_plain_text("A%%uB%%uC");
+        let spans = &doc.paragraphs[0].spans;
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].text, "A");
+        assert!(!spans[0].properties.underline());
+        assert_eq!(spans[1].text, "B");
+        assert!(spans[1].properties.underline());
+        assert_eq!(spans[2].text, "C");
+        assert!(!spans[2].properties.underline());
+    }
+
+    #[test]
+    fn test_plain_text_overline_and_special() {
+        let doc = parse_plain_text("%%oX%%o");
+        assert!(doc.paragraphs[0]
+            .spans
+            .iter()
+            .any(|s| s.text == "X" && s.properties.overline()));
+        // `%%d` still resolves to the degree symbol in plain text.
+        assert_eq!(parse_plain_text("90%%d").paragraphs[0].to_plain_text(), "90°");
+    }
+
+    #[test]
+    fn test_plain_text_decimal_char_code() {
+        // `%%176` → decimal 176 → '°'.
+        assert_eq!(
+            parse_plain_text("%%176").paragraphs[0].to_plain_text(),
+            "°"
+        );
+    }
+
+    #[test]
+    fn test_mtext_escaped_semicolon() {
+        // `\;` is a literal semicolon, not a code terminator.
+        let doc = parse_mtext(r"a\;b", false);
+        assert_eq!(doc.to_plain_text(), "a;b");
+    }
+
+    #[test]
+    fn test_mtext_caret_codes() {
+        // `^I` → tab, `^J` → line break (new paragraph), `^M` → ignored.
+        assert!(parse_mtext("a^Ib", false).to_plain_text().contains('\t'));
+        assert_eq!(parse_mtext("a^Jb", false).paragraphs.len(), 2);
+        assert_eq!(parse_mtext("a^Mb", false).to_plain_text(), "ab");
     }
 
     // ========================================================================
@@ -1520,9 +1667,18 @@ mod tests {
         // Height set in outer group should be inherited
         let doc = parse_mtext("{\\H2;Normal{\\C1;Colored}Back}", false);
         // Normal has H2, Colored has H2+C1, Back has H2
-        assert_eq!(doc.paragraphs[0].spans[0].properties.height, Some(2.0));
-        assert_eq!(doc.paragraphs[0].spans[1].properties.height, Some(2.0));
-        assert_eq!(doc.paragraphs[0].spans[2].properties.height, Some(2.0));
+        assert_eq!(
+            doc.paragraphs[0].spans[0].properties.height,
+            Some(MTextScalar::Absolute(2.0))
+        );
+        assert_eq!(
+            doc.paragraphs[0].spans[1].properties.height,
+            Some(MTextScalar::Absolute(2.0))
+        );
+        assert_eq!(
+            doc.paragraphs[0].spans[2].properties.height,
+            Some(MTextScalar::Absolute(2.0))
+        );
     }
 
     // ========================================================================
@@ -1864,8 +2020,14 @@ mod tests {
     fn test_height_carries_across_paragraphs() {
         let doc = parse_mtext("{\\H2;Tall\\PStill tall}", false);
         assert_eq!(doc.paragraphs.len(), 2);
-        assert_eq!(doc.paragraphs[0].spans[0].properties.height, Some(2.0));
-        assert_eq!(doc.paragraphs[1].spans[0].properties.height, Some(2.0));
+        assert_eq!(
+            doc.paragraphs[0].spans[0].properties.height,
+            Some(MTextScalar::Absolute(2.0))
+        );
+        assert_eq!(
+            doc.paragraphs[1].spans[0].properties.height,
+            Some(MTextScalar::Absolute(2.0))
+        );
     }
 
     #[test]
