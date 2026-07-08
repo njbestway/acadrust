@@ -12,7 +12,7 @@ Supports DXF (ASCII & Binary) and DWG (R13–R2018) files.
 
 ```toml
 [dependencies]
-acadrust = "0.4.0"
+acadrust = "0.4.1"
 ```
 
 ```rust
@@ -144,6 +144,19 @@ Full API docs: [docs.rs/acadrust](https://docs.rs/acadrust)
 ---
 
 ## Changelog
+
+
+### 0.4.1
+
+- **MTEXT formatting** — Added a structured MTEXT format parser with richer control-code handling, including escaped semicolons, caret codes, legacy `%%u`/`%%o`/`%%nnn` text codes, line-spacing style, and relative-vs-absolute height scalars.
+
+- **Expanded entity coverage** — Added read/write and round-trip support for `HELIX`, `ACAD_TABLE` cell content, PDF/DWF/DGN underlay references and definitions, ACAD surface entities, SPATIAL_FILTER clip boundaries, complex linetype shapes/text, and additional surface/body/history fields.
+
+- **ACIS and 3D solid reliability** — Improved planar B-rep and NURBS spline-surface output, transformed ACIS body geometry correctly, linked R2013+ 3DSOLID/REGION/BODY geometry to AcDs SAB blobs, and fixed several AcDs record pairing/search/index layouts.
+
+- **DWG/DXF interoperability fixes** — Tightened DWG writer conformance for AutoCAD round-trips, R2018 MLEADER/MTEXT column handling, viewport and plot settings persistence, xref block preservation, ENC color/transparency decoding, spline scenario detection, dimension angles/group codes, TEXT thickness/generation flags, and POLYLINE routing by flags.
+
+- **Performance and security** — Removed quadratic AcDs SAB scans, made `SatDocument::record()` O(1), bounded SAB end-marker searches, and added a JSON recursion depth limit to prevent stack-overflow denial of service in glTF import.
 
 
 ### 0.4.0
