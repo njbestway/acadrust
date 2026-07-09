@@ -272,3 +272,97 @@ pub fn encode_tile(layers: Vec<TileLayer>) -> Vec<u8> {
     let tile = Tile { layers };
     tile.encode_to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_point_feature_encode_decode() {
+        let mut builder = LayerBuilder::new("test_layer".into(), 4096);
+        builder.add_point(100, 200, &[("name".into(), "point1".into())]);
+        let layer = builder.build();
+        let pbf = encode_tile(vec![layer]);
+
+        // Decode and verify
+        let decoded = Tile::decode(pbf.as_slice()).expect("decode failed");
+        assert_eq!(decoded.layers.len(), 1);
+        let layer = &decoded.layers[0];
+        assert_eq!(layer.name, "test_layer");
+        assert_eq!(layer.version, 2);
+        assert_eq!(layer.extent, Some(4096));
+        assert_eq!(layer.features.len(), 1);
+        assert_eq!(layer.features[0].r#type, Some(GeomType::Point as i32));
+        assert_eq!(layer.keys, vec!["name"]);
+        assert_eq!(
+            layer.values[0].string_value,
+            Some("point1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_linestring_feature_encode_decode() {
+        let mut builder = LayerBuilder::new("lines".into(), 4096);
+        builder.add_linestring(
+            &[(0, 0), (100, 0), (100, 100)],
+            &[("color".into(), "#ff0000".into())],
+        );
+        let layer = builder.build();
+        let pbf = encode_tile(vec![layer]);
+
+        let decoded = Tile::decode(pbf.as_slice()).expect("decode failed");
+        assert_eq!(decoded.layers.len(), 1);
+        let f = &decoded.layers[0].features[0];
+        assert_eq!(f.r#type, Some(GeomType::LineString as i32));
+        // Geometry should have: MoveTo(1) + LineTo(2)
+        assert!(!f.geometry.is_empty());
+    }
+
+    #[test]
+    fn test_polygon_feature_encode_decode() {
+        let mut builder = LayerBuilder::new("polys".into(), 4096);
+        builder.add_polygon(
+            &[vec![(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]],
+            &[("area".into(), "10000".into())],
+        );
+        let layer = builder.build();
+        let pbf = encode_tile(vec![layer]);
+
+        let decoded = Tile::decode(pbf.as_slice()).expect("decode failed");
+        let f = &decoded.layers[0].features[0];
+        assert_eq!(f.r#type, Some(GeomType::Polygon as i32));
+    }
+
+    #[test]
+    fn test_multi_layer_encode_decode() {
+        let mut b1 = LayerBuilder::new("layer_a".into(), 4096);
+        b1.add_point(10, 20, &[]);
+        let mut b2 = LayerBuilder::new("layer_b".into(), 4096);
+        b2.add_linestring(&[(0, 0), (50, 50)], &[]);
+        let pbf = encode_tile(vec![b1.build(), b2.build()]);
+
+        let decoded = Tile::decode(pbf.as_slice()).expect("decode failed");
+        assert_eq!(decoded.layers.len(), 2);
+        assert_eq!(decoded.layers[0].name, "layer_a");
+        assert_eq!(decoded.layers[1].name, "layer_b");
+    }
+
+    #[test]
+    fn test_key_value_deduplication() {
+        let mut builder = LayerBuilder::new("dedup".into(), 4096);
+        builder.add_point(1, 1, &[("color".into(), "red".into())]);
+        builder.add_point(2, 2, &[("color".into(), "red".into())]);
+        builder.add_point(3, 3, &[("color".into(), "blue".into())]);
+        let layer = builder.build();
+
+        // Keys should be deduplicated: ["color"]
+        assert_eq!(layer.keys, vec!["color"]);
+        // Values should be deduplicated: ["red", "blue"]
+        assert_eq!(layer.values.len(), 2);
+        // Each feature should have 2 tags (key_idx + value_idx)
+        assert_eq!(layer.features[0].tags.len(), 2);
+        assert_eq!(layer.features[1].tags.len(), 2);
+        // First two features should share the same key and value indices
+        assert_eq!(layer.features[0].tags, layer.features[1].tags);
+    }
+}

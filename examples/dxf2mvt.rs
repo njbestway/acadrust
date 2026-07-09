@@ -53,6 +53,8 @@ struct SimpleFeature {
     geom: SimpleGeom,
     layer: String,
     properties: Vec<(String, String)>,
+    /// Pre-computed bounding box for spatial indexing.
+    bbox: BBox,
 }
 
 // ── 命令行参数 ──
@@ -200,6 +202,10 @@ fn main() -> acadrust::Result<()> {
                     let mut has_features = false;
 
                     for f in layer_features {
+                        // Spatial index: skip features whose bbox doesn't intersect tile
+                        if !f.bbox.intersects(&tile_bbox) {
+                            continue;
+                        }
                         match &f.geom {
                             SimpleGeom::Point(x, y) => {
                                 if let Some((cx, cy)) = clip_point(*x, *y, &tile_bbox) {
@@ -269,6 +275,36 @@ fn world_to_tile(wx: f64, wy: f64, tile_bbox: &BBox, extent: u32) -> (i32, i32) 
     (tx, ty)
 }
 
+/// 计算几何的包围盒。
+fn geom_bbox(geom: &SimpleGeom) -> BBox {
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    match geom {
+        SimpleGeom::Point(x, y) => {
+            min_x = *x; min_y = *y; max_x = *x; max_y = *y;
+        }
+        SimpleGeom::LineString(coords) => {
+            for (x, y) in coords {
+                min_x = min_x.min(*x); min_y = min_y.min(*y);
+                max_x = max_x.max(*x); max_y = max_y.max(*y);
+            }
+        }
+        SimpleGeom::Polygon(rings) => {
+            for ring in rings {
+                for (x, y) in ring {
+                    min_x = min_x.min(*x); min_y = min_y.min(*y);
+                    max_x = max_x.max(*x); max_y = max_y.max(*y);
+                }
+            }
+        }
+    }
+    if min_x == max_x { min_x -= 1.0; max_x += 1.0; }
+    if min_y == max_y { min_y -= 1.0; max_y += 1.0; }
+    BBox::new(min_x, min_y, max_x, max_y)
+}
+
 /// 计算所有 Feature 的包围盒。
 fn compute_bbox(features: &[SimpleFeature]) -> BBox {
     let mut min_x = f64::MAX;
@@ -327,22 +363,28 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
         match entity {
             EntityType::Line(e) => {
                 let color = color_to_string(e.common.color);
-                features.push(SimpleFeature {
-                    geom: SimpleGeom::LineString(vec![
+                let geom = SimpleGeom::LineString(vec![
                         (e.start.x, e.start.y),
                         (e.end.x, e.end.y),
-                    ]),
+                    ]);
+                let bbox = geom_bbox(&geom);
+                features.push(SimpleFeature {
+                    geom,
                     layer,
                     properties: vec![("color".into(), color)],
+                    bbox,
                 });
             }
             EntityType::Point(e) => {
                 let wcs = ocs_to_wcs(e.normal, e.location);
                 let color = color_to_string(e.common.color);
+                let geom = SimpleGeom::Point(wcs.x, wcs.y);
+                let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
-                    geom: SimpleGeom::Point(wcs.x, wcs.y),
+                    geom,
                     layer,
                     properties: vec![("color".into(), color)],
+                    bbox,
                 });
             }
             EntityType::Circle(e) => {
@@ -359,30 +401,39 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                     let wcs_pt = center + Matrix3::arbitrary_axis(e.normal) * local;
                     coords.push((wcs_pt.x, wcs_pt.y));
                 }
+                let geom = SimpleGeom::LineString(coords);
+                let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
-                    geom: SimpleGeom::LineString(coords),
+                    geom,
                     layer,
                     properties: vec![("color".into(), color)],
+                    bbox,
                 });
             }
             EntityType::Arc(e) => {
                 let color = color_to_string(e.common.color);
                 let pts = tessellate_arc(e.center, e.radius, e.start_angle, e.end_angle, e.normal);
                 let coords: Vec<(f64, f64)> = pts.iter().map(|p| (p.x, p.y)).collect();
+                let geom = SimpleGeom::LineString(coords);
+                let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
-                    geom: SimpleGeom::LineString(coords),
+                    geom,
                     layer,
                     properties: vec![("color".into(), color)],
+                    bbox,
                 });
             }
             EntityType::LwPolyline(e) => {
                 let color = color_to_string(e.common.color);
                 let coords = lwpolyline_coords(e);
                 if coords.len() >= 2 {
+                    let geom = SimpleGeom::LineString(coords);
+                    let bbox = geom_bbox(&geom);
                     features.push(SimpleFeature {
-                        geom: SimpleGeom::LineString(coords),
+                        geom,
                         layer,
                         properties: vec![("color".into(), color)],
+                        bbox,
                     });
                 }
             }
@@ -391,10 +442,13 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 let coords: Vec<(f64, f64)> =
                     e.vertices.iter().map(|v| (v.location.x, v.location.y)).collect();
                 if coords.len() >= 2 {
+                    let geom = SimpleGeom::LineString(coords);
+                    let bbox = geom_bbox(&geom);
                     features.push(SimpleFeature {
-                        geom: SimpleGeom::LineString(coords),
+                        geom,
                         layer,
                         properties: vec![("color".into(), color)],
+                        bbox,
                     });
                 }
             }
@@ -402,45 +456,57 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 let color = color_to_string(e.common.color);
                 let coords = polyline2d_coords(e);
                 if coords.len() >= 2 {
+                    let geom = SimpleGeom::LineString(coords);
+                    let bbox = geom_bbox(&geom);
                     features.push(SimpleFeature {
-                        geom: SimpleGeom::LineString(coords),
+                        geom,
                         layer,
                         properties: vec![("color".into(), color)],
+                        bbox,
                     });
                 }
             }
             EntityType::Text(e) => {
                 let wcs = ocs_to_wcs(e.normal, e.insertion_point);
                 let color = color_to_string(e.common.color);
+                let geom = SimpleGeom::Point(wcs.x, wcs.y);
+                let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
-                    geom: SimpleGeom::Point(wcs.x, wcs.y),
+                    geom,
                     layer,
                     properties: vec![
                         ("color".into(), color),
                         ("text".into(), e.value.clone()),
                         ("height".into(), format!("{:.2}", e.height)),
                     ],
+                    bbox,
                 });
             }
             EntityType::MText(e) => {
                 let color = color_to_string(e.common.color);
+                let geom = SimpleGeom::Point(e.insertion_point.x, e.insertion_point.y);
+                let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
-                    geom: SimpleGeom::Point(e.insertion_point.x, e.insertion_point.y),
+                    geom,
                     layer,
                     properties: vec![
                         ("color".into(), color),
                         ("text".into(), e.value.clone()),
                     ],
+                    bbox,
                 });
             }
             EntityType::Ellipse(e) => {
                 let color = color_to_string(e.common.color);
                 let coords = ellipse_coords(e);
                 if coords.len() >= 2 {
+                    let geom = SimpleGeom::LineString(coords);
+                    let bbox = geom_bbox(&geom);
                     features.push(SimpleFeature {
-                        geom: SimpleGeom::LineString(coords),
+                        geom,
                         layer,
                         properties: vec![("color".into(), color)],
+                        bbox,
                     });
                 }
             }
@@ -448,10 +514,13 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 let color = color_to_string(e.common.color);
                 let coords = spline_coords(e);
                 if coords.len() >= 2 {
+                    let geom = SimpleGeom::LineString(coords);
+                    let bbox = geom_bbox(&geom);
                     features.push(SimpleFeature {
-                        geom: SimpleGeom::LineString(coords),
+                        geom,
                         layer,
                         properties: vec![("color".into(), color)],
+                        bbox,
                     });
                 }
             }
@@ -464,10 +533,13 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                     (e.third_corner.x, e.third_corner.y),
                     (e.first_corner.x, e.first_corner.y),
                 ];
+                let geom = SimpleGeom::Polygon(vec![ring]);
+                let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
-                    geom: SimpleGeom::Polygon(vec![ring]),
+                    geom,
                     layer,
                     properties: vec![("color".into(), color)],
+                    bbox,
                 });
             }
             EntityType::Face3D(e) => {
@@ -484,10 +556,13 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                     ring.push((e.fourth_corner.x, e.fourth_corner.y));
                 }
                 ring.push((e.first_corner.x, e.first_corner.y));
+                let geom = SimpleGeom::Polygon(vec![ring]);
+                let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
-                    geom: SimpleGeom::Polygon(vec![ring]),
+                    geom,
                     layer,
                     properties: vec![("color".into(), color)],
+                    bbox,
                 });
             }
             _ => {}

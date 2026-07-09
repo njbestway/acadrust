@@ -82,6 +82,12 @@ fn main() -> acadrust::Result<()> {
 
     // ── 3. 按图层遍历，收集每层的 GeoJSON features ──
     for layer_name in &layer_names {
+
+        //for debug check
+        if *layer_name != "定位基准线" {
+            continue;
+        }
+
         let features = collect_layer_features(&doc, layer_name);
         if features.is_empty() {
             continue;
@@ -90,13 +96,19 @@ fn main() -> acadrust::Result<()> {
         // 获取图层可见性
         let layer = doc.layers.get(layer_name);
         let visible = layer.map(|l| !l.flags.off).unwrap_or(true);
+        let is_base_layer = layer_name == "定位基准线";
 
         // 构建 FeatureCollection
         let mut fc = Map::new();
         fc.insert("type".into(), json!("FeatureCollection"));
         fc.insert("layerName".into(), json!(layer_name));
         fc.insert("visible".into(), json!(if visible { "1" } else { "0" }));
-        fc.insert("layerType".into(), json!("0"));
+        fc.insert("layerType".into(), json!(if is_base_layer { "1" } else { "0" }));
+
+        // 图层 handle code
+        if let Some(l) = layer {
+            fc.insert("layerCode".into(), json!(format!("L{}", l.handle.value())));
+        }
 
         // 坐标系：优先从 DXF GeoData 读取，读取不到则使用默认值
         let crs = read_crs_from_doc(&doc);
@@ -235,6 +247,19 @@ fn make_feature(geom_type: &str, coordinates: Value, properties: Value) -> Value
     })
 }
 
+/// 构建标准 GeoJSON Feature 对象（含 entity handle code）
+fn make_feature_with_code(geom_type: &str, coordinates: Value, properties: Value, code: u64) -> Value {
+    json!({
+        "type": "Feature",
+        "code": code,
+        "geometry": {
+            "type": geom_type,
+            "coordinates": coordinates
+        },
+        "properties": properties
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  弧线离散化辅助函数
 // ═══════════════════════════════════════════════════════════════
@@ -312,10 +337,11 @@ fn tessellate_bulge(start: Vector2, end: Vector2, bulge: f64) -> Vec<Vector3> {
 /// 起点(start) → 终点(end)，生成2个坐标点的线段
 fn line_to_feature(line: &Line) -> Value {
     let color = color_to_hex(line.common.color);
-    make_feature(
+    make_feature_with_code(
         "LineString",
         json!([pt(line.start), pt(line.end)]),
         json!({"color": color}),
+        line.common.handle.value(),
     )
 }
 
@@ -324,7 +350,7 @@ fn line_to_feature(line: &Line) -> Value {
 fn point_to_feature(point: &Point) -> Value {
     let color = color_to_hex(point.common.color);
     let wcs = ocs_to_wcs(point.normal, point.location);
-    make_feature("Point", pt(wcs), json!({"color": color}))
+    make_feature_with_code("Point", pt(wcs), json!({"color": color}), point.common.handle.value())
 }
 
 /// Circle → LineString（闭合）
@@ -341,7 +367,7 @@ fn circle_to_feature(circle: &Circle) -> Value {
         let wcs_pt = center + Matrix3::arbitrary_axis(circle.normal) * local;
         coords.push(pt(wcs_pt));
     }
-    make_feature("LineString", Value::Array(coords), json!({"color": color}))
+    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), circle.common.handle.value())
 }
 
 /// Arc → LineString
@@ -363,20 +389,20 @@ fn arc_to_feature(arc: &Arc) -> Value {
         let wcs_pt = basis * (arc.center + local);
         coords.push(pt(wcs_pt));
     }
-    make_feature("LineString", Value::Array(coords), json!({"color": color}))
+    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), arc.common.handle.value())
 }
 
 /// Text → Point
 /// 文字实体转为点要素（插入点），文字内容、字号、旋转角度存入 properties
-/// 旋转角度从弧度转为度数输出
+/// 旋转角度：当 normal=(0,0,1) 时直接取 rotation；否则通过 OCS→WCS 投影修正
 fn text_to_feature(text: &Text) -> Value {
     let color = color_to_hex(text.common.color);
     let wcs = ocs_to_wcs(text.normal, text.insertion_point);
-    let rotation_deg = text.rotation.to_degrees();
+    let rotation_deg = calc_text_rotation(text.rotation, text.normal);
     // 解析 %%c/%%d/%%u 等特殊编码为纯文本
     let plain = acadrust::entities::mtext_format::parse_plain_text(&text.value);
     let display_text = plain.to_plain_text();
-    make_feature(
+    make_feature_with_code(
         "Point",
         pt(wcs),
         json!({
@@ -385,6 +411,7 @@ fn text_to_feature(text: &Text) -> Value {
             "fontSize": text.height,
             "rotation": rotation_deg
         }),
+        text.common.handle.value(),
     )
 }
 
@@ -394,12 +421,12 @@ fn text_to_feature(text: &Text) -> Value {
 fn mtext_to_feature(mtext: &MText) -> Value {
     let color = color_to_hex(mtext.common.color);
     let wcs = ocs_to_wcs(mtext.normal, mtext.insertion_point);
-    let rotation_deg = mtext.rotation.to_degrees();
+    let rotation_deg = calc_text_rotation(mtext.rotation, mtext.normal);
     // 解析 MText 格式化字符串（\A1;{\f...}等）为纯文本
     let doc = acadrust::entities::mtext_format::parse_mtext(&mtext.value, true);
     let display_text = doc.to_plain_text();
     let alignment = mtext.attachment_point as i32;
-    make_feature(
+    make_feature_with_code(
         "Point",
         pt(wcs),
         json!({
@@ -409,6 +436,7 @@ fn mtext_to_feature(mtext: &MText) -> Value {
             "rotation": rotation_deg,
             "align": alignment
         }),
+        mtext.common.handle.value(),
     )
 }
 
@@ -456,7 +484,7 @@ fn lwpolyline_to_feature(pl: &LwPolyline) -> Value {
         coords.push(coords[0].clone());
     }
 
-    make_feature("LineString", Value::Array(coords), json!({"color": color}))
+    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), pl.common.handle.value())
 }
 
 /// Polyline(3D) → LineString
@@ -464,7 +492,7 @@ fn lwpolyline_to_feature(pl: &LwPolyline) -> Value {
 fn polyline3d_to_feature(pl: &Polyline) -> Value {
     let color = color_to_hex(pl.common.color);
     let coords: Vec<Value> = pl.vertices.iter().map(|v| pt(v.location)).collect();
-    make_feature("LineString", Value::Array(coords), json!({"color": color}))
+    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), pl.common.handle.value())
 }
 
 /// Polyline(2D) → LineString
@@ -507,7 +535,7 @@ fn polyline2d_to_feature(pl: &Polyline2D) -> Value {
         coords.push(coords[0].clone());
     }
 
-    make_feature("LineString", Value::Array(coords), json!({"color": color}))
+    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), pl.common.handle.value())
 }
 
 /// Ellipse → LineString
@@ -550,7 +578,7 @@ fn ellipse_to_feature(ellipse: &Ellipse) -> Value {
         t += delta;
     }
 
-    make_feature("LineString", Value::Array(coords), json!({"color": color}))
+    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), ellipse.common.handle.value())
 }
 
 /// Spline → LineString
@@ -561,7 +589,7 @@ fn spline_to_feature(spline: &Spline) -> Value {
     let color = color_to_hex(spline.common.color);
     let pts = evaluate_nurbs(spline);
     let coords: Vec<Value> = pts.iter().map(|p| pt(*p)).collect();
-    make_feature("LineString", Value::Array(coords), json!({"color": color}))
+    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), spline.common.handle.value())
 }
 
 /// NURBS 曲线求值（de Boor 算法）
@@ -821,10 +849,11 @@ fn hatch_to_feature(hatch: &Hatch) -> Value {
         }
     }
 
-    make_feature(
+    make_feature_with_code(
         "MultiPolygon",
         Value::Array(polygon_coords),
         json!({"color": color}),
+        hatch.common.handle.value(),
     )
 }
 
@@ -845,7 +874,7 @@ fn solid_to_feature(solid: &Solid) -> Value {
     }
     ring.push(ring[0].clone()); // 闭合
 
-    make_feature("Polygon", json!([ring]), json!({"color": color}))
+    make_feature_with_code("Polygon", json!([ring]), json!({"color": color}), solid.common.handle.value())
 }
 
 /// Face3D → Polygon
@@ -863,7 +892,7 @@ fn face3d_to_feature(face: &Face3D) -> Value {
     }
     ring.push(ring[0].clone()); // 闭合
 
-    make_feature("Polygon", json!([ring]), json!({"color": color}))
+    make_feature_with_code("Polygon", json!([ring]), json!({"color": color}), face.common.handle.value())
 }
 
 /// Insert → 展开块引用后递归转换
@@ -1052,9 +1081,6 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
     struct TextInfo {
         position: Vector3,
         text: String,
-        height: f64,
-        rotation: f64,
-        color: String,
     }
 
     /// 线状实体的抽象：所有顶点 + 已生成的 GeoJSON Feature
@@ -1074,9 +1100,6 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
                 texts.push(TextInfo {
                     position: wcs,
                     text: plain.to_plain_text(),
-                    height: e.height,
-                    rotation: e.rotation.to_degrees(),
-                    color: color_to_hex(e.common.color),
                 });
             }
             EntityType::MText(e) => {
@@ -1085,9 +1108,6 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
                 texts.push(TextInfo {
                     position: wcs,
                     text: doc.to_plain_text(),
-                    height: e.height,
-                    rotation: e.rotation.to_degrees(),
-                    color: color_to_hex(e.common.color),
                 });
             }
             EntityType::Line(e) => {
@@ -1154,10 +1174,7 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
                 let (text_idx, text_info) = available_texts[pos];
                 if let Some(props) = feature.get_mut("properties") {
                     if let Some(obj) = props.as_object_mut() {
-                        obj.insert("label".into(), json!(text_info.text));
-                        obj.insert("labelHeight".into(), json!(text_info.height));
-                        obj.insert("labelRotation".into(), json!(text_info.rotation));
-                        obj.insert("labelDistance".into(), json!(min_dist));
+                        obj.insert("tunnelCode".into(), json!(text_info.text));
                     }
                 }
                 println!("[PositioningBaseline] Matched: text[{}] '{}' <-> line (dist={:.4})",
@@ -1166,20 +1183,6 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
             }
         }
         features.push(feature);
-    }
-
-    // 3. 输出未被关联的 Text 作为独立的 Point Feature
-    for (_, text_info) in &available_texts {
-        features.push(make_feature(
-            "Point",
-            pt(text_info.position),
-            json!({
-                "color": text_info.color,
-                "text": text_info.text,
-                "fontSize": text_info.height,
-                "rotation": text_info.rotation
-            }),
-        ));
     }
 
     println!(
@@ -1232,4 +1235,75 @@ fn distance_2d(a: Vector3, b: Vector3) -> f64 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
     (dx * dx + dy * dy).sqrt()
+}
+
+// ═════════════════════════════════════════════════════════════
+//  OCS 文字旋转角度修正
+// ═════════════════════════════════════════════════════════════
+
+/// 将 OCS 中的文字旋转角度转换为 WCS 显示角度
+///
+/// 当 normal=(0,0,1) 时 OCS 与 WCS 重合，直接返回弧度转度数。
+/// 当 normal≠(0,0,1) 时，需要将 OCS 中的角度方向向量投影到 WCS 平面后重新计算角度。
+/// 参考 Java 版本 calcOCSAngle 方法。
+fn calc_text_rotation(rotation_rad: f64, normal: Vector3) -> f64 {
+    let nx = normal.x;
+    let ny = normal.y;
+    let nz = normal.z;
+
+    // normal ≈ (0,0,±1) 时 OCS 与 WCS 重合，无需转换
+    if nx.abs() < 1.0 / 64.0 && ny.abs() < 1.0 / 64.0 {
+        return rotation_rad.to_degrees();
+    }
+
+    // 1. 构建 OCS 正交基 (Arbitrary Axis Algorithm)
+    let n = vec3_normalize(nx, ny, nz);
+    let ref_vec = if n.0.abs() < 1.0 / 64.0 && n.1.abs() < 1.0 / 64.0 {
+        (0.0, 1.0, 0.0) // N 近似平行 Y 轴，用 Y 做参考
+    } else {
+        (0.0, 0.0, 1.0) // 默认用 Z 做参考
+    };
+    let u = vec3_normalize_vec(vec3_cross(ref_vec, n));
+    let v = vec3_cross(n, u);
+
+    // 2. OCS 角度 → 单位方向向量
+    let theta = rotation_rad;
+    let v_ocs = (theta.cos(), theta.sin(), 0.0);
+
+    // 3. 将 OCS 方向向量转回 WCS: v_wcs = v_ocs.x * U + v_ocs.y * V
+    let v_wcs = (
+        v_ocs.0 * u.0 + v_ocs.1 * v.0,
+        v_ocs.0 * u.1 + v_ocs.1 * v.1,
+        v_ocs.0 * u.2 + v_ocs.1 * v.2,
+    );
+
+    // 4. 在 WCS XY 平面上计算角度
+    let mut angle_deg = v_wcs.1.atan2(v_wcs.0).to_degrees();
+    if angle_deg < 0.0 {
+        angle_deg += 360.0;
+    }
+    angle_deg
+}
+
+/// 3D 向量归一化
+fn vec3_normalize(x: f64, y: f64, z: f64) -> (f64, f64, f64) {
+    let len = (x * x + y * y + z * z).sqrt();
+    if len < 1e-12 {
+        return (0.0, 0.0, 0.0);
+    }
+    (x / len, y / len, z / len)
+}
+
+/// 3D 向量叉乘
+fn vec3_cross(a: (f64, f64, f64), b: (f64, f64, f64)) -> (f64, f64, f64) {
+    (
+        a.1 * b.2 - a.2 * b.1,
+        a.2 * b.0 - a.0 * b.2,
+        a.0 * b.1 - a.1 * b.0,
+    )
+}
+
+/// 3D 向量归一化（元组版本）
+fn vec3_normalize_vec(v: (f64, f64, f64)) -> (f64, f64, f64) {
+    vec3_normalize(v.0, v.1, v.2)
 }

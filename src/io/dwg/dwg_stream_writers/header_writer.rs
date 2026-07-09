@@ -622,7 +622,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     // R2007+ dimension extras
     if r2007_plus(v) {
         w.write_bit_double(0.0);       // DIMFXL
-        w.write_bit_double(0.7854);    // DIMJOGANG (default 45°)
+        w.write_bit_double(std::f64::consts::FRAC_PI_4);    // DIMJOGANG (default 45°)
         w.write_bit_short(0);          // DIMTFILL
         w.write_cm_color(&Color::ByBlock); // DIMTFILLCLR
     }

@@ -679,9 +679,12 @@ fn normalize_entity_for_comparison(entity: &mut EntityType) {
         EntityType::Tolerance(t) => {
             t.dimension_style_handle = None;
         }
-        // Shape: style handle
+        // Shape: style handle + shape_name (not stored in DWG binary)
         EntityType::Shape(s) => {
             s.style_handle = None;
+            // shape_name is only available in DXF (code 2); DWG stores shape_number only.
+            // Normalize to empty string for fair comparison.
+            s.shape_name = String::new();
         }
         // Leader: annotation handle
         EntityType::Leader(l) => {

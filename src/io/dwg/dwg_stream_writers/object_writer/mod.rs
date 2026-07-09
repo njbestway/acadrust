@@ -722,12 +722,13 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_raw_double(c.map_or(0.0, |cx| cx.offset[1])); // offset y
             self.writer.write_bit_double(c.map_or(1.0, |cx| cx.scale)); // scale
             self.writer.write_bit_double(c.map_or(0.0, |cx| cx.rotation)); // rotation
-            // Build DWG flags: 0x01=abs rot, 0x02=shape, 0x04=text
+            // Build DWG flags: 0x01=abs rot, 0x02=text, 0x04=shape
+            // (per de-facto DWG convention; OpenDesign spec has these reversed)
             let flags = if let Some(ref cx) = c {
                 let mut f: i16 = 0;
                 if cx.is_absolute_rotation() { f |= 0x01; }
-                if cx.is_shape() { f |= 0x02; }
-                if cx.is_text() { f |= 0x04; }
+                if cx.is_text() { f |= 0x02; }
+                if cx.is_shape() { f |= 0x04; }
                 f
             } else {
                 0
@@ -1355,7 +1356,7 @@ impl<'a> DwgObjectWriter<'a> {
             // DIMFXL BD 49
             self.writer.write_bit_double(ds.dimfxl);
             // DIMJOGANG BD 50 — clamp to valid range [5°..90°]
-            self.writer.write_bit_double(ds.dimjogang.clamp(0.0872665, 1.5708));
+            self.writer.write_bit_double(ds.dimjogang.clamp(5.0_f64.to_radians(), std::f64::consts::FRAC_PI_2));
             // DIMTFILL BS 69
             self.writer.write_bit_short(ds.dimtfill);
             // DIMTFILLCLR CMC 70
