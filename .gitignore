@@ -16,12 +16,14 @@ Cargo.lock
 Thumbs.db
 
 # Test files
-/test_files/
+test_tiles/*
+test_tiles_dxf/*
 /samples/
 
 *.dxf
 *.dxb
 *.dwg
+output_*.json
 
 
 # Documentation

@@ -39,6 +39,9 @@ ahash = "0.8"
 # Encoding
 encoding_rs = "0.8"
 
+# Protobuf (MVT vector tiles)
+prost = "0.13"
+
 # Serialization (optional)
 serde = { version = "1", features = ["derive"], optional = true }
 
