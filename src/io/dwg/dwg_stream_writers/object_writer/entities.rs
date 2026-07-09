@@ -901,11 +901,15 @@ impl<'a> DwgObjectWriter<'a> {
             }
         }
 
-        // Widths
+        // Widths — 压缩编码：start==end 时写负值（1个 BD），否则写2个 BD
         if has_widths {
             for v in &e.vertices {
-                self.writer.write_bit_double(v.start_width);
-                self.writer.write_bit_double(v.end_width);
+                if v.start_width != 0.0 && v.end_width == v.start_width {
+                    self.writer.write_bit_double(-v.start_width);
+                } else {
+                    self.writer.write_bit_double(v.start_width);
+                    self.writer.write_bit_double(v.end_width);
+                }
             }
         }
 

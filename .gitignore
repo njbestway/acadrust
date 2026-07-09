@@ -19,6 +19,7 @@ Thumbs.db
 test_tiles/*
 test_tiles_dxf/*
 /samples/
+output/*
 
 *.dxf
 *.dxb

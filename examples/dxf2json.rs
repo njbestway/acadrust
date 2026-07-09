@@ -40,7 +40,6 @@ use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::time::SystemTime;
 
 // ── 弧线离散化最小角度步长（弧度），6° ──
 const SMALLEST_ANGLE: f64 = 6.0 * std::f64::consts::PI / 180.0;
@@ -50,7 +49,7 @@ fn main() -> acadrust::Result<()> {
     let input_file = if args.len() > 1 {
         args[1].clone()
     } else {
-        "E:/home/dxf-gis/test.dxf".to_string()
+        "E:/home/dxf-gis/tt.dwg".to_string()
     };
 
     // ── 1. 根据文件扩展名自动选择 DXF 或 DWG 读取器 ──
@@ -75,20 +74,53 @@ fn main() -> acadrust::Result<()> {
         doc.entities().count()
     );
 
-    // ── 2. 收集所有图层名 ──
+    // ── 2. 预处理：展开所有 Insert（块引用）实体 ──
+    //
+    // 块内的实体可能定义在 layer "0"（继承 Insert 的图层）或特定图层（如 AXIS_TEXT）。
+    // explode 后这些实体保留各自的图层，但不在文档顶层实体列表中，
+    // 因此需要预先展开并按图层归集，才能让 _TEXT 等图层正确输出。
+    //
+    // Insert 的 attributes（ATTRIB）携带实际属性值和 WCS 坐标，
+    // 也需要按图层归集。
+    let mut exploded_by_layer: std::collections::HashMap<String, Vec<EntityType>> =
+        std::collections::HashMap::new();
+
+    for entity in doc.entities() {
+        if let EntityType::Insert(ins) = entity {
+            // 展开块定义内的子实体
+            let exploded = ins.explode_from_document(&doc);
+            for sub_entity in exploded {
+                let layer = sub_entity.common().layer.clone();
+                exploded_by_layer
+                    .entry(layer)
+                    .or_default()
+                    .push(sub_entity);
+            }
+            // 收集 Insert 附带的属性实体（ATTRIB）
+            for attrib in &ins.attributes {
+                let layer = attrib.common.layer.clone();
+                exploded_by_layer
+                    .entry(layer)
+                    .or_default()
+                    .push(EntityType::AttributeEntity(attrib.clone()));
+            }
+        }
+    }
+
+    let exploded_by_layer = exploded_by_layer; // immutable from here
+
+    // ── 3. 收集所有图层名 ──
     let layer_names: Vec<String> = doc.layers.iter().map(|l| l.name.clone()).collect();
 
-    let mut all_layers = serde_json::Map::new();
+    // ── 4. 创建 output 目录 ──
+    let output_dir = "output";
+    fs::create_dir_all(output_dir)?;
 
-    // ── 3. 按图层遍历，收集每层的 GeoJSON features ──
+    let mut layer_count = 0u32;
+
+    // ── 5. 按图层遍历，每个图层输出一个独立的 JSON 文件 ──
     for layer_name in &layer_names {
-
-        //for debug check
-        if *layer_name != "定位基准线" {
-            continue;
-        }
-
-        let features = collect_layer_features(&doc, layer_name);
+        let features = collect_layer_features(&doc, layer_name, &exploded_by_layer);
         if features.is_empty() {
             continue;
         }
@@ -98,7 +130,7 @@ fn main() -> acadrust::Result<()> {
         let visible = layer.map(|l| !l.flags.off).unwrap_or(true);
         let is_base_layer = layer_name == "定位基准线";
 
-        // 构建 FeatureCollection
+        // 构建 FeatureCollection（直接作为顶层对象，不再嵌套外层 {}）
         let mut fc = Map::new();
         fc.insert("type".into(), json!("FeatureCollection"));
         fc.insert("layerName".into(), json!(layer_name));
@@ -118,34 +150,33 @@ fn main() -> acadrust::Result<()> {
         let filtered: Vec<Value> = features.into_iter().filter(|f| !has_empty_coords(f)).collect();
         fc.insert("features".into(), Value::Array(filtered));
 
-        all_layers.insert(layer_name.clone(), Value::Object(fc));
+        // 输出: output/{layer_name}.json
+        let safe_name = layer_name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        let output_file = format!("{}/{}.json", output_dir, safe_name);
+        fs::write(
+            &output_file,
+            serde_json::to_string_pretty(&Value::Object(fc)).unwrap(),
+        )?;
+        layer_count += 1;
+        println!("Written: {}", output_file);
     }
 
-    // ── 4. 输出到带时间戳的JSON文件 ──
-    let output = Value::Object(all_layers);
-
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
-    let ts = now.as_secs();
-    let output_file = format!("output_{}.json", ts);
-    fs::write(
-        &output_file,
-        serde_json::to_string_pretty(&output).unwrap(),
-    )
-    .unwrap();
-    println!("Output written to: {}", output_file);
+    println!("Output: {} layer files in {}/", layer_count, output_dir);
 
     Ok(())
 }
 
 /// 收集指定图层的所有 GeoJSON Feature
 ///
-/// 遍历文档中属于该图层的所有实体，按类型分发到对应的转换函数。
-/// Insert（块引用）会展开后递归转换。
+/// 遍历文档中属于该图层的顶层实体 + 预展开的块引用子实体，
+/// 按类型分发到对应的转换函数。
 ///
 /// 「定位基准线」图层走特殊逻辑：将 Text 关联到最近的 Line。
-fn collect_layer_features(doc: &CadDocument, layer_name: &str) -> Vec<Value> {
+fn collect_layer_features(
+    doc: &CadDocument,
+    layer_name: &str,
+    exploded_by_layer: &std::collections::HashMap<String, Vec<EntityType>>,
+) -> Vec<Value> {
     // 定位基准线：走 Text-Line 关联逻辑
     if layer_name == "定位基准线" {
         return collect_positioning_baseline_features(doc, layer_name);
@@ -153,47 +184,52 @@ fn collect_layer_features(doc: &CadDocument, layer_name: &str) -> Vec<Value> {
 
     let mut features = Vec::new();
 
+    // 1. 顶层实体（跳过 Insert 和 AttributeDefinition）
+    //    Insert 已在 exploded_by_layer 中展开；
+    //    ATTDEF 是块内模板，坐标为块局部坐标，不应直接输出。
     for entity in doc.entities().filter(|e| e.common().layer == layer_name) {
-        match entity {
-            // Line → LineString（起点→终点）
-            EntityType::Line(e) => features.push(line_to_feature(e)),
-            // Point → Point（单个坐标点）
-            EntityType::Point(e) => features.push(point_to_feature(e)),
-            // Circle → LineString（60段离散化闭合圆）
-            EntityType::Circle(e) => features.push(circle_to_feature(e)),
-            // Arc → LineString（按6°步长离散化弧线）
-            EntityType::Arc(e) => features.push(arc_to_feature(e)),
-            // Text → Point（插入点 + 文字属性）
-            EntityType::Text(e) => features.push(text_to_feature(e)),
-            // MText → Point（插入点 + 解析后的纯文本属性）
-            EntityType::MText(e) => features.push(mtext_to_feature(e)),
-            // LwPolyline → LineString（含bulge弧段离散化 + OCS→WCS）
-            EntityType::LwPolyline(e) => features.push(lwpolyline_to_feature(e)),
-            // Polyline(3D) → LineString（直接3D顶点）
-            EntityType::Polyline(e) => features.push(polyline3d_to_feature(e)),
-            // Polyline(2D) → LineString（同LwPolyline处理逻辑）
-            EntityType::Polyline2D(e) => features.push(polyline2d_to_feature(e)),
-            // Ellipse → LineString（参数方程离散化）
-            EntityType::Ellipse(e) => features.push(ellipse_to_feature(e)),
-            // Spline → LineString（NURBS de Boor 求值）
-            EntityType::Spline(e) => features.push(spline_to_feature(e)),
-            // Hatch → MultiPolygon（边界路径转多边形环）
-            EntityType::Hatch(e) => features.push(hatch_to_feature(e)),
-            // Solid → Polygon（3或4角点）
-            EntityType::Solid(e) => features.push(solid_to_feature(e)),
-            // Face3D → Polygon（3或4角点）
-            EntityType::Face3D(e) => features.push(face3d_to_feature(e)),
-            // Insert → 展开块引用后递归转换所有子实体
-            EntityType::Insert(e) => {
-                let mut insert_features = insert_to_features(e, doc);
-                features.append(&mut insert_features);
+        if matches!(entity, EntityType::Insert(_) | EntityType::AttributeDefinition(_)) {
+            continue;
+        }
+        if let Some(fs) = entity_to_features(entity) {
+            features.extend(fs);
+        }
+    }
+
+    // 2. 预展开的块引用子实体
+    if let Some(exploded) = exploded_by_layer.get(layer_name) {
+        for entity in exploded {
+            if let Some(fs) = entity_to_features(entity) {
+                features.extend(fs);
             }
-            // 其他实体类型暂时跳过
-            _ => {}
         }
     }
 
     features
+}
+
+/// 将单个实体转为 GeoJSON Feature 列表，不支持的类型返回空 Vec。
+/// LwPolyline 含箭头段时会产生多个 Feature（LineString + Polygon）。
+fn entity_to_features(entity: &EntityType) -> Option<Vec<Value>> {
+    let features = match entity {
+        EntityType::Line(e) => vec![line_to_feature(e)],
+        EntityType::Point(e) => vec![point_to_feature(e)],
+        EntityType::Circle(e) => vec![circle_to_feature(e)],
+        EntityType::Arc(e) => vec![arc_to_feature(e)],
+        EntityType::Text(e) => vec![text_to_feature(e)],
+        EntityType::MText(e) => vec![mtext_to_feature(e)],
+        EntityType::AttributeEntity(e) => vec![attrib_to_feature(e)],
+        EntityType::LwPolyline(e) => lwpolyline_to_features(e),
+        EntityType::Polyline(e) => vec![polyline3d_to_feature(e)],
+        EntityType::Polyline2D(e) => vec![polyline2d_to_feature(e)],
+        EntityType::Ellipse(e) => vec![ellipse_to_feature(e)],
+        EntityType::Spline(e) => vec![spline_to_feature(e)],
+        EntityType::Hatch(e) => vec![hatch_to_feature(e)],
+        EntityType::Solid(e) => vec![solid_to_feature(e)],
+        EntityType::Face3D(e) => vec![face3d_to_feature(e)],
+        _ => return None,
+    };
+    Some(features)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -397,11 +433,31 @@ fn arc_to_feature(arc: &Arc) -> Value {
 /// 旋转角度：当 normal=(0,0,1) 时直接取 rotation；否则通过 OCS→WCS 投影修正
 fn text_to_feature(text: &Text) -> Value {
     let color = color_to_hex(text.common.color);
-    let wcs = ocs_to_wcs(text.normal, text.insertion_point);
+    // DXF 中当文字有对齐方式（非 Left/Baseline）时，
+    // alignment_point 才是真正的定位参考点，insertion_point 仅为左下角基准。
+    // 优先使用 alignment_point，否则回退到 insertion_point。
+    let ref_point = text.alignment_point.unwrap_or(text.insertion_point);
+    let wcs = ocs_to_wcs(text.normal, ref_point);
     let rotation_deg = calc_text_rotation(text.rotation, text.normal);
     // 解析 %%c/%%d/%%u 等特殊编码为纯文本
     let plain = acadrust::entities::mtext_format::parse_plain_text(&text.value);
     let display_text = plain.to_plain_text();
+
+    // 对齐方式映射：水平 + 垂直
+    let h_align = match text.horizontal_alignment {
+        acadrust::entities::text::TextHorizontalAlignment::Left => "left",
+        acadrust::entities::text::TextHorizontalAlignment::Center => "center",
+        acadrust::entities::text::TextHorizontalAlignment::Right => "right",
+        acadrust::entities::text::TextHorizontalAlignment::Middle => "middle",
+        _ => "left",
+    };
+    let v_align = match text.vertical_alignment {
+        acadrust::entities::text::TextVerticalAlignment::Baseline => "baseline",
+        acadrust::entities::text::TextVerticalAlignment::Bottom => "bottom",
+        acadrust::entities::text::TextVerticalAlignment::Middle => "middle",
+        acadrust::entities::text::TextVerticalAlignment::Top => "top",
+    };
+
     make_feature_with_code(
         "Point",
         pt(wcs),
@@ -409,7 +465,9 @@ fn text_to_feature(text: &Text) -> Value {
             "color": color,
             "text": display_text,
             "fontSize": text.height,
-            "rotation": rotation_deg
+            "rotation": rotation_deg,
+            "textAlign": h_align,
+            "textBaseline": v_align
         }),
         text.common.handle.value(),
     )
@@ -440,51 +498,194 @@ fn mtext_to_feature(mtext: &MText) -> Value {
     )
 }
 
-/// LwPolyline → LineString
-/// 轻量多段线，顶点为2D坐标 + bulge（凸度）
-/// - bulge 对应角度 >= 7° 时离散化为弧线段
-/// - 所有顶点通过 OCS→WCS 转换
-/// - 闭合多段线自动首尾相连
-fn lwpolyline_to_feature(pl: &LwPolyline) -> Value {
+/// AttributeEntity → Point
+/// 块属性实例（插入块后的实际属性值），输出为点要素。
+/// 文字内容取 value（实际属性值）。
+/// 当对齐方式非 Left/Baseline 时，使用 alignment_point 作为定位参考点。
+fn attrib_to_feature(attrib: &AttributeEntity) -> Value {
+    let color = color_to_hex(attrib.common.color);
+    // 对齐方式非默认时，alignment_point 才是真正的定位参考点
+    let is_default_align = matches!(
+        (attrib.horizontal_alignment, attrib.vertical_alignment),
+        (acadrust::entities::attribute_definition::HorizontalAlignment::Left,
+         acadrust::entities::attribute_definition::VerticalAlignment::Baseline)
+    );
+    let ref_point = if is_default_align {
+        attrib.insertion_point
+    } else {
+        attrib.alignment_point
+    };
+    let wcs = ocs_to_wcs(attrib.normal, ref_point);
+    let rotation_deg = calc_text_rotation(attrib.rotation, attrib.normal);
+
+    let h_align = match attrib.horizontal_alignment {
+        acadrust::entities::attribute_definition::HorizontalAlignment::Left => "left",
+        acadrust::entities::attribute_definition::HorizontalAlignment::Center => "center",
+        acadrust::entities::attribute_definition::HorizontalAlignment::Right => "right",
+        acadrust::entities::attribute_definition::HorizontalAlignment::Middle => "middle",
+        _ => "left",
+    };
+    let v_align = match attrib.vertical_alignment {
+        acadrust::entities::attribute_definition::VerticalAlignment::Baseline => "baseline",
+        acadrust::entities::attribute_definition::VerticalAlignment::Bottom => "bottom",
+        acadrust::entities::attribute_definition::VerticalAlignment::Middle => "middle",
+        acadrust::entities::attribute_definition::VerticalAlignment::Top => "top",
+    };
+
+    make_feature_with_code(
+        "Point",
+        pt(wcs),
+        json!({
+            "color": color,
+            "text": attrib.value,
+            "fontSize": attrib.height,
+            "rotation": rotation_deg,
+            "textAlign": h_align,
+            "textBaseline": v_align
+        }),
+        attrib.common.handle.value(),
+    )
+}
+
+/// LwPolyline → 多个 GeoJSON Feature
+///
+/// 1. 原始 LineString（含 widths 元数据）
+/// 2. 箭头段转换为闭合填充 Polygon（宽渐变段）
+fn lwpolyline_to_features(pl: &LwPolyline) -> Vec<Value> {
     let color = color_to_hex(pl.common.color);
-    let mut coords: Vec<Value> = Vec::new();
+    let mut features = Vec::new();
     let verts = &pl.vertices;
     let n = verts.len();
     if n == 0 {
-        return make_feature("LineString", Value::Array(vec![]), json!({"color": color}));
+        features.push(make_feature("LineString", Value::Array(vec![]), json!({"color": color})));
+        return features;
     }
 
     let normal = pl.normal;
     let basis = Matrix3::arbitrary_axis(normal);
 
+    // ── 1. 生成原始 LineString ──
+    let mut coords: Vec<Value> = Vec::new();
     for i in 0..n {
         let v = &verts[i];
         let start = v.location;
         let bulge = v.bulge;
 
-        // 判断是否为弧线段：bulge对应角度 >= 7° 且不是最后一个顶点
         if 4.0 * bulge.abs().atan() / std::f64::consts::PI * 180.0 >= 7.0 && i < n - 1 {
             let next = &verts[(i + 1) % n];
             let end = next.location;
             let arc_pts = tessellate_bulge(start, end, bulge);
-            // 2D OCS 点转 3D 后通过基矩阵转 WCS
             for p in &arc_pts {
                 let wcs_pt = basis * Vector3::new(p.x, p.y, pl.elevation);
                 coords.push(pt(wcs_pt));
             }
         } else {
-            // 直线段
             let wcs_pt = basis * Vector3::new(start.x, start.y, pl.elevation);
             coords.push(pt(wcs_pt));
         }
     }
 
-    // 闭合多段线：末尾追加首点
     if pl.is_closed && coords.len() > 1 {
         coords.push(coords[0].clone());
     }
 
-    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), pl.common.handle.value())
+    let mut props = Map::new();
+    props.insert("color".into(), json!(color));
+
+    let has_widths = verts.iter().any(|v| v.start_width != 0.0 || v.end_width != 0.0);
+    if has_widths {
+        let widths: Vec<Value> = verts.iter()
+            .map(|v| json!([v.start_width, v.end_width]))
+            .collect();
+        props.insert("widths".into(), Value::Array(widths));
+    }
+    if pl.constant_width != 0.0 {
+        props.insert("constantWidth".into(), json!(pl.constant_width));
+    }
+
+    features.push(make_feature_with_code(
+        "LineString", Value::Array(coords), Value::Object(props), pl.common.handle.value(),
+    ));
+
+    // ── 2. 箭头段 → 闭合填充 Polygon ──
+    // 检测宽度渐变段，生成三角形多边形
+    //
+    // 三角形从宽端到窄端自然收尖：
+    //   底边在宽端（宽度>0），尖端在窄端（宽度=0）
+    //
+    // - sw > ew：宽端在 v[i]（p0），底边在 p0，尖端在 p1（v[i+1]）
+    // - sw < ew：宽端在 v[i+1]（p1），底边在 p1，尖端在 p0（v[i]）
+    for i in 0..n.saturating_sub(1) {
+        let v0 = &verts[i];
+        let v1 = &verts[i + 1];
+        let sw = v0.start_width;
+        let ew = v0.end_width;
+    
+        // 跳过等宽段和零宽段
+        if (sw - ew).abs() < 1e-6 || (sw == 0.0 && ew == 0.0) {
+            continue;
+        }
+    
+        // 计算 OCS 中的线段方向
+        let p0 = v0.location; // Vector2
+        let p1 = v1.location;
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        let seg_len = (dx * dx + dy * dy).sqrt();
+        if seg_len < 1e-10 {
+            continue;
+        }
+    
+        // 垂直方向（单位向量）
+        let nx = -dy / seg_len;
+        let ny = dx / seg_len;
+    
+        // 根据宽度渐变方向生成三角形
+        // 底边在宽端，尖端在窄端，三角形从宽到窄自然收尖
+        let corners_2d: Vec<Vector2> = if sw > ew {
+            // sw > ew：宽端在 v[i]（p0），底边在 p0，尖端在 p1
+            let half_sw = sw / 2.0;
+            vec![
+                Vector2::new(p0.x + half_sw * nx, p0.y + half_sw * ny), // 底边+perp
+                Vector2::new(p0.x - half_sw * nx, p0.y - half_sw * ny), // 底边-perp
+                p1, // 尖端（窄端）
+            ]
+        } else {
+            // sw < ew：宽端在 v[i+1]（p1），底边在 p1，尖端在 p0
+            let half_ew = ew / 2.0;
+            vec![
+                Vector2::new(p1.x + half_ew * nx, p1.y + half_ew * ny), // 底边+perp
+                Vector2::new(p1.x - half_ew * nx, p1.y - half_ew * ny), // 底边-perp
+                p0, // 尖端（窄端）
+            ]
+        };
+
+        // OCS 2D → WCS 3D
+        let corners_wcs: Vec<Vector3> = corners_2d.iter()
+            .map(|c| basis * Vector3::new(c.x, c.y, pl.elevation))
+            .collect();
+
+        // 构建闭合 Polygon 坐标
+        let mut ring: Vec<Value> = corners_wcs.iter().map(|c| pt(*c)).collect();
+        ring.push(pt(corners_wcs[0])); // 闭合
+
+        let arrow_props = json!({
+            "color": color,
+            "arrow": true,
+            "segment": i,
+            "startWidth": sw,
+            "endWidth": ew,
+        });
+
+        features.push(make_feature_with_code(
+            "Polygon",
+            json!([ring]),
+            arrow_props,
+            pl.common.handle.value(),
+        ));
+    }
+
+    features
 }
 
 /// Polyline(3D) → LineString
@@ -860,17 +1061,27 @@ fn hatch_to_feature(hatch: &Hatch) -> Value {
 /// Solid → Polygon
 /// 2D 填充实体，3或4个角点构成闭合多边形
 /// 第3角和第4角重合时为三角形
+///
+/// 注意：DXF 规范中 Solid 的顶点存储顺序不是环绕顺序：
+///   first_corner=角点1, second_corner=角点2,
+///   third_corner=角点4（对角）, fourth_corner=角点3
+/// 正确的多边形环绕顺序为: p1 → p2 → p4 → p3
 fn solid_to_feature(solid: &Solid) -> Value {
     let color = color_to_hex(solid.common.color);
     let basis = Matrix3::arbitrary_axis(solid.normal);
     let p1 = basis * solid.first_corner;
     let p2 = basis * solid.second_corner;
-    let p3 = basis * solid.third_corner;
-    let p4 = basis * solid.fourth_corner;
+    let p3 = basis * solid.third_corner;   // DXF 中这是角点4（对角位置）
+    let p4 = basis * solid.fourth_corner;  // DXF 中这是角点3
 
-    let mut ring = vec![pt(p1), pt(p2), pt(p3)];
+    let mut ring = vec![pt(p1), pt(p2)];
     if !solid.is_triangle() {
+        // 四边形：环绕顺序 p1 → p2 → p4(角点3) → p3(角点4)
         ring.push(pt(p4));
+        ring.push(pt(p3));
+    } else {
+        // 三角形：third_corner 和 fourth_corner 重合
+        ring.push(pt(p3));
     }
     ring.push(ring[0].clone()); // 闭合
 
@@ -893,39 +1104,6 @@ fn face3d_to_feature(face: &Face3D) -> Value {
     ring.push(ring[0].clone()); // 闭合
 
     make_feature_with_code("Polygon", json!([ring]), json!({"color": color}), face.common.handle.value())
-}
-
-/// Insert → 展开块引用后递归转换
-///
-/// 使用 explode_from_document() 将块引用展开为实际坐标的子实体，
-/// 然后对每个子实体递归调用对应的转换函数。
-/// 支持嵌套块引用（explode_from_document 内部已处理递归展开）。
-fn insert_to_features(insert: &Insert, doc: &CadDocument) -> Vec<Value> {
-    let mut features = Vec::new();
-    let exploded = insert.explode_from_document(doc);
-
-    for entity in &exploded {
-        match entity {
-            EntityType::Line(e) => features.push(line_to_feature(e)),
-            EntityType::Point(e) => features.push(point_to_feature(e)),
-            EntityType::Circle(e) => features.push(circle_to_feature(e)),
-            EntityType::Arc(e) => features.push(arc_to_feature(e)),
-            EntityType::Text(e) => features.push(text_to_feature(e)),
-            EntityType::MText(e) => features.push(mtext_to_feature(e)),
-            EntityType::LwPolyline(e) => features.push(lwpolyline_to_feature(e)),
-            EntityType::Polyline(e) => features.push(polyline3d_to_feature(e)),
-            EntityType::Polyline2D(e) => features.push(polyline2d_to_feature(e)),
-            EntityType::Ellipse(e) => features.push(ellipse_to_feature(e)),
-            EntityType::Spline(e) => features.push(spline_to_feature(e)),
-            EntityType::Hatch(e) => features.push(hatch_to_feature(e)),
-            EntityType::Solid(e) => features.push(solid_to_feature(e)),
-            EntityType::Face3D(e) => features.push(face3d_to_feature(e)),
-            // 嵌套 Insert 已由 explode_from_document 处理
-            _ => {}
-        }
-    }
-
-    features
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1083,10 +1261,11 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
         text: String,
     }
 
-    /// 线状实体的抽象：所有顶点 + 已生成的 GeoJSON Feature
+    /// 线状实体的抽象：所有顶点 + 已生成的 GeoJSON Feature 列表
+    /// features[0] 为主几何体（LineString），后续为箭头 Polygon 等附加几何
     struct LineEntity {
         vertices: Vec<Vector3>,
-        feature: Value,
+        features: Vec<Value>,
     }
 
     let mut texts: Vec<TextInfo> = Vec::new();
@@ -1095,7 +1274,8 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
     for entity in doc.entities().filter(|e| e.common().layer == layer_name) {
         match entity {
             EntityType::Text(e) => {
-                let wcs = ocs_to_wcs(e.normal, e.insertion_point);
+                let ref_point = e.alignment_point.unwrap_or(e.insertion_point);
+                let wcs = ocs_to_wcs(e.normal, ref_point);
                 let plain = acadrust::entities::mtext_format::parse_plain_text(&e.value);
                 texts.push(TextInfo {
                     position: wcs,
@@ -1114,16 +1294,16 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
                 let feature = line_to_feature(e);
                 line_entities.push(LineEntity {
                     vertices: vec![e.start, e.end],
-                    feature,
+                    features: vec![feature],
                 });
             }
             EntityType::LwPolyline(e) => {
-                let feature = lwpolyline_to_feature(e);
+                let features = lwpolyline_to_features(e);
                 let basis = Matrix3::arbitrary_axis(e.normal);
                 let vertices: Vec<Vector3> = e.vertices.iter().map(|v| {
                     basis * Vector3::new(v.location.x, v.location.y, e.elevation)
                 }).collect();
-                line_entities.push(LineEntity { vertices, feature });
+                line_entities.push(LineEntity { vertices, features });
             }
             EntityType::Polyline2D(e) => {
                 let feature = polyline2d_to_feature(e);
@@ -1131,7 +1311,7 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
                 let vertices: Vec<Vector3> = e.vertices.iter().map(|v| {
                     basis * Vector3::new(v.location.x, v.location.y, e.elevation)
                 }).collect();
-                line_entities.push(LineEntity { vertices, feature });
+                line_entities.push(LineEntity { vertices, features: vec![feature] });
             }
             _ => {} // 其他实体类型在定位基准线图层中忽略
         }
@@ -1167,14 +1347,16 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
             // Line 只有 2 个顶点，windows(2) 已经覆盖
         }
 
-        // 克隆已有 Feature，仅在阈值内才注入关联的 Text 属性
-        let mut feature = le.feature.clone();
+        // 克隆所有 Feature，仅在阈值内才向主几何体（第一个 Feature）注入关联 Text 属性
+        let mut all_features = le.features.clone();
         if let Some(pos) = nearest_pos {
             if min_dist < MATCH_THRESHOLD {
                 let (text_idx, text_info) = available_texts[pos];
-                if let Some(props) = feature.get_mut("properties") {
-                    if let Some(obj) = props.as_object_mut() {
-                        obj.insert("tunnelCode".into(), json!(text_info.text));
+                if let Some(main_feature) = all_features.first_mut() {
+                    if let Some(props) = main_feature.get_mut("properties") {
+                        if let Some(obj) = props.as_object_mut() {
+                            obj.insert("tunnelCode".into(), json!(text_info.text));
+                        }
                     }
                 }
                 println!("[PositioningBaseline] Matched: text[{}] '{}' <-> line (dist={:.4})",
@@ -1182,7 +1364,7 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
                 available_texts.remove(pos);
             }
         }
-        features.push(feature);
+        features.extend(all_features);
     }
 
     println!(

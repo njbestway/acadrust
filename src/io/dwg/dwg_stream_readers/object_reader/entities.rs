@@ -516,13 +516,24 @@ pub fn read_lwpolyline(reader: &mut DwgMergedReader, version: DwgVersion) -> LwP
     }
 
     // Read widths
+    // DWG 压缩编码：如果 start_width 为负值，表示 start == end == |start_width|，
+    // 此时不存储 end_width；否则存储两个独立值。
+    // 注意：AutoCAD 生成的 DWG 文件中可能包含“幽灵”宽度数据（has_widths=true
+    // 但实际宽度在 CAD 中显示为 0）。这可能是 AutoCAD 内部使用的默认值或模板。
     let mut start_widths = vec![0.0f64; num_pts as usize];
     let mut end_widths = vec![0.0f64; num_pts as usize];
     if has_widths {
         for i in 0..num_widths as usize {
             if i < start_widths.len() {
-                start_widths[i] = reader.read_bit_double();
-                end_widths[i] = reader.read_bit_double();
+                let sw = reader.read_bit_double();
+                if sw < 0.0 {
+                    // 负值压缩：start == end == |sw|
+                    start_widths[i] = -sw;
+                    end_widths[i] = -sw;
+                } else {
+                    start_widths[i] = sw;
+                    end_widths[i] = reader.read_bit_double();
+                }
             }
         }
     }
