@@ -18,8 +18,9 @@ Thumbs.db
 # Test files
 test_tiles/*
 test_tiles_dxf/*
+test_color.json/*
 /samples/
-output/*
+output*/*
 
 *.dxf
 *.dxb

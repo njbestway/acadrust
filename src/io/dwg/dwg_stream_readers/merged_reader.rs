@@ -61,6 +61,8 @@ pub struct DwgMergedReader {
     /// For R2010+: equals total_data_bits - handle_bits.
     /// For pre-R2007: equals handle_start_bits from the constructor.
     handle_start_bit: i64,
+    /// Text encoding for non-Unicode strings (pre-R2007 DWG code page).
+    encoding: &'static encoding_rs::Encoding,
 }
 
 impl DwgMergedReader {
@@ -82,6 +84,18 @@ impl DwgMergedReader {
         dxf_version: DxfVersion,
         handle_start_bits: i64,
     ) -> Self {
+        Self::with_encoding(data, dxf_version, handle_start_bits, encoding_rs::WINDOWS_1252)
+    }
+
+    /// Create a merged reader with a specific text encoding.
+    ///
+    /// Use this for DWG files with non-Latin code pages (e.g. GBK for Chinese).
+    pub fn with_encoding(
+        data: Vec<u8>,
+        dxf_version: DxfVersion,
+        handle_start_bits: i64,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Self {
         let dwg = DwgVersion::from_dxf_version(dxf_version)
             .unwrap_or(DwgVersion::AC15);
 
@@ -94,7 +108,7 @@ impl DwgMergedReader {
         match mode {
             MergeMode::TwoStream => {
                 // Two-stream: main = data[:handle_start], handle = data[handle_start:]
-                let main = DwgBitReader::new(data.clone(), dwg, dxf_version);
+                let main = DwgBitReader::with_encoding(data.clone(), dwg, dxf_version, encoding);
 
                 // Create handle reader from remaining bytes
                 let handle_start_byte = (handle_start_bits / 8) as usize;
@@ -103,7 +117,7 @@ impl DwgMergedReader {
                 } else {
                     Vec::new()
                 };
-                let handle = DwgBitReader::new(handle_data, dwg, dxf_version);
+                let handle = DwgBitReader::with_encoding(handle_data, dwg, dxf_version, encoding);
 
                 DwgMergedReader {
                     main,
@@ -115,15 +129,12 @@ impl DwgMergedReader {
                     handle_bits: 0,
                     ref_handle: 0,
                     handle_start_bit: handle_start_bits,
+                    encoding,
                 }
             }
             MergeMode::ThreeStream => {
                 // Three-stream: lazy setup.
-                // Don't read BL or set up text/handle readers here.
-                // The BL is not at position 0 — it comes after the type code.
-                // Text and handle readers will be set up later via
-                // setup_text_and_handle() after the caller reads the BL.
-                let main_reader = DwgBitReader::new(data.clone(), dwg, dxf_version);
+                let main_reader = DwgBitReader::with_encoding(data.clone(), dwg, dxf_version, encoding);
 
                 DwgMergedReader {
                     main: main_reader,
@@ -134,7 +145,8 @@ impl DwgMergedReader {
                     raw_data: Some(data),
                     handle_bits: 0,
                     ref_handle: 0,
-                    handle_start_bit: 0,  // set later when RL is known
+                    handle_start_bit: 0,
+                    encoding,
                 }
             }
         }
@@ -155,6 +167,7 @@ impl DwgMergedReader {
         } else {
             MergeMode::TwoStream
         };
+        let encoding = main.encoding();
         DwgMergedReader {
             main,
             text,
@@ -165,6 +178,7 @@ impl DwgMergedReader {
             handle_bits: 0,
             ref_handle: 0,
             handle_start_bit: 0,
+            encoding,
         }
     }
 
@@ -184,13 +198,13 @@ impl DwgMergedReader {
 
             // Text reader — the flag bit is at RL − 1 (per-object convention,
             // matching the classes reader and object reader).
-            let mut text_reader = DwgBitReader::new(data.clone(), dwg, self.dxf_version);
+            let mut text_reader = DwgBitReader::with_encoding(data.clone(), dwg, self.dxf_version, self.encoding);
             text_reader.set_position_by_flag(total_size_bits - 1);
             self.text = Some(text_reader);
 
             // Handle reader — starts at the next byte boundary after the flag bit.
             let handle_start = ((total_size_bits + 1 + 7) / 8) * 8;
-            let mut handle_reader = DwgBitReader::new(data.clone(), dwg, self.dxf_version);
+            let mut handle_reader = DwgBitReader::with_encoding(data.clone(), dwg, self.dxf_version, self.encoding);
             handle_reader.set_position_in_bits(handle_start);
             self.handle = Some(handle_reader);
         }

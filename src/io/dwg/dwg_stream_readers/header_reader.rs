@@ -60,13 +60,10 @@ struct SectionReader {
 }
 
 impl SectionReader {
-    fn new(data: Vec<u8>, version: DxfVersion) -> Result<Self> {
+    fn new(data: Vec<u8>, version: DxfVersion, encoding: &'static encoding_rs::Encoding) -> Result<Self> {
         if version >= DxfVersion::AC1021 {
             // R2007+: three-stream merge.
-            // The section data starts with an RL (total size in bits).
-            // Create a DwgMergedReader in ThreeStream mode and set up
-            // text/handle sub-streams from the RL.
-            let mut merged = DwgMergedReader::new(data, version, 0);
+            let mut merged = DwgMergedReader::with_encoding(data, version, 0, encoding);
             // Read the RL (total_size_bits) stored by save_position_for_size
             let total_size_bits = merged.main_mut().read_raw_long() as i64;
             merged.setup_text_and_handle(total_size_bits);
@@ -74,7 +71,7 @@ impl SectionReader {
         } else {
             // Pre-R2007: single stream, everything inline
             let dwg = DwgVersion::from_dxf_version(version)?;
-            let reader = DwgBitReader::new(data, dwg, version);
+            let reader = DwgBitReader::with_encoding(data, dwg, version, encoding);
             Ok(SectionReader { inner: SectionReaderInner::BitReader(reader) })
         }
     }
@@ -177,7 +174,7 @@ impl SectionReader {
 ///
 /// # Returns
 /// `HeaderVariables` populated with all header variables.
-pub fn read_header(data: &[u8], version: DxfVersion, maintenance_version: u8) -> Result<HeaderVariables> {
+pub fn read_header(data: &[u8], version: DxfVersion, maintenance_version: u8, encoding: &'static encoding_rs::Encoding) -> Result<HeaderVariables> {
     // ── Verify start sentinel ──
     if data.len() < 36 {
         return Err(DxfError::Parse("Header section too short".to_string()));
@@ -201,7 +198,7 @@ pub fn read_header(data: &[u8], version: DxfVersion, maintenance_version: u8) ->
 
     let section_data = &data[size_offset..size_offset + section_size];
 
-    let mut r = SectionReader::new(section_data.to_vec(), version)?;
+    let mut r = SectionReader::new(section_data.to_vec(), version, encoding)?;
     let mut h = HeaderVariables::default();
 
     read_header_fields(&mut r, version, &mut h);
@@ -807,7 +804,7 @@ mod tests {
     fn test_header_roundtrip_r2000() {
         let original = HeaderVariables::default();
         let written = header_writer::write_header(DxfVersion::AC1015, &original, 0);
-        let read = read_header(&written, DxfVersion::AC1015, 0).unwrap();
+        let read = read_header(&written, DxfVersion::AC1015, 0, encoding_rs::WINDOWS_1252).unwrap();
 
         // Check sentinel verification worked
         assert_eq!(read.fill_mode, original.fill_mode);
@@ -824,7 +821,7 @@ mod tests {
     fn test_header_roundtrip_r2004() {
         let original = HeaderVariables::default();
         let written = header_writer::write_header(DxfVersion::AC1018, &original, 0);
-        let read = read_header(&written, DxfVersion::AC1018, 0).unwrap();
+        let read = read_header(&written, DxfVersion::AC1018, 0, encoding_rs::WINDOWS_1252).unwrap();
 
         assert_eq!(read.fill_mode, original.fill_mode);
         assert_eq!(read.sort_entities, original.sort_entities);
@@ -840,7 +837,7 @@ mod tests {
         original.fingerprint_guid = "{TEST-GUID-1234}".to_string();
         original.version_guid = "{VERSION-GUID-5678}".to_string();
         let written = header_writer::write_header(DxfVersion::AC1021, &original, 0);
-        let read = read_header(&written, DxfVersion::AC1021, 0).unwrap();
+        let read = read_header(&written, DxfVersion::AC1021, 0, encoding_rs::WINDOWS_1252).unwrap();
 
         // Verify numeric/boolean header variables
         assert_eq!(read.fill_mode, original.fill_mode);
@@ -870,7 +867,7 @@ mod tests {
     fn test_header_roundtrip_r2010() {
         let original = HeaderVariables::default();
         let written = header_writer::write_header(DxfVersion::AC1024, &original, 0);
-        let read = read_header(&written, DxfVersion::AC1024, 0).unwrap();
+        let read = read_header(&written, DxfVersion::AC1024, 0, encoding_rs::WINDOWS_1252).unwrap();
 
         assert_eq!(read.fill_mode, original.fill_mode);
         assert_eq!(read.linear_unit_format, original.linear_unit_format);
@@ -882,7 +879,7 @@ mod tests {
     fn test_header_bad_sentinel_fails() {
         let mut bad_data = vec![0u8; 50];
         bad_data[..16].fill(0xFF);
-        let result = read_header(&bad_data, DxfVersion::AC1015, 0);
+        let result = read_header(&bad_data, DxfVersion::AC1015, 0, encoding_rs::WINDOWS_1252);
         assert!(result.is_err());
     }
 }

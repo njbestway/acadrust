@@ -30,7 +30,7 @@ use crate::types::DxfVersion;
 ///
 /// # Returns
 /// `DxfClassCollection` containing all parsed class definitions.
-pub fn read_classes(data: &[u8], version: DxfVersion, maintenance_version: u8) -> Result<DxfClassCollection> {
+pub fn read_classes(data: &[u8], version: DxfVersion, maintenance_version: u8, encoding: &'static encoding_rs::Encoding) -> Result<DxfClassCollection> {
     let dwg = DwgVersion::from_dxf_version(version)?;
 
     // ── Verify start sentinel ──
@@ -62,7 +62,7 @@ pub fn read_classes(data: &[u8], version: DxfVersion, maintenance_version: u8) -
     let section_data = &data[data_start..data_start + section_size];
 
     // ── Create the bit reader over the section data ──
-    let mut reader = DwgBitReader::new(section_data.to_vec(), dwg, version);
+    let mut reader = DwgBitReader::with_encoding(section_data.to_vec(), dwg, version, encoding);
 
     // R2007+: The section data has an RL prefix (total data size in bits)
     // from save_position_for_size. Text is INLINE (not in a separate stream).
@@ -162,7 +162,7 @@ mod tests {
         let written = classes_writer::write_classes(DxfVersion::AC1015, &class_vec, 0);
 
         // Read it back
-        let read_classes = read_classes(&written, DxfVersion::AC1015, 0).unwrap();
+        let read_classes = read_classes(&written, DxfVersion::AC1015, 0, encoding_rs::WINDOWS_1252).unwrap();
 
         // Should have the same number of classes
         assert_eq!(read_classes.len(), classes.len(),
@@ -177,7 +177,7 @@ mod tests {
 
         let class_vec: Vec<DxfClass> = classes.iter().cloned().collect();
         let written = classes_writer::write_classes(DxfVersion::AC1018, &class_vec, 0);
-        let read_classes = read_classes(&written, DxfVersion::AC1018, 0).unwrap();
+        let read_classes = read_classes(&written, DxfVersion::AC1018, 0, encoding_rs::WINDOWS_1252).unwrap();
 
         assert_eq!(read_classes.len(), classes.len(),
             "Class count mismatch: wrote {}, read {}",
@@ -197,7 +197,7 @@ mod tests {
         let mut bad_data = vec![0u8; 50];
         // Wrong sentinel
         bad_data[..16].fill(0xFF);
-        let result = read_classes(&bad_data, DxfVersion::AC1015, 0);
+        let result = read_classes(&bad_data, DxfVersion::AC1015, 0, encoding_rs::WINDOWS_1252);
         assert!(result.is_err());
     }
 }

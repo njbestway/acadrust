@@ -127,6 +127,8 @@ pub struct DwgObjectReader {
     dxf_version: DxfVersion,
     /// Handle → byte-offset map (from handle section)
     handle_map: HashMap<u64, i64>,
+    /// Text encoding for non-Unicode strings (pre-R2007 DWG uses code page)
+    encoding: &'static encoding_rs::Encoding,
 }
 
 impl DwgObjectReader {
@@ -141,12 +143,27 @@ impl DwgObjectReader {
         dxf_version: DxfVersion,
         handle_map: HashMap<u64, i64>,
     ) -> Result<Self> {
+        Self::with_encoding(data, dxf_version, handle_map, encoding_rs::WINDOWS_1252)
+    }
+
+    /// Create a new object reader with a specific text encoding.
+    ///
+    /// Use this for DWG files with non-Latin code pages (e.g. GBK for Chinese).
+    /// For R2007+ files, text is UTF-16LE so encoding is only used for legacy
+    /// fallback paths.
+    pub fn with_encoding(
+        data: Vec<u8>,
+        dxf_version: DxfVersion,
+        handle_map: HashMap<u64, i64>,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Result<Self> {
         let version = DwgVersion::from_dxf_version(dxf_version)?;
         Ok(DwgObjectReader {
             data,
             version,
             dxf_version,
             handle_map,
+            encoding,
         })
     }
 
@@ -207,8 +224,8 @@ impl DwgObjectReader {
                 .unwrap_or(DwgVersion::AC15);
 
             // Read type_code from temp reader
-            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(), dwg, self.dxf_version,
+            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::with_encoding(
+                merged_data.clone(), dwg, self.dxf_version, self.encoding,
             );
             let type_code = temp.read_object_type();
 
@@ -236,20 +253,20 @@ impl DwgObjectReader {
             }
 
             // Main reader: starts at data_start_bits (after type_code [+ RL])
-            let mut main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(), dwg, self.dxf_version,
+            let mut main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::with_encoding(
+                merged_data.clone(), dwg, self.dxf_version, self.encoding,
             );
             main_reader.set_position_in_bits(data_start_bits);
 
             // Text reader: positioned by flag at flag_position
-            let mut text_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(), dwg, self.dxf_version,
+            let mut text_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::with_encoding(
+                merged_data.clone(), dwg, self.dxf_version, self.encoding,
             );
             text_reader.set_position_by_flag(flag_position);
 
             // Handle reader: starts at bit position handle_start (NOT byte-aligned).
-            let mut handle_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(), dwg, self.dxf_version,
+            let mut handle_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::with_encoding(
+                merged_data.clone(), dwg, self.dxf_version, self.encoding,
             );
             handle_reader.set_position_in_bits(handle_start);
 
@@ -282,8 +299,8 @@ impl DwgObjectReader {
         let handle_start_bits = if self.version.r2000_plus() {
             // Read BS + RL from a disposable temp reader to discover
             // the split point without consuming from the final reader.
-            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(), dwg, self.dxf_version,
+            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::with_encoding(
+                merged_data.clone(), dwg, self.dxf_version, self.encoding,
             );
             let _tc = temp.read_object_type(); // BS
             temp.read_raw_long() as i64 // RL = main_size_bits
@@ -293,13 +310,13 @@ impl DwgObjectReader {
         };
 
         // Create main reader (reads from bit 0)
-        let main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-            merged_data.clone(), dwg, self.dxf_version,
+        let main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::with_encoding(
+            merged_data.clone(), dwg, self.dxf_version, self.encoding,
         );
 
         // Create handle reader positioned at handle_start_bits
-        let mut handle_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-            merged_data, dwg, self.dxf_version,
+        let mut handle_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::with_encoding(
+            merged_data, dwg, self.dxf_version, self.encoding,
         );
         handle_reader.set_position_in_bits(handle_start_bits);
 

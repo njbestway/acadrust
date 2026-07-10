@@ -82,6 +82,11 @@ impl DwgBitReader {
         self.dxf_version
     }
 
+    /// Get the text encoding used for non-Unicode string decoding.
+    pub fn encoding(&self) -> &'static encoding_rs::Encoding {
+        self.encoding
+    }
+
     /// Current position in bits.
     pub fn position_in_bits(&self) -> i64 {
         // After advance_byte, position points past the byte we read.
@@ -733,7 +738,8 @@ impl DwgBitReader {
             }
             let bytes = self.read_bytes(length as usize);
             let (decoded, _, _) = self.encoding.decode(&bytes);
-            decoded.replace('\0', "").to_string()
+            let result = decoded.replace('\0', "").to_string();
+            result
         }
     }
 

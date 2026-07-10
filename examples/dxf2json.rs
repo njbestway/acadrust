@@ -49,7 +49,7 @@ fn main() -> acadrust::Result<()> {
     let input_file = if args.len() > 1 {
         args[1].clone()
     } else {
-        "E:/home/dxf-gis/tt.dwg".to_string()
+        "E:/home/dxf-gis/ta.dwg".to_string()
     };
 
     // ── 1. 根据文件扩展名自动选择 DXF 或 DWG 读取器 ──
@@ -227,6 +227,8 @@ fn entity_to_features(entity: &EntityType) -> Option<Vec<Value>> {
         EntityType::Hatch(e) => vec![hatch_to_feature(e)],
         EntityType::Solid(e) => vec![solid_to_feature(e)],
         EntityType::Face3D(e) => vec![face3d_to_feature(e)],
+        EntityType::Dimension(e) => dimension_to_features(e),
+        EntityType::Helix(e) => vec![helix_to_feature(e)],
         _ => return None,
     };
     Some(features)
@@ -1056,6 +1058,107 @@ fn hatch_to_feature(hatch: &Hatch) -> Value {
         json!({"color": color}),
         hatch.common.handle.value(),
     )
+}
+
+/// Dimension → 多个 GeoJSON Feature（参考线 + 标注文字）
+///
+/// 标注实体生成两部分几何数据：
+/// 1. 参考线（LineString）：连接定义点，表示标注的参考几何
+/// 2. 标注文字（Point）：位于 text_middle_point，携带测量值和标注类型
+///
+/// 支持的标注类型：Linear, Aligned, Radius, Diameter, Angular, Ordinate
+fn dimension_to_features(dim: &Dimension) -> Vec<Value> {
+    let base = dim.base();
+    let color = color_to_hex(base.common.color);
+    let handle = base.common.handle.value();
+    let mut features = Vec::new();
+
+    // 1. 参考线（LineString）：根据标注类型生成不同的参考几何
+    let line_coords: Vec<Value> = match dim {
+        Dimension::Linear(d) => {
+            vec![pt(d.first_point), pt(d.definition_point), pt(d.second_point)]
+        }
+        Dimension::Aligned(d) => {
+            vec![pt(d.first_point), pt(d.definition_point), pt(d.second_point)]
+        }
+        Dimension::Radius(d) => {
+            vec![pt(d.angle_vertex), pt(d.definition_point)]
+        }
+        Dimension::Diameter(d) => {
+            vec![pt(d.angle_vertex), pt(d.definition_point)]
+        }
+        Dimension::Angular2Ln(d) => {
+            vec![
+                pt(d.first_point),
+                pt(d.angle_vertex),
+                pt(d.second_point),
+                pt(d.dimension_arc),
+            ]
+        }
+        Dimension::Angular3Pt(d) => {
+            vec![
+                pt(d.first_point),
+                pt(d.angle_vertex),
+                pt(d.second_point),
+            ]
+        }
+        Dimension::Ordinate(d) => {
+            vec![pt(d.feature_location), pt(d.leader_endpoint)]
+        }
+    };
+
+    if line_coords.len() >= 2 {
+        features.push(make_feature_with_code(
+            "LineString",
+            Value::Array(line_coords),
+            json!({"color": color}),
+            handle,
+        ));
+    }
+
+    // 2. 标注文字（Point）：位于 text_middle_point
+    let text_pos = base.text_middle_point;
+    let display_text = if !base.text.is_empty() {
+        base.text.clone()
+    } else if let Some(ref ut) = base.user_text {
+        ut.clone()
+    } else {
+        format!("{:.2}", base.actual_measurement)
+    };
+
+    let dim_type_str = match dim {
+        Dimension::Linear(_) => "linear",
+        Dimension::Aligned(_) => "aligned",
+        Dimension::Radius(_) => "radius",
+        Dimension::Diameter(_) => "diameter",
+        Dimension::Angular2Ln(_) => "angular",
+        Dimension::Angular3Pt(_) => "angular3pt",
+        Dimension::Ordinate(_) => "ordinate",
+    };
+
+    let rotation_deg = calc_text_rotation(base.text_rotation, base.normal);
+
+    features.push(make_feature_with_code(
+        "Point",
+        pt(text_pos),
+        json!({
+            "color": color,
+            "text": display_text,
+            "fontSize": 0.0,
+            "rotation": rotation_deg,
+            "measurement": base.actual_measurement,
+            "dimensionType": dim_type_str,
+        }),
+        handle,
+    ));
+
+    features
+}
+
+/// Helix → LineString
+/// 螺旋实体内部包含 Spline 几何数据，复用 Spline 的 NURBS 求值逻辑
+fn helix_to_feature(helix: &Helix) -> Value {
+    spline_to_feature(&helix.spline)
 }
 
 /// Solid → Polygon

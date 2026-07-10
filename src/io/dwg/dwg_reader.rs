@@ -583,12 +583,32 @@ impl<R: Read + Seek> DwgReader<R> {
         document.maintenance_version = info.acad_maintenance_version;
         document.dwg_source_version = Some(dxf_version);
 
+        // Resolve text encoding from DWG code page (critical for CJK files)
+        let encoding = match crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page) {
+            Some(enc) => enc,
+            None => {
+                // code_page is 0 or unrecognized — auto-detect from object section data
+                if let Ok(obj_data) = self.get_section_buffer("AcDb:AcDbObjects", &info) {
+                    let detected = crate::io::dxf::code_page::detect_encoding_from_bytes(&obj_data);
+                    self.notifications.notify(
+                        NotificationType::Warning,
+                        format!("DWG code_page={} unrecognized, auto-detected encoding: {:?}",
+                            info.code_page, detected),
+                    );
+                    detected
+                } else {
+                    encoding_rs::WINDOWS_1252
+                }
+            }
+        };
+
         // 2. Read Classes (AcDb:Classes)
         if let Ok(classes_buf) = self.get_section_buffer("AcDb:Classes", &info) {
             match crate::io::dwg::dwg_stream_readers::classes_reader::read_classes(
                 &classes_buf,
                 dxf_version,
                 info.acad_maintenance_version,
+                encoding,
             ) {
                 Ok(classes) => document.classes = classes,
                 Err(e) => self.notifications.notify(
@@ -604,6 +624,7 @@ impl<R: Read + Seek> DwgReader<R> {
                 &header_buf,
                 dxf_version,
                 info.acad_maintenance_version,
+                encoding,
             ) {
                 Ok(header_vars) => document.header = header_vars,
                 Err(e) => self.notifications.notify(
@@ -643,10 +664,11 @@ impl<R: Read + Seek> DwgReader<R> {
         // 5. Read Objects (AcDb:AcDbObjects) and build document
         if !handle_map.is_empty() {
             if let Ok(objects_buf) = self.get_section_buffer("AcDb:AcDbObjects", &info) {
-                match crate::io::dwg::dwg_stream_readers::object_reader::DwgObjectReader::new(
+                match crate::io::dwg::dwg_stream_readers::object_reader::DwgObjectReader::with_encoding(
                     objects_buf,
                     dxf_version,
                     handle_map,
+                    encoding,
                 ) {
                     Ok(obj_reader) => {
                         let mut builder = crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::new(obj_reader);
