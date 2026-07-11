@@ -97,11 +97,12 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
         );
     }
 
-    // 2. 展开所有 Insert（块引用）
+    // 2. 展开所有 Insert（块引用）——仅模型空间的 Insert
+    let ms_handle = doc.header.model_space_block_handle;
     let mut exploded_by_layer: std::collections::HashMap<String, Vec<EntityType>> =
         std::collections::HashMap::new();
 
-    for entity in doc.entities() {
+    for entity in doc.entities().filter(|e| e.common().owner_handle == ms_handle) {
         if let EntityType::Insert(ins) = entity {
             let exploded = ins.explode_from_document(&doc);
             for sub_entity in exploded {
@@ -216,18 +217,20 @@ fn collect_layer_features(
 
     let mut features = Vec::new();
 
-    for entity in doc.entities().filter(|e| e.common().layer == layer_name) {
+    for entity in doc.entities()
+        .filter(|e| e.common().layer == layer_name && e.common().owner_handle == doc.header.model_space_block_handle)
+    {
         if matches!(entity, EntityType::Insert(_) | EntityType::AttributeDefinition(_)) {
             continue;
         }
-        if let Some(fs) = entity_to_features(entity) {
+        if let Some(fs) = entity_to_features(entity, doc) {
             features.extend(fs);
         }
     }
 
     if let Some(exploded) = exploded_by_layer.get(layer_name) {
         for entity in exploded {
-            if let Some(fs) = entity_to_features(entity) {
+            if let Some(fs) = entity_to_features(entity, doc) {
                 features.extend(fs);
             }
         }
@@ -236,25 +239,25 @@ fn collect_layer_features(
     features
 }
 
-fn entity_to_features(entity: &EntityType) -> Option<Vec<Value>> {
+fn entity_to_features(entity: &EntityType, doc: &CadDocument) -> Option<Vec<Value>> {
     let features = match entity {
-        EntityType::Line(e) => vec![line_to_feature(e)],
-        EntityType::Point(e) => vec![point_to_feature(e)],
-        EntityType::Circle(e) => vec![circle_to_feature(e)],
-        EntityType::Arc(e) => vec![arc_to_feature(e)],
-        EntityType::Text(e) => vec![text_to_feature(e)],
-        EntityType::MText(e) => vec![mtext_to_feature(e)],
-        EntityType::AttributeEntity(e) => vec![attrib_to_feature(e)],
-        EntityType::LwPolyline(e) => lwpolyline_to_features(e),
-        EntityType::Polyline(e) => vec![polyline3d_to_feature(e)],
-        EntityType::Polyline2D(e) => vec![polyline2d_to_feature(e)],
-        EntityType::Ellipse(e) => vec![ellipse_to_feature(e)],
-        EntityType::Spline(e) => vec![spline_to_feature(e)],
-        EntityType::Hatch(e) => vec![hatch_to_feature(e)],
-        EntityType::Solid(e) => vec![solid_to_feature(e)],
-        EntityType::Face3D(e) => vec![face3d_to_feature(e)],
-        EntityType::Dimension(e) => dimension_to_features(e),
-        EntityType::Helix(e) => vec![helix_to_feature(e)],
+        EntityType::Line(e) => vec![line_to_feature(e, doc)],
+        EntityType::Point(e) => vec![point_to_feature(e, doc)],
+        EntityType::Circle(e) => vec![circle_to_feature(e, doc)],
+        EntityType::Arc(e) => vec![arc_to_feature(e, doc)],
+        EntityType::Text(e) => vec![text_to_feature(e, doc)],
+        EntityType::MText(e) => mtext_to_features(e, doc),
+        EntityType::AttributeEntity(e) => vec![attrib_to_feature(e, doc)],
+        EntityType::LwPolyline(e) => lwpolyline_to_features(e, doc),
+        EntityType::Polyline(e) => vec![polyline3d_to_feature(e, doc)],
+        EntityType::Polyline2D(e) => vec![polyline2d_to_feature(e, doc)],
+        EntityType::Ellipse(e) => vec![ellipse_to_feature(e, doc)],
+        EntityType::Spline(e) => vec![spline_to_feature(e, doc)],
+        EntityType::Hatch(e) => vec![hatch_to_feature(e, doc)],
+        EntityType::Solid(e) => vec![solid_to_feature(e, doc)],
+        EntityType::Face3D(e) => vec![face3d_to_feature(e, doc)],
+        EntityType::Dimension(e) => dimension_to_features(e, doc),
+        EntityType::Helix(e) => vec![helix_to_feature(e, doc)],
         _ => return None,
     };
     Some(features)
@@ -297,6 +300,111 @@ fn color_to_rgb_string(color: Color) -> String {
         Color::ByBlock => (0, 0, 0),
     };
     format!("{},{},{}", r, g, b)
+}
+
+/// Complex linetype element info (embedded text or shape)
+struct LtComplexInfo {
+    text: String,
+    position: f64,      // cumulative position within one pattern cycle
+    scale: f64,
+    rotation: f64,
+    absolute_rotation: bool,
+    offset: [f64; 2],
+}
+
+/// Extract linetype info: name, dash pattern, pattern length, and complex text elements
+fn entity_linetype_info(
+    common: &acadrust::entities::EntityCommon,
+    doc: &CadDocument,
+) -> (String, Option<Vec<f64>>, Option<f64>, Vec<LtComplexInfo>) {
+    let lt_name = if common.has_linetype() {
+        common.linetype.clone()
+    } else {
+        doc.layers.get(&common.layer)
+            .map(|l| l.line_type.clone())
+            .unwrap_or_else(|| "Continuous".to_string())
+    };
+    let lt = match doc.line_types.get(&lt_name) {
+        Some(lt) if !lt.elements.is_empty() => lt,
+        _ => return (lt_name, None, None, Vec::new()),
+    };
+    let pattern: Vec<f64> = lt.elements.iter().map(|e| e.length.abs()).collect();
+    let pattern_length = lt.pattern_length;
+    // Extract complex (text/shape) elements with their positions in the pattern
+    let mut complex_list = Vec::new();
+    let mut cumulative = 0.0;
+    for elem in &lt.elements {
+        if let Some(ref c) = elem.complex {
+            if let Some(text) = c.text() {
+                if !text.is_empty() {
+                    complex_list.push(LtComplexInfo {
+                        text: text.to_string(),
+                        position: cumulative,
+                        scale: c.scale,
+                        rotation: c.rotation,
+                        absolute_rotation: c.absolute_rotation,
+                        offset: c.offset,
+                    });
+                }
+            }
+        }
+        cumulative += elem.length.abs();
+    }
+    (lt_name, Some(pattern), Some(pattern_length), complex_list)
+}
+
+/// Resolve line weight to millimeters: entity → layer → default (0.25mm)
+fn resolve_line_weight_mm(
+    lw: &acadrust::types::LineWeight,
+    layer_name: &str,
+    doc: &CadDocument,
+) -> f64 {
+    use acadrust::types::LineWeight;
+    match lw {
+        LineWeight::Value(v) => *v as f64 / 100.0,
+        LineWeight::ByLayer | LineWeight::ByBlock => {
+            doc.layers.get(layer_name)
+                .and_then(|l| l.line_weight.millimeters())
+                .unwrap_or(0.25) // 默认线重 0.25mm
+        }
+        LineWeight::Default => 0.25,
+    }
+}
+
+/// Build base properties: color + lineType + optional linePattern/linetypeScale/lineWeight
+fn base_props(color: &str, common: &acadrust::entities::EntityCommon, doc: &CadDocument) -> Map<String, Value> {
+    let (lt_name, lt_pattern, lt_pattern_len, lt_complex) = entity_linetype_info(common, doc);
+    let mut props = Map::new();
+    props.insert("color".into(), json!(color));
+    props.insert("lineType".into(), json!(lt_name));
+    if let Some(pat) = lt_pattern {
+        props.insert("linePattern".into(), Value::Array(pat.into_iter().map(|v| json!(v)).collect()));
+    }
+    if let Some(plen) = lt_pattern_len {
+        props.insert("linePatternLength".into(), json!(plen));
+    }
+    // 复杂线型嵌入文字（如管线标注 GAS）
+    if !lt_complex.is_empty() {
+        let arr: Vec<Value> = lt_complex.iter().map(|c| {
+            json!({
+                "text": c.text,
+                "position": c.position,
+                "scale": c.scale,
+                "rotation": c.rotation,
+                "absoluteRotation": c.absolute_rotation,
+                "offset": c.offset
+            })
+        }).collect();
+        props.insert("lineTypeText".into(), Value::Array(arr));
+    }
+    // 实体级线型缩放因子，非 1.0 时输出
+    if (common.linetype_scale - 1.0).abs() > 1e-9 {
+        props.insert("linetypeScale".into(), json!(common.linetype_scale));
+    }
+    // 线重（mm）：实体 → 图层 → 默认(0.25mm)
+    let lw_mm = resolve_line_weight_mm(&common.line_weight, &common.layer, doc);
+    props.insert("lineWeight".into(), json!(lw_mm));
+    props
 }
 
 fn make_feature(geom_type: &str, coordinates: Value, properties: Value) -> Value {
@@ -367,18 +475,18 @@ fn tessellate_bulge(start: Vector2, end: Vector2, bulge: f64) -> Vec<Vector3> {
 //  实体 → GeoJSON Feature 转换
 // ═══════════════════════════════════════════════════════════════
 
-fn line_to_feature(line: &Line) -> Value {
+fn line_to_feature(line: &Line, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(line.common.color);
-    make_feature_with_code("LineString", json!([pt(line.start), pt(line.end)]), json!({"color": color}), line.common.handle.value())
+    make_feature_with_code("LineString", json!([pt(line.start), pt(line.end)]), Value::Object(base_props(&color, &line.common, doc)), line.common.handle.value())
 }
 
-fn point_to_feature(point: &Point) -> Value {
+fn point_to_feature(point: &Point, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(point.common.color);
     let wcs = ocs_to_wcs(point.normal, point.location);
-    make_feature_with_code("Point", pt(wcs), json!({"color": color}), point.common.handle.value())
+    make_feature_with_code("Point", pt(wcs), Value::Object(base_props(&color, &point.common, doc)), point.common.handle.value())
 }
 
-fn circle_to_feature(circle: &Circle) -> Value {
+fn circle_to_feature(circle: &Circle, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(circle.common.color);
     let center = ocs_to_wcs(circle.normal, circle.center);
     let mut coords = Vec::new();
@@ -389,10 +497,10 @@ fn circle_to_feature(circle: &Circle) -> Value {
         let wcs_pt = center + Matrix3::arbitrary_axis(circle.normal) * local;
         coords.push(pt(wcs_pt));
     }
-    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), circle.common.handle.value())
+    make_feature_with_code("LineString", Value::Array(coords), Value::Object(base_props(&color, &circle.common, doc)), circle.common.handle.value())
 }
 
-fn arc_to_feature(arc: &Arc) -> Value {
+fn arc_to_feature(arc: &Arc, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(arc.common.color);
     let mut coords = Vec::new();
     let mut sweep = arc.end_angle - arc.start_angle;
@@ -406,10 +514,10 @@ fn arc_to_feature(arc: &Arc) -> Value {
         let wcs_pt = basis * (arc.center + local);
         coords.push(pt(wcs_pt));
     }
-    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), arc.common.handle.value())
+    make_feature_with_code("LineString", Value::Array(coords), Value::Object(base_props(&color, &arc.common, doc)), arc.common.handle.value())
 }
 
-fn text_to_feature(text: &Text) -> Value {
+fn text_to_feature(text: &Text, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(text.common.color);
     let ref_point = text.alignment_point.unwrap_or(text.insertion_point);
     let wcs = ocs_to_wcs(text.normal, ref_point);
@@ -429,26 +537,155 @@ fn text_to_feature(text: &Text) -> Value {
         acadrust::entities::text::TextVerticalAlignment::Middle => "middle",
         acadrust::entities::text::TextVerticalAlignment::Top => "top",
     };
-    make_feature_with_code("Point", pt(wcs), json!({
-        "color": color, "text": display_text, "fontSize": text.height,
-        "rotation": rotation_deg, "textAlign": h_align, "textBaseline": v_align
-    }), text.common.handle.value())
+    let mut props = base_props(&color, &text.common, doc);
+    props.insert("text".into(), json!(display_text));
+    props.insert("fontSize".into(), json!(text.height));
+    props.insert("rotation".into(), json!(rotation_deg));
+    props.insert("textAlign".into(), json!(h_align));
+    props.insert("textBaseline".into(), json!(v_align));
+    make_feature_with_code("Point", pt(wcs), Value::Object(props), text.common.handle.value())
 }
 
-fn mtext_to_feature(mtext: &MText) -> Value {
+fn mtext_to_features(mtext: &MText, doc: &CadDocument) -> Vec<Value> {
     let color = color_to_rgb_string(mtext.common.color);
     let wcs = ocs_to_wcs(mtext.normal, mtext.insertion_point);
     let rotation_deg = calc_text_rotation(mtext.rotation, mtext.normal);
-    let doc = acadrust::entities::mtext_format::parse_mtext(&mtext.value, true);
-    let display_text = doc.to_plain_text();
+    let mtext_doc = acadrust::entities::mtext_format::parse_mtext(&mtext.value, true);
+    let display_text = mtext_to_display_text(&mtext_doc);
     let alignment = mtext.attachment_point as i32;
-    make_feature_with_code("Point", pt(wcs), json!({
-        "color": color, "text": display_text, "fontSize": mtext.height,
-        "rotation": rotation_deg, "align": alignment
-    }), mtext.common.handle.value())
+
+    let mut base = base_props(&color, &mtext.common, doc);
+    base.insert("text".into(), json!(display_text));
+    base.insert("fontSize".into(), json!(mtext.height));
+    base.insert("rotation".into(), json!(rotation_deg));
+    base.insert("align".into(), json!(alignment));
+    base.insert("rectWidth".into(), json!(mtext.rectangle_width));
+    if let Some(rh) = mtext.rectangle_height {
+        base.insert("rectHeight".into(), json!(rh));
+    }
+    base.insert("lineSpacingFactor".into(), json!(mtext.line_spacing_factor));
+    base.insert("lineSpacingStyle".into(), json!(mtext.line_spacing_style as i32));
+
+    // Split multi-line MText into per-line Point features with computed positions
+    let lines: Vec<&str> = display_text.lines().collect();
+    if lines.len() <= 1 {
+        return vec![make_feature_with_code("Point", pt(wcs), Value::Object(base), mtext.common.handle.value())];
+    }
+
+    let line_height = mtext.height * mtext.line_spacing_factor * 1.2;
+    let total_height = line_height * (lines.len() as f64 - 1.0);
+    // Y offset for first line relative to insertion_point (Y-down in screen space)
+    let first_line_y_offset = match mtext.attachment_point {
+        AttachmentPoint::TopLeft | AttachmentPoint::TopCenter | AttachmentPoint::TopRight => 0.0,
+        AttachmentPoint::MiddleLeft | AttachmentPoint::MiddleCenter | AttachmentPoint::MiddleRight => -total_height / 2.0,
+        AttachmentPoint::BottomLeft | AttachmentPoint::BottomCenter | AttachmentPoint::BottomRight => -total_height,
+    };
+
+    let features: Vec<Value> = lines.iter().enumerate().map(|(i, line)| {
+        let y_off = first_line_y_offset + i as f64 * line_height;
+        let pt_coord = Vector3::new(wcs.x, wcs.y - y_off, wcs.z);
+        let mut props = base.clone();
+        props.insert("text".into(), json!(line));
+        props.insert("lineIndex".into(), json!(i));
+        props.insert("lineCount".into(), json!(lines.len()));
+        make_feature_with_code("Point", pt(pt_coord), Value::Object(props), mtext.common.handle.value())
+    }).collect();
+    features
 }
 
-fn attrib_to_feature(attrib: &AttributeEntity) -> Value {
+/// Convert MTextDocument to display text, replacing subscript/superscript spans
+/// with Unicode subscript/superscript characters so OpenLayers can render them.
+fn mtext_to_display_text(mtext_doc: &acadrust::entities::mtext_format::MTextDocument) -> String {
+    mtext_doc.paragraphs.iter().map(|para| {
+        para.spans.iter().map(|span| {
+            if let Some(ref stack) = span.stacking {
+                return stacking_to_display_text(stack);
+            }
+            // Also check if the span itself has subscript-like height/alignment
+            let is_sub = is_subscript_span(&span.properties);
+            let is_sup = is_superscript_span(&span.properties);
+            if is_sub {
+                span.text.chars().map(to_unicode_subscript).collect()
+            } else if is_sup {
+                span.text.chars().map(to_unicode_superscript).collect()
+            } else {
+                span.text.clone()
+            }
+        }).collect::<String>()
+    }).collect::<Vec<_>>().join("\n")
+}
+
+/// Convert stacking data to display text with Unicode subscript/superscript.
+/// In CAD MText limit stacking (\S with ^):
+///   numerator → superscript position (above baseline)
+///   denominator → subscript position (below baseline)
+///   \S^text; → denominator only → subscript (e.g. J₂)
+///   \Stext^; → numerator only → superscript
+///   \Snum^den; → sup+sub (limits like ⁺⁰·⁵₋₀.₃)
+fn stacking_to_display_text(stack: &acadrust::entities::mtext_format::StackingData) -> String {
+    use acadrust::entities::mtext_format::StackingType;
+    match stack.stacking_type {
+        StackingType::Limit => {
+            let num_sup: String = stack.numerator.chars().map(to_unicode_superscript).collect();
+            let den_sub: String = stack.denominator.chars().map(to_unicode_subscript).collect();
+            format!("{}{}", num_sup, den_sub)
+        }
+        StackingType::Horizontal | StackingType::Diagonal => {
+            format!("{}/{}", stack.numerator, stack.denominator)
+        }
+    }
+}
+
+fn is_subscript_span(props: &acadrust::entities::mtext_format::SpanProperties) -> bool {
+    use acadrust::entities::mtext_format::*;
+    let has_small_height = match props.height {
+        Some(MTextScalar::Factor(v)) => v < 0.9,
+        Some(MTextScalar::Absolute(_)) => false, // can't tell without base height
+        None => false,
+    };
+    let is_baseline = matches!(props.line_align, None | Some(MTextLineAlignment::Bottom));
+    has_small_height && is_baseline
+}
+
+fn is_superscript_span(props: &acadrust::entities::mtext_format::SpanProperties) -> bool {
+    use acadrust::entities::mtext_format::*;
+    let has_small_height = match props.height {
+        Some(MTextScalar::Factor(v)) => v < 0.9,
+        Some(MTextScalar::Absolute(_)) => false,
+        None => false,
+    };
+    has_small_height && matches!(props.line_align, Some(MTextLineAlignment::Top))
+}
+
+fn to_unicode_subscript(ch: char) -> char {
+    match ch {
+        '0' => '\u{2080}', '1' => '\u{2081}', '2' => '\u{2082}', '3' => '\u{2083}',
+        '4' => '\u{2084}', '5' => '\u{2085}', '6' => '\u{2086}', '7' => '\u{2087}',
+        '8' => '\u{2088}', '9' => '\u{2089}',
+        '+' => '\u{208A}', '-' | '\u{2212}' => '\u{208B}', '=' => '\u{208C}',
+        '(' => '\u{208D}', ')' => '\u{208E}',
+        'a' => '\u{2090}', 'e' => '\u{2091}', 'h' => '\u{2095}', 'i' => '\u{1D62}',
+        'j' => '\u{2C7C}', 'k' => '\u{2096}', 'l' => '\u{2097}', 'm' => '\u{2098}',
+        'n' => '\u{2099}', 'o' => '\u{2092}', 'p' => '\u{209A}', 'r' => '\u{1D63}',
+        's' => '\u{209B}', 't' => '\u{209C}', 'u' => '\u{1D64}', 'v' => '\u{1D65}',
+        'x' => '\u{2093}',
+        _ => ch,
+    }
+}
+
+fn to_unicode_superscript(ch: char) -> char {
+    match ch {
+        '0' => '\u{2070}', '1' => '\u{00B9}', '2' => '\u{00B2}', '3' => '\u{00B3}',
+        '4' => '\u{2074}', '5' => '\u{2075}', '6' => '\u{2076}', '7' => '\u{2077}',
+        '8' => '\u{2078}', '9' => '\u{2079}',
+        '+' => '\u{207A}', '-' | '\u{2212}' => '\u{207B}', '=' => '\u{207C}',
+        '(' => '\u{207D}', ')' => '\u{207E}',
+        'n' => '\u{207F}', 'i' => '\u{2071}',
+        _ => ch,
+    }
+}
+
+fn attrib_to_feature(attrib: &AttributeEntity, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(attrib.common.color);
     let is_default_align = matches!(
         (attrib.horizontal_alignment, attrib.vertical_alignment),
@@ -471,19 +708,22 @@ fn attrib_to_feature(attrib: &AttributeEntity) -> Value {
         acadrust::entities::attribute_definition::VerticalAlignment::Middle => "middle",
         acadrust::entities::attribute_definition::VerticalAlignment::Top => "top",
     };
-    make_feature_with_code("Point", pt(wcs), json!({
-        "color": color, "text": attrib.value, "fontSize": attrib.height,
-        "rotation": rotation_deg, "textAlign": h_align, "textBaseline": v_align
-    }), attrib.common.handle.value())
+    let mut props = base_props(&color, &attrib.common, doc);
+    props.insert("text".into(), json!(attrib.value));
+    props.insert("fontSize".into(), json!(attrib.height));
+    props.insert("rotation".into(), json!(rotation_deg));
+    props.insert("textAlign".into(), json!(h_align));
+    props.insert("textBaseline".into(), json!(v_align));
+    make_feature_with_code("Point", pt(wcs), Value::Object(props), attrib.common.handle.value())
 }
 
-fn lwpolyline_to_features(pl: &LwPolyline) -> Vec<Value> {
+fn lwpolyline_to_features(pl: &LwPolyline, doc: &CadDocument) -> Vec<Value> {
     let color = color_to_rgb_string(pl.common.color);
     let mut features = Vec::new();
     let verts = &pl.vertices;
     let n = verts.len();
     if n == 0 {
-        features.push(make_feature("LineString", Value::Array(vec![]), json!({"color": color})));
+        features.push(make_feature("LineString", Value::Array(vec![]), Value::Object(base_props(&color, &pl.common, doc))));
         return features;
     }
     let normal = pl.normal;
@@ -509,8 +749,7 @@ fn lwpolyline_to_features(pl: &LwPolyline) -> Vec<Value> {
     }
     if pl.is_closed && coords.len() > 1 { coords.push(coords[0].clone()); }
 
-    let mut props = Map::new();
-    props.insert("color".into(), json!(color));
+    let mut props = base_props(&color, &pl.common, doc);
     let has_widths = verts.iter().any(|v| v.start_width != 0.0 || v.end_width != 0.0);
     if has_widths {
         let widths: Vec<Value> = verts.iter().map(|v| json!([v.start_width, v.end_width])).collect();
@@ -554,20 +793,23 @@ fn lwpolyline_to_features(pl: &LwPolyline) -> Vec<Value> {
             .collect();
         let mut ring: Vec<Value> = corners_wcs.iter().map(|c| pt(*c)).collect();
         ring.push(pt(corners_wcs[0]));
-        features.push(make_feature_with_code("Polygon", json!([ring]), json!({
-            "color": color, "arrow": true, "segment": i, "startWidth": sw, "endWidth": ew,
-        }), pl.common.handle.value()));
+        let mut arrow_props = base_props(&color, &pl.common, doc);
+        arrow_props.insert("arrow".into(), json!(true));
+        arrow_props.insert("segment".into(), json!(i));
+        arrow_props.insert("startWidth".into(), json!(sw));
+        arrow_props.insert("endWidth".into(), json!(ew));
+        features.push(make_feature_with_code("Polygon", json!([ring]), Value::Object(arrow_props), pl.common.handle.value()));
     }
     features
 }
 
-fn polyline3d_to_feature(pl: &Polyline) -> Value {
+fn polyline3d_to_feature(pl: &Polyline, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(pl.common.color);
     let coords: Vec<Value> = pl.vertices.iter().map(|v| pt(v.location)).collect();
-    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), pl.common.handle.value())
+    make_feature_with_code("LineString", Value::Array(coords), Value::Object(base_props(&color, &pl.common, doc)), pl.common.handle.value())
 }
 
-fn polyline2d_to_feature(pl: &Polyline2D) -> Value {
+fn polyline2d_to_feature(pl: &Polyline2D, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(pl.common.color);
     let mut coords: Vec<Value> = Vec::new();
     let verts = &pl.vertices;
@@ -591,10 +833,10 @@ fn polyline2d_to_feature(pl: &Polyline2D) -> Value {
         }
     }
     if pl.is_closed() && coords.len() > 1 { coords.push(coords[0].clone()); }
-    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), pl.common.handle.value())
+    make_feature_with_code("LineString", Value::Array(coords), Value::Object(base_props(&color, &pl.common, doc)), pl.common.handle.value())
 }
 
-fn ellipse_to_feature(ellipse: &Ellipse) -> Value {
+fn ellipse_to_feature(ellipse: &Ellipse, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(ellipse.common.color);
     let center = ellipse.center;
     let major = ellipse.major_axis;
@@ -615,14 +857,14 @@ fn ellipse_to_feature(ellipse: &Ellipse) -> Value {
         if (t - end_param).abs() < 1e-12 { break; }
         t += delta;
     }
-    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), ellipse.common.handle.value())
+    make_feature_with_code("LineString", Value::Array(coords), Value::Object(base_props(&color, &ellipse.common, doc)), ellipse.common.handle.value())
 }
 
-fn spline_to_feature(spline: &Spline) -> Value {
+fn spline_to_feature(spline: &Spline, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(spline.common.color);
     let pts = evaluate_nurbs(spline);
     let coords: Vec<Value> = pts.iter().map(|p| pt(*p)).collect();
-    make_feature_with_code("LineString", Value::Array(coords), json!({"color": color}), spline.common.handle.value())
+    make_feature_with_code("LineString", Value::Array(coords), Value::Object(base_props(&color, &spline.common, doc)), spline.common.handle.value())
 }
 
 fn evaluate_nurbs(spline: &Spline) -> Vec<Vector3> {
@@ -666,10 +908,12 @@ fn evaluate_nurbs(spline: &Spline) -> Vec<Vector3> {
     result
 }
 
-fn hatch_to_feature(hatch: &Hatch) -> Value {
+fn hatch_to_feature(hatch: &Hatch, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(hatch.common.color);
-    let mut polygon_coords: Vec<Value> = Vec::new();
     let basis = Matrix3::arbitrary_axis(hatch.normal);
+
+    // Convert all hatch paths to rings
+    let mut rings: Vec<Vec<Value>> = Vec::new();
     for path in &hatch.paths {
         let mut ring: Vec<Value> = Vec::new();
         for edge in &path.edges {
@@ -715,29 +959,47 @@ fn hatch_to_feature(hatch: &Hatch) -> Value {
             }
         }
         if ring.len() > 1 && ring.first() != ring.last() { ring.push(ring[0].clone()); }
-        if !ring.is_empty() { polygon_coords.push(Value::Array(vec![Value::Array(ring)])); }
+        if !ring.is_empty() { rings.push(ring); }
     }
-    make_feature_with_code("MultiPolygon", Value::Array(polygon_coords), json!({"color": color}), hatch.common.handle.value())
+
+    // GeoJSON MultiPolygon: all paths form one polygon with first ring as outer boundary
+    // and subsequent rings as holes (even-odd fill rule)
+    let polygon_coords = if !rings.is_empty() {
+        Value::Array(vec![Value::Array(rings.into_iter().map(Value::Array).collect())])
+    } else {
+        Value::Array(vec![])
+    };
+
+    let mut hatch_props = base_props(&color, &hatch.common, doc);
+    hatch_props.insert("fill".into(), json!(true));
+    hatch_props.insert("entityType".into(), json!("hatch"));
+    make_feature_with_code("MultiPolygon", polygon_coords, Value::Object(hatch_props), hatch.common.handle.value())
 }
 
-fn solid_to_feature(s: &Solid) -> Value {
+fn solid_to_feature(s: &Solid, doc: &CadDocument) -> Value {
     let c = color_to_rgb_string(s.common.color); let b = Matrix3::arbitrary_axis(s.normal);
     let p1 = b*s.first_corner; let p2 = b*s.second_corner; let p3 = b*s.third_corner; let p4 = b*s.fourth_corner;
     let mut r = vec![pt(p1), pt(p2), pt(p3)];
     if !s.is_triangle() { r.push(pt(p4)); }
     r.push(r[0].clone());
-    make_feature_with_code("Polygon", json!([r]), json!({"color": c}), s.common.handle.value())
+    let mut props = base_props(&c, &s.common, doc);
+    props.insert("fill".into(), json!(true));
+    props.insert("entityType".into(), json!("solid"));
+    make_feature_with_code("Polygon", json!([r]), Value::Object(props), s.common.handle.value())
 }
 
-fn face3d_to_feature(f: &Face3D) -> Value {
+fn face3d_to_feature(f: &Face3D, doc: &CadDocument) -> Value {
     let c = color_to_rgb_string(f.common.color);
     let mut r = vec![pt(f.first_corner), pt(f.second_corner), pt(f.third_corner)];
     if !f.is_triangle() { r.push(pt(f.fourth_corner)); }
     r.push(r[0].clone());
-    make_feature_with_code("Polygon", json!([r]), json!({"color": c}), f.common.handle.value())
+    let mut props = base_props(&c, &f.common, doc);
+    props.insert("fill".into(), json!(true));
+    props.insert("entityType".into(), json!("face3d"));
+    make_feature_with_code("Polygon", json!([r]), Value::Object(props), f.common.handle.value())
 }
 
-fn dimension_to_features(dim: &Dimension) -> Vec<Value> {
+fn dimension_to_features(dim: &Dimension, doc: &CadDocument) -> Vec<Value> {
     let base = dim.base(); let color = color_to_rgb_string(base.common.color);
     let handle = base.common.handle.value(); let mut features = Vec::new();
     let lc: Vec<Value> = match dim {
@@ -749,7 +1011,7 @@ fn dimension_to_features(dim: &Dimension) -> Vec<Value> {
         Dimension::Angular3Pt(d) => vec![pt(d.first_point), pt(d.angle_vertex), pt(d.second_point)],
         Dimension::Ordinate(d) => vec![pt(d.feature_location), pt(d.leader_endpoint)],
     };
-    if lc.len() >= 2 { features.push(make_feature_with_code("LineString", Value::Array(lc), json!({"color": color}), handle)); }
+    if lc.len() >= 2 { features.push(make_feature_with_code("LineString", Value::Array(lc), Value::Object(base_props(&color, &base.common, doc)), handle)); }
     let dt = if !base.text.is_empty() { base.text.clone() }
         else if let Some(ref ut) = base.user_text { ut.clone() }
         else { format!("{:.2}", base.actual_measurement) };
@@ -757,13 +1019,17 @@ fn dimension_to_features(dim: &Dimension) -> Vec<Value> {
         Dimension::Radius(_) => "radius", Dimension::Diameter(_) => "diameter",
         Dimension::Angular2Ln(_) => "angular", Dimension::Angular3Pt(_) => "angular3pt", Dimension::Ordinate(_) => "ordinate" };
     let rot = calc_text_rotation(base.text_rotation, base.normal);
-    features.push(make_feature_with_code("Point", pt(base.text_middle_point), json!({
-        "color": color, "text": dt, "fontSize": 0.0, "rotation": rot,
-        "measurement": base.actual_measurement, "dimensionType": ds }), handle));
+    let mut props = base_props(&color, &base.common, doc);
+    props.insert("text".into(), json!(dt));
+    props.insert("fontSize".into(), json!(0.0));
+    props.insert("rotation".into(), json!(rot));
+    props.insert("measurement".into(), json!(base.actual_measurement));
+    props.insert("dimensionType".into(), json!(ds));
+    features.push(make_feature_with_code("Point", pt(base.text_middle_point), Value::Object(props), handle));
     features
 }
 
-fn helix_to_feature(h: &Helix) -> Value { spline_to_feature(&h.spline) }
+fn helix_to_feature(h: &Helix, doc: &CadDocument) -> Value { spline_to_feature(&h.spline, doc) }
 
 fn has_empty_coords(f: &Value) -> bool {
     if let Some(g) = f.get("geometry") { if let Some(c) = g.get("coordinates") { return check_empty_coords(c); } return true; } true
@@ -804,16 +1070,16 @@ fn collect_positioning_baseline_features(doc: &CadDocument, layer_name: &str) ->
     struct LE { verts: Vec<Vector3>, feats: Vec<Value> }
     let mut texts: Vec<TI> = Vec::new();
     let mut lines: Vec<LE> = Vec::new();
-    for e in doc.entities().filter(|e| e.common().layer == layer_name) {
+    for e in doc.entities().filter(|e| e.common().layer == layer_name && e.common().owner_handle == doc.header.model_space_block_handle) {
         match e {
             EntityType::Text(t) => { let rp = t.alignment_point.unwrap_or(t.insertion_point);
                 texts.push(TI { pos: ocs_to_wcs(t.normal, rp), text: acadrust::entities::mtext_format::parse_plain_text(&t.value).to_plain_text() }); }
             EntityType::MText(t) => {
                 texts.push(TI { pos: ocs_to_wcs(t.normal, t.insertion_point), text: acadrust::entities::mtext_format::parse_mtext(&t.value, true).to_plain_text() }); }
-            EntityType::Line(l) => { lines.push(LE { verts: vec![l.start, l.end], feats: vec![line_to_feature(l)] }); }
-            EntityType::LwPolyline(p) => { let f = lwpolyline_to_features(p); let b = Matrix3::arbitrary_axis(p.normal);
+            EntityType::Line(l) => { lines.push(LE { verts: vec![l.start, l.end], feats: vec![line_to_feature(l, doc)] }); }
+            EntityType::LwPolyline(p) => { let f = lwpolyline_to_features(p, doc); let b = Matrix3::arbitrary_axis(p.normal);
                 lines.push(LE { verts: p.vertices.iter().map(|v| b * Vector3::new(v.location.x, v.location.y, p.elevation)).collect(), feats: f }); }
-            EntityType::Polyline2D(p) => { let f = polyline2d_to_feature(p); let b = Matrix3::arbitrary_axis(p.normal);
+            EntityType::Polyline2D(p) => { let f = polyline2d_to_feature(p, doc); let b = Matrix3::arbitrary_axis(p.normal);
                 lines.push(LE { verts: p.vertices.iter().map(|v| b * Vector3::new(v.location.x, v.location.y, p.elevation)).collect(), feats: vec![f] }); }
             _ => {}
         }
