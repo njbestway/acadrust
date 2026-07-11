@@ -519,8 +519,11 @@ fn arc_to_feature(arc: &Arc, doc: &CadDocument) -> Value {
 
 fn text_to_feature(text: &Text, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(text.common.color);
-    let ref_point = text.alignment_point.unwrap_or(text.insertion_point);
-    let wcs = ocs_to_wcs(text.normal, ref_point);
+    // Always use insertion_point as anchor (left/baseline position in DXF).
+    // This avoids mismatches between CAD's vertical alignment semantics and
+    // OpenLayers' Canvas textBaseline interpretation, which can cause text
+    // overlap when different baselines (e.g. "baseline" vs "top") are mixed.
+    let wcs = ocs_to_wcs(text.normal, text.insertion_point);
     let rotation_deg = calc_text_rotation(text.rotation, text.normal);
     let plain = acadrust::entities::mtext_format::parse_plain_text(&text.value);
     let display_text = plain.to_plain_text();
@@ -531,18 +534,12 @@ fn text_to_feature(text: &Text, doc: &CadDocument) -> Value {
         acadrust::entities::text::TextHorizontalAlignment::Middle => "middle",
         _ => "left",
     };
-    let v_align = match text.vertical_alignment {
-        acadrust::entities::text::TextVerticalAlignment::Baseline => "baseline",
-        acadrust::entities::text::TextVerticalAlignment::Bottom => "bottom",
-        acadrust::entities::text::TextVerticalAlignment::Middle => "middle",
-        acadrust::entities::text::TextVerticalAlignment::Top => "top",
-    };
     let mut props = base_props(&color, &text.common, doc);
     props.insert("text".into(), json!(display_text));
     props.insert("fontSize".into(), json!(text.height));
     props.insert("rotation".into(), json!(rotation_deg));
     props.insert("textAlign".into(), json!(h_align));
-    props.insert("textBaseline".into(), json!(v_align));
+    props.insert("textBaseline".into(), json!("bottom"));
     make_feature_with_code("Point", pt(wcs), Value::Object(props), text.common.handle.value())
 }
 
@@ -687,13 +684,8 @@ fn to_unicode_superscript(ch: char) -> char {
 
 fn attrib_to_feature(attrib: &AttributeEntity, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(attrib.common.color);
-    let is_default_align = matches!(
-        (attrib.horizontal_alignment, attrib.vertical_alignment),
-        (acadrust::entities::attribute_definition::HorizontalAlignment::Left,
-         acadrust::entities::attribute_definition::VerticalAlignment::Baseline)
-    );
-    let ref_point = if is_default_align { attrib.insertion_point } else { attrib.alignment_point };
-    let wcs = ocs_to_wcs(attrib.normal, ref_point);
+    // Always use insertion_point (left/baseline anchor) for consistent rendering
+    let wcs = ocs_to_wcs(attrib.normal, attrib.insertion_point);
     let rotation_deg = calc_text_rotation(attrib.rotation, attrib.normal);
     let h_align = match attrib.horizontal_alignment {
         acadrust::entities::attribute_definition::HorizontalAlignment::Left => "left",
@@ -702,18 +694,12 @@ fn attrib_to_feature(attrib: &AttributeEntity, doc: &CadDocument) -> Value {
         acadrust::entities::attribute_definition::HorizontalAlignment::Middle => "middle",
         _ => "left",
     };
-    let v_align = match attrib.vertical_alignment {
-        acadrust::entities::attribute_definition::VerticalAlignment::Baseline => "baseline",
-        acadrust::entities::attribute_definition::VerticalAlignment::Bottom => "bottom",
-        acadrust::entities::attribute_definition::VerticalAlignment::Middle => "middle",
-        acadrust::entities::attribute_definition::VerticalAlignment::Top => "top",
-    };
     let mut props = base_props(&color, &attrib.common, doc);
     props.insert("text".into(), json!(attrib.value));
     props.insert("fontSize".into(), json!(attrib.height));
     props.insert("rotation".into(), json!(rotation_deg));
     props.insert("textAlign".into(), json!(h_align));
-    props.insert("textBaseline".into(), json!(v_align));
+    props.insert("textBaseline".into(), json!("bottom"));
     make_feature_with_code("Point", pt(wcs), Value::Object(props), attrib.common.handle.value())
 }
 
