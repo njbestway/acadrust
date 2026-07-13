@@ -12,16 +12,22 @@
 use acadrust::entities::*;
 use acadrust::objects::ObjectType;
 use acadrust::types::{Color, Matrix3, Vector2, Vector3};
-use acadrust::{CadDocument, DwgReader, DxfReader, EntityType};
+use acadrust::{CadDocument, EntityType};
+#[cfg(not(feature = "server"))]
+use acadrust::{DwgReader, DxfReader};
+#[cfg(not(feature = "server"))]
 use clap::Parser;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+#[cfg(not(feature = "server"))]
 use std::fs;
+#[cfg(not(feature = "server"))]
 use std::path::Path;
 
 // ── CLI 参数定义 ──────────────────────────────────────────────
 
 /// DXF/DWG to GeoJSON 转换器
+#[cfg(not(feature = "server"))]
 #[derive(Parser, Debug)]
 #[command(name = "dxf2json", version, about)]
 struct Cli {
@@ -49,6 +55,98 @@ struct Cli {
 // ── 弧线离散化最小角度步长（弧度），6° ──
 const SMALLEST_ANGLE: f64 = 6.0 * std::f64::consts::PI / 180.0;
 
+// ═══════════════════════════════════════════════════════════════
+//  Public API (shared with dxf2json-server via #[path])
+// ═══════════════════════════════════════════════════════════════
+
+/// Convert a CadDocument into a list of (layer_name, FeatureCollection JSON) pairs.
+pub fn convert_document(
+    doc: &CadDocument,
+    filter_layers: &[String],
+    merge_xref: bool,
+) -> Vec<(String, Value)> {
+    // 1. Explode Insert entities (model space only)
+    let ms_handle = doc.header.model_space_block_handle;
+    let mut exploded_by_layer: HashMap<String, Vec<EntityType>> = HashMap::new();
+    for entity in doc.entities().filter(|e| e.common().owner_handle == ms_handle) {
+        if let EntityType::Insert(ins) = entity {
+            let exploded = ins.explode_from_document(doc);
+            for sub_entity in exploded {
+                let layer = sub_entity.common().layer.clone();
+                exploded_by_layer.entry(layer).or_default().push(sub_entity);
+            }
+            for attrib in &ins.attributes {
+                let layer = attrib.common.layer.clone();
+                exploded_by_layer
+                    .entry(layer)
+                    .or_default()
+                    .push(EntityType::AttributeEntity(attrib.clone()));
+            }
+        }
+    }
+
+    // 2. Determine layers to process
+    let all_layer_names: Vec<String> = if filter_layers.is_empty() {
+        doc.layers.iter().map(|l| l.name.clone()).collect()
+    } else {
+        filter_layers.to_vec()
+    };
+
+    // 3. Group XREF variants if requested
+    let layer_groups: Vec<(String, Vec<String>)> = if merge_xref {
+        let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for name in &all_layer_names {
+            let base = xref_base_name(name).to_string();
+            if !groups.contains_key(&base) { order.push(base.clone()); }
+            groups.entry(base).or_default().push(name.clone());
+        }
+        order.into_iter().map(|b| {
+            let variants = groups.remove(&b).unwrap_or_default();
+            (b, variants)
+        }).collect()
+    } else {
+        all_layer_names.into_iter().map(|n| (n.clone(), vec![n])).collect()
+    };
+
+    // 4. Convert each layer group to a FeatureCollection
+    let crs = read_crs_from_doc(doc, true);
+    let mut results = Vec::new();
+    for (output_name, variants) in &layer_groups {
+        let mut features = Vec::new();
+        for variant in variants {
+            features.extend(collect_layer_features(doc, variant, &exploded_by_layer));
+        }
+        if features.is_empty() { continue; }
+
+        let layer = doc.layers.get(output_name.as_str())
+            .or_else(|| variants.iter().find_map(|v| doc.layers.get(v.as_str())));
+        let visible = layer.map(|l| !l.flags.off).unwrap_or(true);
+        let is_base_layer = output_name == "定位基准线";
+
+        let mut fc = Map::new();
+        fc.insert("type".into(), json!("FeatureCollection"));
+        fc.insert("layerName".into(), json!(output_name));
+        fc.insert("visible".into(), json!(if visible { "1" } else { "0" }));
+        fc.insert("layerType".into(), json!(if is_base_layer { "1" } else { "0" }));
+        if let Some(l) = layer {
+            fc.insert("layerCode".into(), json!(format!("L{}", l.handle.value())));
+        }
+        fc.insert("crs".into(), crs.clone());
+
+        let filtered: Vec<Value> = features.into_iter().filter(|f| !has_empty_coords(f)).collect();
+        fc.insert("features".into(), Value::Array(filtered));
+
+        results.push((output_name.clone(), Value::Object(fc)));
+    }
+    results
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CLI entry points
+// ═══════════════════════════════════════════════════════════════
+
+#[cfg(not(feature = "server"))]
 fn main() -> acadrust::Result<()> {
     let cli = Cli::parse();
 
@@ -71,6 +169,7 @@ fn main() -> acadrust::Result<()> {
 }
 
 /// 处理单个 DXF/DWG 文件
+#[cfg(not(feature = "server"))]
 fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
     // 1. 读取文件
     let ext = Path::new(input_file)
