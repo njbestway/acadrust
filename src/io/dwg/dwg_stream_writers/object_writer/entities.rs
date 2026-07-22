@@ -79,6 +79,34 @@ impl<'a> DwgObjectWriter<'a> {
             }
             EntityType::Underlay(e) => self.write_underlay(e),
             EntityType::Table(e) => self.write_table(e),
+            EntityType::Light(e) => {
+                // Round-trip the light verbatim from its preserved raw bytes
+                // (only position/aim were decoded, for the glyph). Same policy
+                // as Surface / Unknown: keep it only when the encoding family
+                // matches, otherwise drop rather than corrupt.
+                if let Some(ref raw_data) = e.raw_dwg_data {
+                    if self.raw_passthrough_compatible(e.dwg_source_version) {
+                        self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    }
+                }
+            }
+            EntityType::SectionSymbol(e) => {
+                // Same policy as Light: only display fields were decoded, so
+                // round-trip verbatim from the preserved raw bytes.
+                if let Some(ref raw_data) = e.raw_dwg_data {
+                    if self.raw_passthrough_compatible(e.dwg_source_version) {
+                        self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    }
+                }
+            }
+            EntityType::ViewBorder(e) => {
+                // Same policy as Light / SectionSymbol.
+                if let Some(ref raw_data) = e.raw_dwg_data {
+                    if self.raw_passthrough_compatible(e.dwg_source_version) {
+                        self.register_raw_object(e.common.handle, raw_data, e.dwg_handle_bits);
+                    }
+                }
+            }
             EntityType::Unknown(e) => {
                 // Write raw DWG data verbatim only when the target matches the
                 // source encoding family; otherwise drop rather than corrupt.
@@ -3682,7 +3710,7 @@ mod tests {
         let mut doc = CadDocument::new();
         let handle = entity.common().handle;
         let idx = doc.entities.len();
-        doc.entities.push(entity);
+        doc.entities.push(std::sync::Arc::new(entity));
         doc.entity_index.insert(handle, idx);
         if let Some(br) = doc.block_records.get_mut("*Model_Space") {
             br.entity_handles.push(handle);

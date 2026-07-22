@@ -27,7 +27,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! acadrust = { version = "0.4.1", features = ["serde"] }
+//! acadrust = { version = "0.4.0", features = ["serde"] }
 //! ```
 //!
 //! ### Serialize an entity to JSON
@@ -136,6 +136,7 @@ pub mod document;
 pub mod io;
 pub mod xdata;
 pub mod objects;
+pub mod fields;
 
 // Re-export commonly used types
 pub use error::{DxfError, Result};
@@ -157,6 +158,7 @@ pub use tables::{
 
 // Re-export document
 pub use document::CadDocument;
+pub use document::{Preview, PreviewFormat};
 
 // Re-export I/O types
 pub use io::dxf::{DxfReader, DxfReaderConfiguration, DxfWriter};

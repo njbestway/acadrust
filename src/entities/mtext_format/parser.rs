@@ -276,6 +276,25 @@ impl MTextParser {
                         }
                     }
                 }
+                '\n' => {
+                    // A raw line feed is a hard paragraph break, same as `\P`
+                    // or the caret form `^J`.
+                    self.pos += 1;
+                    self.flush_current_span(merge_spans);
+                    self.document
+                        .push_paragraph(std::mem::take(&mut self.current_paragraph));
+                }
+                '\t' => {
+                    // Keep the tab character; the layout engine resolves it to
+                    // the paragraph's next tab stop.
+                    self.text_buf.push('\t');
+                    self.pos += 1;
+                }
+                c if (c as u32) < 0x20 => {
+                    // Any other control character renders as a space.
+                    self.text_buf.push(' ');
+                    self.pos += 1;
+                }
                 _ => {
                     self.text_buf.push(ch);
                     self.pos += 1;
@@ -431,7 +450,10 @@ impl MTextParser {
                 self.flush_current_span(false);
                 self.document
                     .push_paragraph(std::mem::take(&mut self.current_paragraph));
-                // Span properties carry over, same as \P
+                // Span properties carry over, same as \P — the one difference
+                // is that what follows opens a new column, so mark it. Drop the
+                // mark and `\N` is indistinguishable from `\P` downstream.
+                self.current_paragraph.starts_column = true;
             }
 
             // Wrap at dimension line (skip, no output)
@@ -599,15 +621,16 @@ impl MTextParser {
         self.current_props_mut().second_color = None;
         self.current_props_mut().color_rgb = None;
 
-        // Read color1
+        // Read color1. ACI runs 0..=256 (0 ByBlock, 256 ByLayer both mean
+        // "inherit" here); an out-of-range value is invalid and ignored.
         if let Some(c1) = self.parse_numeric_semicolon_value() {
-            if c1 != 0 && c1 != 256 {
+            if c1 != 0 && c1 != 256 && c1 <= 256 {
                 self.current_props_mut().color = Some(MTextColor::from_index(c1));
             }
 
             // Read color2 (ending color for gradient)
             if let Some(c2) = self.parse_numeric_semicolon_value() {
-                if c2 != 0 && c2 != 256 {
+                if c2 != 0 && c2 != 256 && c2 <= 256 {
                     self.current_props_mut().second_color = Some(MTextColor::from_index(c2));
                 }
             }
@@ -618,9 +641,12 @@ impl MTextParser {
     fn parse_rgb_color(&mut self) {
         let value_str = self.parse_semicolon_value();
         if let Ok(packed) = value_str.trim().parse::<u32>() {
-            let b_val = (packed & 0xFF) as u8;
+            // The MTEXT inline `\c` true-color value is byte-reversed relative
+            // to the usual 0xRRGGBB: the low byte is red and the high byte is
+            // blue (so `\c255` is pure red, not blue).
+            let r_val = (packed & 0xFF) as u8;
             let g_val = ((packed >> 8) & 0xFF) as u8;
-            let r_val = ((packed >> 16) & 0xFF) as u8;
+            let b_val = ((packed >> 16) & 0xFF) as u8;
             self.current_props_mut().color_rgb = Some((r_val, g_val, b_val));
             self.current_props_mut().color = None; // RGB overrides ACI
         }
@@ -924,22 +950,46 @@ impl MTextParser {
                 }
                 i += 1;
             } else if ch == 't' && i + 1 < chars.len() {
-                // Tab stops: comma-separated positions
+                // Tab stops: comma-separated, each optionally prefixed by
+                // `c`/`r`/`D` (center/right/decimal); no prefix = left.
                 let start = i + 1;
                 let mut k = start;
                 while k < chars.len()
                     && (chars[k].is_ascii_digit()
-                        || chars[k] == '.'
-                        || chars[k] == '-'
-                        || chars[k] == ',')
+                        || matches!(
+                            chars[k],
+                            '.' | '-' | ',' | 'c' | 'C' | 'r' | 'R' | 'd' | 'D'
+                        ))
                 {
                     k += 1;
                 }
                 let segment: String = chars[start..k].iter().collect();
-                let mut tab_stops: Vec<f64> = self.current_paragraph.properties.tab_stops.clone();
+                let mut tab_stops = self.current_paragraph.properties.tab_stops.clone();
                 for part in segment.split(',') {
-                    if let Ok(v) = part.trim().parse::<f64>() {
-                        tab_stops.push(v);
+                    let part = part.trim();
+                    let (prefix, num) = match part.chars().next() {
+                        Some('c') | Some('C') => (b'c', &part[1..]),
+                        Some('r') | Some('R') => (b'r', &part[1..]),
+                        // A decimal stop names its alignment character right
+                        // after `D` (`.` or `,`); the position follows it, so
+                        // `D.2` is a decimal stop at 2 (aligning on `.`), not 0.2.
+                        Some('d') | Some('D') => {
+                            let rest = &part[1..];
+                            (
+                                b'D',
+                                rest.strip_prefix(|c: char| c == '.' || c == ',')
+                                    .unwrap_or(rest),
+                            )
+                        }
+                        _ => (0, part),
+                    };
+                    if let Ok(v) = num.trim().parse::<f64>() {
+                        tab_stops.push(match prefix {
+                            b'c' => TabStop::Center(v),
+                            b'r' => TabStop::Right(v),
+                            b'D' => TabStop::Decimal(v),
+                            _ => TabStop::Left(v),
+                        });
                     }
                 }
                 self.current_paragraph.properties.tab_stops = tab_stops;
@@ -1106,19 +1156,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_rgb_color_blue() {
-        // BGR packed 255 = (B=255,G=0,R=0) → RGB (0,0,255) = BLUE
-        let doc = parse_mtext(r"{\c255;Blue}", false);
+    fn test_parse_rgb_color_red() {
+        // The inline `\c` value is byte-reversed: low byte is red, so
+        // `\c255` (0x0000FF) = pure RED (255,0,0).
+        let doc = parse_mtext(r"{\c255;Red}", false);
         assert_eq!(doc.paragraphs[0].spans.len(), 1);
         assert_eq!(
             doc.paragraphs[0].spans[0].properties.color_rgb,
-            Some((0, 0, 255))
+            Some((255, 0, 0))
         );
     }
 
     #[test]
     fn test_parse_rgb_color_green() {
-        // BGR packed 65280 = (B=0,G=255,R=0) → RGB (0,255,0) = GREEN
+        // 0x00FF00 → green is the middle byte, unaffected by the R/B swap.
         let doc = parse_mtext(r"{\c65280;Green}", false);
         assert_eq!(
             doc.paragraphs[0].spans[0].properties.color_rgb,
@@ -1127,12 +1178,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_rgb_color_red() {
-        // BGR packed 16711680 = (B=0,G=0,R=255) → RGB (255,0,0) = RED
-        let doc = parse_mtext(r"{\c16711680;Red}", false);
+    fn test_parse_rgb_color_blue() {
+        // High byte is blue, so `\c16711680` (0xFF0000) = pure BLUE (0,0,255).
+        let doc = parse_mtext(r"{\c16711680;Blue}", false);
         assert_eq!(
             doc.paragraphs[0].spans[0].properties.color_rgb,
-            Some((255, 0, 0))
+            Some((0, 0, 255))
         );
     }
 
@@ -1742,7 +1793,38 @@ mod tests {
     #[test]
     fn test_parse_paragraph_tab_stops() {
         let doc = parse_mtext("{\\pt3,6,9;Text}", false);
-        assert_eq!(doc.paragraphs[0].properties.tab_stops, vec![3.0, 6.0, 9.0]);
+        assert_eq!(
+            doc.paragraphs[0].properties.tab_stops,
+            vec![TabStop::Left(3.0), TabStop::Left(6.0), TabStop::Left(9.0)]
+        );
+    }
+
+    #[test]
+    fn test_parse_paragraph_decimal_tab_stop() {
+        // `D.2` = decimal stop at 2 aligning on `.` — the `.` is the alignment
+        // character, not part of the position.
+        let doc = parse_mtext("{\\ptD.2;Text}", false);
+        assert_eq!(
+            doc.paragraphs[0].properties.tab_stops,
+            vec![TabStop::Decimal(2.0)]
+        );
+    }
+
+    #[test]
+    fn test_raw_line_feed_breaks_paragraph() {
+        // A raw LF (0x0A) is a hard paragraph break, like `\P` / `^J`.
+        let doc = parse_mtext("a\nb", false);
+        assert_eq!(doc.paragraphs.len(), 2);
+        assert_eq!(doc.paragraphs[0].spans[0].text, "a");
+        assert_eq!(doc.paragraphs[1].spans[0].text, "b");
+    }
+
+    #[test]
+    fn test_control_char_becomes_space() {
+        // Any control char other than tab/LF renders as a space.
+        let doc = parse_mtext("a\u{1}b", false);
+        assert_eq!(doc.paragraphs.len(), 1);
+        assert_eq!(doc.paragraphs[0].spans[0].text, "a b");
     }
 
     #[test]
@@ -1758,7 +1840,10 @@ mod tests {
             doc.paragraphs[0].properties.line_spacing,
             Some(MTextLineSpacing::Exact(0.5))
         );
-        assert_eq!(doc.paragraphs[0].properties.tab_stops, vec![3.0, 6.0]);
+        assert_eq!(
+            doc.paragraphs[0].properties.tab_stops,
+            vec![TabStop::Left(3.0), TabStop::Left(6.0)]
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@
 
 use crate::classes::DxfClassCollection;
 use crate::entities::{EntityCommon, EntityType};
+use std::sync::Arc;
 use crate::objects::ObjectType;
 use crate::tables::*;
 use crate::types::{DxfVersion, Color, Handle, Vector2, Vector3};
@@ -871,6 +872,73 @@ impl Default for HeaderVariables {
     }
 }
 
+/// Format of an embedded DWG preview/thumbnail image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PreviewFormat {
+    /// Windows DIB — a `BITMAPINFOHEADER` + palette + pixels, WITHOUT the
+    /// 14-byte `BITMAPFILEHEADER`. Prepend a file header to save as `.bmp`.
+    Bmp,
+    /// Windows Metafile.
+    Wmf,
+    /// PNG (written by R2013+).
+    Png,
+}
+
+/// An embedded preview/thumbnail image stored in a DWG file.
+///
+/// DWG files carry a small raster preview of the drawing, shown by file
+/// browsers and the Open dialog. `data` holds the raw stored image bytes in
+/// `format`. `None` on [`CadDocument::preview`] means the file has no preview;
+/// the writer then emits an empty preview section (the previous behaviour).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Preview {
+    /// Image encoding of `data`.
+    pub format: PreviewFormat,
+    /// Raw image bytes exactly as stored in the file (a DIB for `Bmp`).
+    pub data: Vec<u8>,
+}
+
+/// A decoded `AcDbField` definition (a dynamic text field).
+///
+/// `evaluator` is the field's evaluator id (DXF 1) — e.g. `"AcVar"` or
+/// `"AcDiesel"`. `code` is the field-code string (DXF 2): for a *leaf* field it
+/// is the expression to evaluate (e.g. `\AcDiesel $(getvar,"cdate")`); for a
+/// *container* field it is the display template with `%<\_FldIdx N>%` markers
+/// that reference child fields. Child fields are the fields whose `owner` is
+/// this field's handle.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FieldDef {
+    pub handle: Handle,
+    pub owner: Handle,
+    pub evaluator: String,
+    pub code: String,
+    /// Referenced-object handles targeted by `%<\_ObjIdx N>%` markers in an
+    /// `AcObjProp` field code. Empty for other field kinds.
+    pub objects: Vec<Handle>,
+}
+
+/// Document summary information (the DWG `SummaryInfo` section — the same
+/// properties AutoCAD's DWGPROPS dialog edits). Backs the Document-category
+/// dynamic-text fields (Author, Title, Subject, Keywords, Comments,
+/// HyperlinkBase, RevisionNumber) plus arbitrary custom properties.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SummaryInfo {
+    pub title: String,
+    pub subject: String,
+    pub author: String,
+    pub keywords: String,
+    pub comments: String,
+    pub last_saved_by: String,
+    pub revision_number: String,
+    pub hyperlink_base: String,
+    /// Custom document properties as `(name, value)` pairs.
+    pub custom_properties: Vec<(String, String)>,
+}
+
 /// A CAD document containing all drawing data
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -922,7 +990,13 @@ pub struct CadDocument {
     pub notifications: crate::notification::NotificationCollection,
 
     /// All entities in the document (contiguous storage for cache locality).
-    pub(crate) entities: Vec<EntityType>,
+    /// Each entity is behind an `Arc` so cloning the whole document — the undo
+    /// snapshot on every edit — is O(entities) atomic bumps that structurally
+    /// share the geometry, not an O(entities) deep copy. A single-entity edit
+    /// (`get_entity_mut`) copies just that one entity out of the shared Arc
+    /// (`Arc::make_mut`), so the snapshot and the live doc diverge only where
+    /// they actually differ.
+    pub(crate) entities: Vec<Arc<EntityType>>,
 
     /// Handle → index mapping for O(1) entity lookup by handle.
     pub(crate) entity_index: HashMap<Handle, usize>,
@@ -937,12 +1011,48 @@ pub struct CadDocument {
     /// without re-decoding the raw object stream.
     pub block_visibility_params: HashMap<Handle, crate::objects::BlockVisibilityParameter>,
 
+    /// Annotation-scale handle for each annotative object-context leaf (an
+    /// `*OBJECTCONTEXTDATA` object). A *side* view: the leaves stay verbatim in
+    /// `objects` as `ObjectType::Unknown` for DWG round-trip. Maps the context
+    /// object handle → its `AcDbScale` handle (in `ACAD_SCALELIST`), so a
+    /// consumer can resolve an annotative entity's applied annotation scale.
+    pub context_scales: HashMap<Handle, Handle>,
+
     /// AcDbBlockRepresentationData link: representation-object handle → the
     /// dynamic block-definition handle it represents (group code 340). Lets a
     /// consumer connect an anonymous evaluated block to its dynamic definition
     /// (and thus to that definition's visibility parameter). Side view; the
     /// objects stay verbatim as `ObjectType::Unknown`.
     pub block_representations: HashMap<Handle, Handle>,
+
+    /// AcDbField definitions, keyed by field-object handle. A *side* view: the
+    /// FIELD objects stay verbatim in `objects` as `ObjectType::Unknown` for DWG
+    /// round-trip, while this exposes the evaluator id and field-code string so
+    /// a consumer can (re-)evaluate dynamic text fields without decoding the raw
+    /// object stream. The container→child link is recovered from each field's
+    /// `owner` (a child field is owned by its container field).
+    pub fields: HashMap<Handle, FieldDef>,
+
+    /// Document summary information (Author, Title, Subject, …) from the DWG
+    /// SummaryInfo section. Backs the Document-category dynamic-text fields.
+    pub summary_info: SummaryInfo,
+
+    /// Filesystem path the document was read from, when known (set by the DWG /
+    /// DXF file readers). Backs the `Filename` / `FilePath` dynamic-text fields.
+    /// `None` for documents built in memory or read from a bare stream.
+    pub source_path: Option<String>,
+
+    /// DGN line-style definitions (`AcDbLSDefinition`), keyed by handle. Present
+    /// for drawings converted from MicroStation DGN, whose custom linetypes are
+    /// empty in the standard `LTYPE` table and defined here instead. Read-side
+    /// view; the objects stay verbatim as `ObjectType::Unknown` for round-trip.
+    /// See [`crate::objects::DgnLsDefinition`].
+    pub dgn_ls_definitions: HashMap<Handle, crate::objects::DgnLsDefinition>,
+
+    /// DGN line-style components (`AcDbLS{Compound,StrokePattern,Point,Symbol}
+    /// Component`), keyed by handle — the nodes of a [`crate::objects::DgnLsDefinition`]'s
+    /// component tree. Read-side view; objects stay verbatim as `Unknown`.
+    pub dgn_ls_components: HashMap<Handle, crate::objects::DgnLsComponent>,
 
     /// Raw EED blobs per handle — populated during DWG read, consumed during DWG write.
     /// Keyed by the object/table-entry handle. Not serialized.
@@ -966,6 +1076,11 @@ pub struct CadDocument {
     /// `None` when not loaded from DWG (new/DXF).
     pub dwg_source_version: Option<DxfVersion>,
 
+    /// Embedded preview/thumbnail image. Populated by the DWG reader from the
+    /// file's preview section; the DWG writer embeds it when `Some` and emits an
+    /// empty preview when `None`. Not part of DXF.
+    pub preview: Option<Preview>,
+
     /// Modeler-entity handles (3DSOLID/REGION/BODY/SURFACE) whose geometry is
     /// stored as SAB blobs in the `AcDb:AcDsPrototype_1b` data-store section,
     /// in object-stream (file-offset) order. Populated by the DWG reader so the
@@ -973,6 +1088,25 @@ pub struct CadDocument {
     /// regardless of the document's handle-sorted entity order. Transient DWG
     /// read artifact; empty for new/DXF documents.
     pub(crate) acis_sab_handles: Vec<Handle>,
+
+    /// Section-view style (`AcDbSectionViewStyle`) display fields, decoded from
+    /// the DWG for rendering section marks (arrow size, label height, …). A file
+    /// normally has one; the first decoded is kept. `None` for new/DXF documents
+    /// or files without section views.
+    pub section_view_style: Option<crate::entities::SectionViewStyle>,
+
+    /// Model-documentation drawing-view graph, decoded from the DWG so section
+    /// marks can derive their true viewing direction. Empty for new/DXF files.
+    ///
+    /// `AcDbViewRep` handle → its object-specific handle references (they
+    /// include the view's `AcDbViewBorder` entity, its template viewport, its
+    /// block reference, and — for the parent of a section — the section
+    /// symbol).
+    pub view_rep_refs: std::collections::HashMap<Handle, Vec<Handle>>,
+
+    /// `AcDbViewRep` handles that own an `AcDbViewRepSectionDefinition` —
+    /// i.e. the section (result) views.
+    pub section_view_reps: Vec<Handle>,
 
     /// Next handle to assign
     next_handle: u64,
@@ -1000,13 +1134,23 @@ impl CadDocument {
             entity_index: HashMap::new(),
             objects: HashMap::new(),
             block_visibility_params: HashMap::new(),
+            context_scales: HashMap::new(),
             block_representations: HashMap::new(),
+            fields: HashMap::new(),
+            summary_info: SummaryInfo::default(),
+            source_path: None,
+            dgn_ls_definitions: HashMap::new(),
+            dgn_ls_components: HashMap::new(),
             eed_by_handle: HashMap::new(),
             xdic_by_handle: HashMap::new(),
             reactors_by_handle: HashMap::new(),
             block_entity_handles: HashMap::new(),
             dwg_source_version: None,
+            preview: None,
             acis_sab_handles: Vec::new(),
+            section_view_style: None,
+            view_rep_refs: std::collections::HashMap::new(),
+            section_view_reps: Vec::new(),
             // Start handle allocation above reserved table handles (0x1-0xA)
             // Table handles are well-known fixed values used by AutoCAD
             next_handle: 0x10,
@@ -1053,10 +1197,13 @@ impl CadDocument {
         }
         // Raw graphical records + per-entity EED.
         let raw_entities = self.entities.iter().any(|e| {
-            let raw = match e {
+            let raw = match e.as_ref() {
                 crate::entities::EntityType::Unknown(u) => u.raw_dwg_data.is_some(),
                 crate::entities::EntityType::Surface(s) => s.raw_dwg_data.is_some(),
                 crate::entities::EntityType::MultiLeader(m) => m.raw_dwg_data.is_some(),
+                crate::entities::EntityType::Light(l) => l.raw_dwg_data.is_some(),
+                crate::entities::EntityType::SectionSymbol(s) => s.raw_dwg_data.is_some(),
+                crate::entities::EntityType::ViewBorder(b) => b.raw_dwg_data.is_some(),
                 _ => false,
             };
             raw || !e.common().extended_data.raw_dwg_eed.is_empty()
@@ -1379,6 +1526,53 @@ impl CadDocument {
         self.classes.update_defaults();
     }
 
+    /// Ensure the CLASSES table carries the entry for an annotative
+    /// `AcDb*ObjectContextData` leaf class, so the DWG/DXF writer can emit its
+    /// 500+ class number. Call this when synthesizing a per-object annotation
+    /// context whose class the drawing does not already declare. No-op if the
+    /// class is already present or the name is unrecognised.
+    ///
+    /// Deliberately *not* part of [`initialize_defaults`](Self::initialize_defaults):
+    /// the DWG writer emits every class in this table, so auto-registering these
+    /// would inject spurious CLASSES entries into files that carry no annotative
+    /// context objects.
+    pub fn register_object_context_class(&mut self, dxf_name: &str) {
+        let cpp = match dxf_name {
+            "ACDB_BLKREFOBJECTCONTEXTDATA_CLASS" => "AcDbBlkRefObjectContextData",
+            "ACDB_TEXTOBJECTCONTEXTDATA_CLASS" => "AcDbTextObjectContextData",
+            "ACDB_MTEXTOBJECTCONTEXTDATA_CLASS" => "AcDbMTextObjectContextData",
+            "ACDB_ALDIMOBJECTCONTEXTDATA_CLASS" => "AcDbAlignedDimensionObjectContextData",
+            "ACDB_ANGDIMOBJECTCONTEXTDATA_CLASS" => "AcDbAngularDimensionObjectContextData",
+            "ACDB_DMDIMOBJECTCONTEXTDATA_CLASS" => "AcDbDiametricDimensionObjectContextData",
+            "ACDB_RADIMOBJECTCONTEXTDATA_CLASS" => "AcDbRadialDimensionObjectContextData",
+            "ACDB_RADIMLGOBJECTCONTEXTDATA_CLASS" => "AcDbRadialDimensionLargeObjectContextData",
+            "ACDB_ORDDIMOBJECTCONTEXTDATA_CLASS" => "AcDbOrdinateDimensionObjectContextData",
+            _ => return,
+        };
+        if self.classes.get_by_name(dxf_name).is_some() {
+            return;
+        }
+        use crate::classes::{DxfClass, ProxyFlags};
+        // Erase | Cloning | DisablesProxyWarningDialog — the flags real files
+        // carry on these proxy classes.
+        let proxy_flags = ProxyFlags(
+            ProxyFlags::ERASE_ALLOWED.0
+                | ProxyFlags::CLONING_ALLOWED.0
+                | ProxyFlags::DISABLES_PROXY_WARNING_DIALOG.0,
+        );
+        self.classes.add_or_update(DxfClass {
+            dxf_name: dxf_name.to_string(),
+            cpp_class_name: cpp.to_string(),
+            application_name: "ObjectDBX Classes".to_string(),
+            proxy_flags,
+            instance_count: 0,
+            was_zombie: false,
+            is_an_entity: false,
+            class_number: 0,
+            item_class_id: 0x1F3,
+        });
+    }
+
     /// Allocate a new unique handle
     pub fn allocate_handle(&mut self) -> Handle {
         // The DWG reader inserts objects straight into `objects` without
@@ -1458,20 +1652,24 @@ impl CadDocument {
 
         // Store in the flat entity map (DXF writer reads from here)
         let idx = self.entities.len();
-        self.entities.push(entity);
+        self.entities.push(Arc::new(entity));
         self.entity_index.insert(handle, idx);
         Ok(handle)
     }
 
     /// Get an entity by handle
     pub fn get_entity(&self, handle: Handle) -> Option<&EntityType> {
-        self.entity_index.get(&handle).map(|&idx| &self.entities[idx])
+        self.entity_index
+            .get(&handle)
+            .map(|&idx| self.entities[idx].as_ref())
     }
 
-    /// Get a mutable entity by handle
+    /// Get a mutable entity by handle. Copies just this entity out of any shared
+    /// Arc (`Arc::make_mut`), so an undo snapshot that shares it keeps the old
+    /// value while the live doc gets a private, mutable copy.
     pub fn get_entity_mut(&mut self, handle: Handle) -> Option<&mut EntityType> {
         let idx = *self.entity_index.get(&handle)?;
-        Some(&mut self.entities[idx])
+        Some(Arc::make_mut(&mut self.entities[idx]))
     }
 
     /// Explode an entity into simpler primitives, allocating valid handles.
@@ -1608,7 +1806,7 @@ impl CadDocument {
 
         // Store in the flat entity map
         let idx = self.entities.len();
-        self.entities.push(entity);
+        self.entities.push(Arc::new(entity));
         self.entity_index.insert(handle, idx);
         Ok(handle)
     }
@@ -1622,7 +1820,9 @@ impl CadDocument {
             let moved_handle = self.entities[idx].common().handle;
             self.entity_index.insert(moved_handle, idx);
         }
-        Some(entity)
+        // Hand back an owned entity: take it out of the Arc if we hold the last
+        // reference (a snapshot may still share it), else clone.
+        Some(Arc::try_unwrap(entity).unwrap_or_else(|a| (*a).clone()))
     }
 
     /// Add a new paper space layout to the document.
@@ -1697,7 +1897,7 @@ impl CadDocument {
             br.entity_handles.push(overall_vp_handle);
         }
         let idx = self.entities.len();
-        self.entities.push(EntityType::Viewport(overall_vp));
+        self.entities.push(Arc::new(EntityType::Viewport(overall_vp)));
         self.entity_index.insert(overall_vp_handle, idx);
 
         // Register in ACAD_LAYOUT dictionary
@@ -1730,12 +1930,16 @@ impl CadDocument {
     pub fn entities(&self) -> impl Iterator<Item = &EntityType> {
         self.entities
             .iter()
+            .map(|e| e.as_ref())
             .filter(|e| !matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)))
     }
 
-    /// Iterate over all entities mutably
+    /// Iterate over all entities mutably. Copy-on-write per entity: iterating
+    /// this after an undo snapshot detaches each entity from the shared Arc, so
+    /// it is O(entities) deep only for bulk passes (save prep, handle reassign),
+    /// not the single-entity edit path (which uses `get_entity_mut`).
     pub fn entities_mut(&mut self) -> impl Iterator<Item = &mut EntityType> {
-        self.entities.iter_mut()
+        self.entities.iter_mut().map(Arc::make_mut)
     }
 
     /// Owner handle of a dictionary/unknown object, for ownership-chain walks.
@@ -1786,7 +1990,7 @@ impl CadDocument {
         &self,
         insert_handle: Handle,
     ) -> Option<(Handle, &crate::objects::BlockVisibilityParameter)> {
-        let insert = self.entities.iter().find_map(|e| match e {
+        let insert = self.entities.iter().find_map(|e| match e.as_ref() {
             EntityType::Insert(i) if i.common.handle == insert_handle => Some(i),
             _ => None,
         })?;
@@ -2046,6 +2250,7 @@ impl CadDocument {
 
         // Model-space entities (document.entities) — use model space as default owner
         for entity in self.entities.iter_mut() {
+            let entity = Arc::make_mut(entity);
             let common = match entity {
                 EntityType::Dimension(d) => {
                     let base = d.base_mut();
@@ -2067,7 +2272,7 @@ impl CadDocument {
             let br_handle = br.handle;
             for eh in &br.entity_handles {
                 if let Some(&idx) = self.entity_index.get(eh) {
-                    let entity = &mut self.entities[idx];
+                    let entity = Arc::make_mut(&mut self.entities[idx]);
                     let common = match entity {
                         EntityType::Dimension(d) => {
                             let base = d.base_mut();
@@ -2133,6 +2338,9 @@ fn get_common_mut(entity: &mut EntityType) -> &mut EntityCommon {
         EntityType::Wipeout(e) => &mut e.common,
         EntityType::Shape(e) => &mut e.common,
         EntityType::Underlay(e) => &mut e.common,
+        EntityType::Light(e) => &mut e.common,
+        EntityType::SectionSymbol(e) => &mut e.common,
+        EntityType::ViewBorder(e) => &mut e.common,
         EntityType::Seqend(e) => &mut e.common,
         EntityType::Ole2Frame(e) => &mut e.common,
         EntityType::PolygonMesh(e) => &mut e.common,

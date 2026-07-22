@@ -166,10 +166,15 @@ impl MTextParagraphAlignment {
     /// Parse from the character after `q` in `\p...q<char>...;`
     pub fn from_char(ch: char) -> Self {
         match ch.to_ascii_lowercase() {
-            'l' | 'd' => MTextParagraphAlignment::Left,
+            'l' => MTextParagraphAlignment::Left,
             'r' => MTextParagraphAlignment::Right,
             'c' => MTextParagraphAlignment::Center,
             'j' => MTextParagraphAlignment::Justified,
+            'd' => MTextParagraphAlignment::Distributed,
+            // AutoCAD serializes the paragraph *Justify* option as `\pq*` (the
+            // `*` that means "reset" in the other sub-codes), so a `q*` reads as
+            // justified rather than an alignment reset.
+            '*' => MTextParagraphAlignment::Justified,
             _ => MTextParagraphAlignment::Default,
         }
     }
@@ -280,8 +285,9 @@ pub struct ParagraphProperties {
     pub spacing_after: Option<f64>,
     /// Line spacing from `se<n>` (exact spacing in inches) or `sm<n>` (multiple of font height).
     pub line_spacing: Option<MTextLineSpacing>,
-    /// Tab stops from `t<n>` (comma-separated positions).
-    pub tab_stops: Vec<f64>,
+    /// Tab stops from `t<n>` (comma-separated, each optionally prefixed by
+    /// `c`/`r`/`D` for center/right/decimal alignment).
+    pub tab_stops: Vec<TabStop>,
 }
 
 /// Line spacing mode from `se` (exact) or `sm` (multiple) inside `\p...;`.
@@ -301,8 +307,10 @@ pub enum MTextLineSpacing {
 // Tab Stop
 // ============================================================================
 
-/// A tab stop position and alignment.
-#[derive(Debug, Clone, PartialEq)]
+/// A tab stop position and alignment. The prefix in `\p…t…;` selects the
+/// kind: no prefix = left, `c` = center, `r` = right, `D` = decimal (the text
+/// after the tab aligns its decimal point on the stop).
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TabStop {
     /// Left-aligned tab at position
@@ -311,6 +319,28 @@ pub enum TabStop {
     Center(f64),
     /// Right-aligned tab at position
     Right(f64),
+    /// Decimal (dot-aligned) tab at position (`D` prefix)
+    Decimal(f64),
+}
+
+impl TabStop {
+    /// The stop's position along the paragraph.
+    pub fn position(&self) -> f64 {
+        match self {
+            TabStop::Left(p) | TabStop::Center(p) | TabStop::Right(p) | TabStop::Decimal(p) => *p,
+        }
+    }
+}
+
+impl core::fmt::Display for TabStop {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TabStop::Left(p) => write!(f, "{}", p),
+            TabStop::Center(p) => write!(f, "c{}", p),
+            TabStop::Right(p) => write!(f, "r{}", p),
+            TabStop::Decimal(p) => write!(f, "D{}", p),
+        }
+    }
 }
 
 // ============================================================================
@@ -683,6 +713,16 @@ pub struct MTextParagraph {
 
     /// Styled text spans in this paragraph.
     pub spans: Vec<MTextSpan>,
+
+    /// Whether this paragraph opens a new column — the `\N` break, as opposed
+    /// to `\P`, which only starts a new line.
+    ///
+    /// The two are otherwise identical (span properties carry across both), so
+    /// without this the distinction is gone the moment the string is parsed:
+    /// a reader lays the columns out as one stacked run, and
+    /// [`to_mtext_string`](MTextDocument::to_mtext_string) writes every break
+    /// back as `\P`, quietly collapsing a multi-column MTEXT on round-trip.
+    pub starts_column: bool,
 }
 
 impl MTextParagraph {
@@ -691,6 +731,7 @@ impl MTextParagraph {
         MTextParagraph {
             properties: ParagraphProperties::default(),
             spans: Vec::new(),
+            starts_column: false,
         }
     }
 
@@ -699,6 +740,7 @@ impl MTextParagraph {
         MTextParagraph {
             properties: ParagraphProperties::default(),
             spans: vec![MTextSpan::plain(text)],
+            starts_column: false,
         }
     }
 
@@ -861,7 +903,9 @@ impl MTextDocument {
 
         for (pi, paragraph) in self.paragraphs.iter().enumerate() {
             if pi > 0 {
-                result.push_str("\\P");
+                // `\N` opens a column, `\P` only a line — writing `\P` for both
+                // would flatten a multi-column MTEXT every time it round-trips.
+                result.push_str(if paragraph.starts_column { "\\N" } else { "\\P" });
             }
 
             // Emit paragraph properties
@@ -1059,16 +1103,37 @@ impl MTextDocument {
             }
         }
 
-        // Height — only emit when changed
+        // Height — only emit when changed. A relative `\H…x;` MULTIPLIES the
+        // current height: the parser compounds it (`\H0.2x;\H1.25x;` →
+        // Factor(0.25)) and stores the cumulative factor. So the serializer must
+        // emit the RATIO from the running height to the target, NOT the stored
+        // cumulative factor — writing `\H0.25x;` there would compound a second
+        // time on re-parse (0.25 × current), shrinking the height on every
+        // round-trip until the text collapses toward zero.
         if props.height != current_props.height {
-            match props.height {
-                Some(MTextScalar::Factor(v)) => {
-                    write!(result, "\\H{}x;", v).ok();
+            match (&current_props.height, &props.height) {
+                // Factor → Factor: emit target/current so re-parse multiplies
+                // back to exactly `target`.
+                (Some(MTextScalar::Factor(c)), Some(MTextScalar::Factor(t)))
+                    if c.abs() > 1e-12 =>
+                {
+                    write!(result, "\\H{}x;", t / c).ok();
                 }
-                Some(MTextScalar::Absolute(v)) => {
-                    write!(result, "\\H{};", v).ok();
+                // Fresh factor over the implicit 1.0.
+                (None, Some(MTextScalar::Factor(t))) => {
+                    write!(result, "\\H{}x;", t).ok();
                 }
-                None => {}
+                // Absolute always resets — no compounding, emit it directly.
+                (_, Some(MTextScalar::Absolute(t))) => {
+                    write!(result, "\\H{};", t).ok();
+                }
+                // Factor reached from an absolute (or a zero current) can't be
+                // expressed by a relative code; emit it as a fresh factor. This
+                // mix does not arise from parsed input.
+                (_, Some(MTextScalar::Factor(t))) => {
+                    write!(result, "\\H{}x;", t).ok();
+                }
+                (_, None) => {}
             }
         }
 
@@ -1138,6 +1203,38 @@ impl Default for MTextDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::mtext_format::parse_mtext;
+
+    /// Relative `\H…x;` heights compound, so serialize→parse must reproduce the
+    /// SAME cumulative factors. Regression for the bug where the serializer
+    /// re-emitted the stored cumulative factor as a relative code, compounding
+    /// it a second time and shrinking the text toward zero on every round-trip
+    /// (budweiser2018.dwg handle 50019 rendered its editor preview at collapsed
+    /// / huge sizes because of this).
+    #[test]
+    fn relative_height_round_trips() {
+        let src = "{\\H0.2x;a\\H1.25x;b\\H0.8x;c}";
+        let factors = |v: &str| -> Vec<f64> {
+            parse_mtext(v, true)
+                .paragraphs
+                .iter()
+                .flat_map(|p| p.spans.iter())
+                .filter_map(|s| match s.properties.height {
+                    Some(MTextScalar::Factor(f)) => Some(f),
+                    _ => None,
+                })
+                .collect()
+        };
+        let f0 = factors(src);
+        assert_eq!(f0, vec![0.2, 0.25, 0.2], "parse compounds: {f0:?}");
+        // Round-trip repeatedly — factors must stay put, not decay.
+        let mut v = parse_mtext(src, true).to_mtext_string();
+        for _ in 0..3 {
+            let f = factors(&v);
+            assert_eq!(f, f0, "height decayed on round-trip: {f:?} (value {v:?})");
+            v = parse_mtext(&v, true).to_mtext_string();
+        }
+    }
 
     #[test]
     fn test_special_char_to_char() {
@@ -1210,7 +1307,7 @@ mod tests {
         );
         assert_eq!(
             MTextParagraphAlignment::from_char('d'),
-            MTextParagraphAlignment::Left
+            MTextParagraphAlignment::Distributed
         );
     }
 

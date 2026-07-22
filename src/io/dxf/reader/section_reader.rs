@@ -225,7 +225,7 @@ impl<'a> SectionReader<'a> {
                 "$STEPSIZE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.step_size = v; } } }
                 "$LENSLENGTH" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.lens_length = v; } } }
                 "$CAMERAHEIGHT" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.camera_height = v; } } }
-                "$CAMERADISPLAY" => { if let Some(p) = self.reader.read_pair()? { hdr.camera_display = p.as_i16() == Some(1); } }
+                "$CAMERADISPLAY" => { if let Some(p) = self.reader.read_pair()? { hdr.camera_display = p.as_bool() == Some(true); } }
 
                 // ── Current Entity Settings ──
                 "$CECOLOR" => {
@@ -237,11 +237,11 @@ impl<'a> SectionReader<'a> {
                 "$CEPSNTYPE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_i16() { hdr.current_plotstyle_type = v; } } }
                 "$ENDCAPS" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_i16() { hdr.end_caps = v; } } }
                 "$JOINSTYLE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_i16() { hdr.join_style = v; } } }
-                "$LWDISPLAY" => { if let Some(p) = self.reader.read_pair()? { hdr.lineweight_display = p.as_i16() == Some(1); } }
-                "$XEDIT" => { if let Some(p) = self.reader.read_pair()? { hdr.xedit = p.as_i16() == Some(1); } }
-                "$EXTNAMES" => { if let Some(p) = self.reader.read_pair()? { hdr.extended_names = p.as_i16() == Some(1); } }
-                "$PSTYLEMODE" => { if let Some(p) = self.reader.read_pair()? { hdr.plotstyle_mode = p.as_i16() == Some(1); } }
-                "$OLESTARTUP" => { if let Some(p) = self.reader.read_pair()? { hdr.ole_startup = p.as_i16() == Some(1); } }
+                "$LWDISPLAY" => { if let Some(p) = self.reader.read_pair()? { hdr.lineweight_display = p.as_bool() == Some(true); } }
+                "$XEDIT" => { if let Some(p) = self.reader.read_pair()? { hdr.xedit = p.as_bool() == Some(true); } }
+                "$EXTNAMES" => { if let Some(p) = self.reader.read_pair()? { hdr.extended_names = p.as_bool() == Some(true); } }
+                "$PSTYLEMODE" => { if let Some(p) = self.reader.read_pair()? { hdr.plotstyle_mode = p.as_bool() == Some(true); } }
+                "$OLESTARTUP" => { if let Some(p) = self.reader.read_pair()? { hdr.ole_startup = p.as_bool() == Some(true); } }
 
                 // ── Dimension Variables ──
                 "$DIMSCALE" => { if let Some(p) = self.reader.read_pair()? { if let Some(v) = p.as_double() { hdr.dim_scale = v; } } }
@@ -606,7 +606,7 @@ impl<'a> SectionReader<'a> {
                             };
                             entity_handles.push(h);
                             let idx = document.entities.len();
-                            document.entities.push(entity);
+                            document.entities.push(std::sync::Arc::new(entity));
                             document.entity_index.insert(h, idx);
                         }
 
@@ -3838,6 +3838,11 @@ impl<'a> SectionReader<'a> {
         let mut fourth_point = PointReader::new();
         let mut text = String::new();
         let mut style_name = String::from("Standard");
+        // Name of the anonymous block that holds the baked dimension picture
+        // (DXF group code 2). Without it the dimension has no geometry block to
+        // render from and consumers must recompute the picture, which drifts
+        // from the authored one.
+        let mut block_name = String::new();
         let mut layer = String::from("0");
         let mut color = Color::ByLayer;
         let mut line_weight = LineWeight::ByLayer;
@@ -3890,6 +3895,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 1 => text = pair.value_string.clone(),
+                2 => block_name = pair.value_string.clone(),
                 3 => style_name = pair.value_string.clone(),
                 10 | 20 | 30 => { definition_point.add_coordinate(&pair); }
                 11 | 21 | 31 => { text_middle_point.add_coordinate(&pair); }
@@ -4065,6 +4071,12 @@ impl<'a> SectionReader<'a> {
             dc.common.linetype = common.linetype;
             dc.common.linetype_scale = common.linetype_scale;
             dc.common.transparency = common.transparency;
+            // Carry the parsed XDATA onto the built dimension. Without this the
+            // per-object dimension-style overrides (ACAD_DSTYLE), annotative and
+            // plugin extended data read into `common` above are dropped, so any
+            // dimension XDATA silently vanishes on a DXF reload.
+            dc.common.extended_data = common.extended_data;
+            dc.block_name = block_name;
             if let Some(pt) = text_middle_point.get_point() {
                 dc.text_middle_point = pt;
             }
@@ -5570,6 +5582,7 @@ impl<'a> SectionReader<'a> {
                 291 => { if let Some(v) = pair.as_bool() { ml.enable_dogleg = v; } }
                 290 => { if let Some(v) = pair.as_bool() { ml.enable_landing = v; } }
                 292 => { if let Some(v) = pair.as_bool() { ml.text_frame = v; } }
+                293 => { if let Some(v) = pair.as_bool() { ml.enable_annotation_scale = v; } }
                 _ => { self.try_read_common_entity_code(&pair, &mut ml.common)?; }
             }
         }
