@@ -1566,10 +1566,26 @@ impl<'a> DwgObjectWriter<'a> {
             // The block header's owned-handle list MUST match the objects the
             // entity loop below actually writes (br.entity_handles + their
             // sub-entities). Compute that set first.
+            //
+            // A live editing session can leave DANGLING handles in the block's
+            // chain: deleting an entity removes it from the document but its
+            // handle may stay listed here until the chain is next rebuilt. A
+            // header that promises more owned objects than the entity loop
+            // writes makes AutoCAD stop reading the block at the first
+            // dangling handle — the file opens EMPTY (issue: model space with
+            // 40 claimed / 16 real entities). Keep only handles that resolve
+            // to a live entity; the entity loop below uses the same list so
+            // header and stream always agree.
+            let live_handles: Vec<Handle> = br
+                .entity_handles
+                .iter()
+                .copied()
+                .filter(|h| self.document.entity_index.contains_key(h))
+                .collect();
             let entity_handles_for_header = if is_xref {
                 Vec::new()
             } else {
-                let expanded = self.expand_entity_handles(&br.entity_handles);
+                let expanded = self.expand_entity_handles(&live_handles);
                 // Prefer the original DWG-binary order/handles when available,
                 // but only when they describe exactly the same set — otherwise
                 // the file had entities added or removed since it was read and
@@ -1597,8 +1613,10 @@ impl<'a> DwgObjectWriter<'a> {
             self.write_block_begin(br);
 
             if !is_xref {
-                // Look up entities by handle from the document
-                let handles = &br.entity_handles;
+                // Look up entities by handle from the document. Iterate the
+                // dangling-filtered list so the pre-R2004 prev/next links
+                // never point at a handle that is not in the stream.
+                let handles = &live_handles;
                 let len = handles.len();
                 for (i, eh) in handles.iter().enumerate() {
                     if let Some(&idx) = self.document.entity_index.get(eh) {
@@ -1634,7 +1652,7 @@ impl<'a> DwgObjectWriter<'a> {
         for &eh in handles {
             expanded.push(eh);
             if let Some(&idx) = self.document.entity_index.get(&eh) {
-                let entity = &self.document.entities[idx];
+                let entity = self.document.entities[idx].as_ref();
                 match entity {
                     EntityType::PolyfaceMesh(e) => {
                         for v in &e.vertices {
@@ -1710,7 +1728,7 @@ impl<'a> DwgObjectWriter<'a> {
             .entity_handles
             .iter()
             .find_map(|eh| {
-                if let Some(EntityType::Block(b)) = self.document.entity_index.get(eh).map(|&idx| &self.document.entities[idx]) {
+                if let Some(EntityType::Block(b)) = self.document.entity_index.get(eh).map(|&idx| self.document.entities[idx].as_ref()) {
                     Some(b.base_point)
                 } else {
                     None
@@ -1810,7 +1828,7 @@ impl<'a> DwgObjectWriter<'a> {
         let block = if !record.block_entity_handle.is_null() {
             let result = self.document.entity_index.get(&record.block_entity_handle)
                 .and_then(|&idx| {
-                    if let EntityType::Block(b) = &self.document.entities[idx] {
+                    if let EntityType::Block(b) = self.document.entities[idx].as_ref() {
                         Some(b.clone())
                     } else {
                         eprintln!("  BLOCK entity at idx {} is NOT Block type", idx);
@@ -1875,7 +1893,7 @@ impl<'a> DwgObjectWriter<'a> {
         let block_end = if !record.block_end_handle.is_null() {
             self.document.entity_index.get(&record.block_end_handle)
                 .and_then(|&idx| {
-                    if let EntityType::BlockEnd(be) = &self.document.entities[idx] {
+                    if let EntityType::BlockEnd(be) = self.document.entities[idx].as_ref() {
                         Some(be.clone())
                     } else {
                         None

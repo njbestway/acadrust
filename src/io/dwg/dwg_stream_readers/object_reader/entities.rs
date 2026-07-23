@@ -4,16 +4,16 @@
 //! `dwg_stream_writers/object_writer/entities.rs`. They read entity-specific
 //! fields after common entity data has already been parsed.
 
-use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
-use crate::io::dwg::dwg_version::DwgVersion;
-use crate::types::{Color, Handle, Vector2, Vector3, DxfVersion};
+use super::safe_count;
 use crate::entities::multileader::*;
-use crate::entities::solid3d::{Wire, WireType, Silhouette, AcisRevision};
+use crate::entities::solid3d::{AcisRevision, Silhouette, Wire, WireType};
 use crate::entities::table::{
     CellContent, CellStateFlags, CellType, CellValue, CellValueType, TableCell,
     TableCellContentType, TableColumn, TableRow,
 };
-use super::safe_count;
+use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
+use crate::io::dwg::dwg_version::DwgVersion;
+use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
 
 // ════════════════════════════════════════════════════════════════════════
 //  Result structs
@@ -264,6 +264,15 @@ pub struct ToleranceData {
     pub dimstyle_handle: u64,
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LightData {
+    pub name: String,
+    pub light_type: i32,
+    pub position: Vector3,
+    pub target: Vector3,
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  Reader functions — Simple entities
 // ════════════════════════════════════════════════════════════════════════
@@ -273,7 +282,37 @@ pub fn read_point(reader: &mut DwgMergedReader) -> PointData {
     let thickness = reader.read_bit_thickness();
     let normal = reader.read_bit_extrusion();
     let x_axis_angle = reader.read_bit_double();
-    PointData { location, thickness, normal, x_axis_angle }
+    PointData {
+        location,
+        thickness,
+        normal,
+        x_axis_angle,
+    }
+}
+
+/// Read an `AcDbLight` body (position + aim), following the ODA field order.
+///
+/// Only the fields up to the aim target are decoded — enough to place the
+/// display glyph. The attenuation / shadow / photometric tail is left in the
+/// record buffer (the caller preserves the whole record verbatim for
+/// write-back, so nothing is lost). The common entity data has already been
+/// consumed by the caller before this runs.
+pub fn read_light(reader: &mut DwgMergedReader) -> LightData {
+    let _class_version = reader.read_bit_long(); // BL 90
+    let name = reader.read_variable_text(); // TV 1
+    let light_type = reader.read_bit_long(); // BL 70 (1 distant, 2 point, 3 spot)
+    let _status = reader.read_bit(); // B 290
+    let _light_color = reader.read_cm_color(); // CMC 63
+    let _plot_glyph = reader.read_bit(); // B 291
+    let _intensity = reader.read_bit_double(); // BD 40
+    let position = reader.read_3bit_double(); // 3BD 10
+    let target = reader.read_3bit_double(); // 3BD 11
+    LightData {
+        name,
+        light_type,
+        position,
+        target,
+    }
 }
 
 pub fn read_line(reader: &mut DwgMergedReader, version: DwgVersion) -> LineData {
@@ -299,7 +338,12 @@ pub fn read_line(reader: &mut DwgMergedReader, version: DwgVersion) -> LineData 
     }
     let thickness = reader.read_bit_thickness();
     let normal = reader.read_bit_extrusion();
-    LineData { start, end, thickness, normal }
+    LineData {
+        start,
+        end,
+        thickness,
+        normal,
+    }
 }
 
 pub fn read_circle(reader: &mut DwgMergedReader) -> CircleData {
@@ -307,7 +351,12 @@ pub fn read_circle(reader: &mut DwgMergedReader) -> CircleData {
     let radius = reader.read_bit_double();
     let thickness = reader.read_bit_thickness();
     let normal = reader.read_bit_extrusion();
-    CircleData { center, radius, thickness, normal }
+    CircleData {
+        center,
+        radius,
+        thickness,
+        normal,
+    }
 }
 
 pub fn read_arc(reader: &mut DwgMergedReader) -> ArcData {
@@ -317,7 +366,14 @@ pub fn read_arc(reader: &mut DwgMergedReader) -> ArcData {
     let normal = reader.read_bit_extrusion();
     let start_angle = reader.read_bit_double();
     let end_angle = reader.read_bit_double();
-    ArcData { center, radius, thickness, normal, start_angle, end_angle }
+    ArcData {
+        center,
+        radius,
+        thickness,
+        normal,
+        start_angle,
+        end_angle,
+    }
 }
 
 pub fn read_ellipse(reader: &mut DwgMergedReader) -> EllipseData {
@@ -327,19 +383,32 @@ pub fn read_ellipse(reader: &mut DwgMergedReader) -> EllipseData {
     let minor_axis_ratio = reader.read_bit_double();
     let start_parameter = reader.read_bit_double();
     let end_parameter = reader.read_bit_double();
-    EllipseData { center, major_axis, normal, minor_axis_ratio, start_parameter, end_parameter }
+    EllipseData {
+        center,
+        major_axis,
+        normal,
+        minor_axis_ratio,
+        start_parameter,
+        end_parameter,
+    }
 }
 
 pub fn read_ray(reader: &mut DwgMergedReader) -> RayData {
     let base_point = reader.read_3bit_double();
     let direction = reader.read_3bit_double();
-    RayData { base_point, direction }
+    RayData {
+        base_point,
+        direction,
+    }
 }
 
 pub fn read_xline(reader: &mut DwgMergedReader) -> XLineData {
     let base_point = reader.read_3bit_double();
     let direction = reader.read_3bit_double();
-    XLineData { base_point, direction }
+    XLineData {
+        base_point,
+        direction,
+    }
 }
 
 pub fn read_solid(reader: &mut DwgMergedReader) -> SolidData {
@@ -350,7 +419,15 @@ pub fn read_solid(reader: &mut DwgMergedReader) -> SolidData {
     let third_corner = reader.read_2raw_double();
     let fourth_corner = reader.read_2raw_double();
     let normal = reader.read_bit_extrusion();
-    SolidData { thickness, elevation, first_corner, second_corner, third_corner, fourth_corner, normal }
+    SolidData {
+        thickness,
+        elevation,
+        first_corner,
+        second_corner,
+        third_corner,
+        fourth_corner,
+        normal,
+    }
 }
 
 pub fn read_face3d(reader: &mut DwgMergedReader, version: DwgVersion) -> Face3DData {
@@ -360,7 +437,13 @@ pub fn read_face3d(reader: &mut DwgMergedReader, version: DwgVersion) -> Face3DD
         let third_corner = reader.read_3bit_double();
         let fourth_corner = reader.read_3bit_double();
         let invisible_edges = reader.read_bit_short();
-        Face3DData { first_corner, second_corner, third_corner, fourth_corner, invisible_edges }
+        Face3DData {
+            first_corner,
+            second_corner,
+            third_corner,
+            fourth_corner,
+            invisible_edges,
+        }
     } else {
         let has_no_flags = reader.read_bit();
         // ODA spec "Z is zero" — corner1's Z is omitted from the stream
@@ -374,7 +457,11 @@ pub fn read_face3d(reader: &mut DwgMergedReader, version: DwgVersion) -> Face3DD
 
         let x1 = reader.read_raw_double();
         let y1 = reader.read_raw_double();
-        let z1 = if !z_is_zero { reader.read_raw_double() } else { 0.0 };
+        let z1 = if !z_is_zero {
+            reader.read_raw_double()
+        } else {
+            0.0
+        };
 
         let x2 = reader.read_bit_double_with_default(x1);
         let y2 = reader.read_bit_double_with_default(y1);
@@ -388,7 +475,11 @@ pub fn read_face3d(reader: &mut DwgMergedReader, version: DwgVersion) -> Face3DD
         let y4 = reader.read_bit_double_with_default(y3);
         let z4 = reader.read_bit_double_with_default(z3);
 
-        let invisible_edges = if !has_no_flags { reader.read_bit_short() } else { 0 };
+        let invisible_edges = if !has_no_flags {
+            reader.read_bit_short()
+        } else {
+            0
+        };
 
         Face3DData {
             first_corner: Vector3::new(x1, y1, z1),
@@ -416,10 +507,15 @@ pub fn read_insert(reader: &mut DwgMergedReader, version: DwgVersion) -> InsertD
         // R2000+
         let data_flags = reader.main_mut().read_2bits();
         match data_flags {
-            3 => { x_scale = 1.0; y_scale = 1.0; z_scale = 1.0; }
+            3 => {
+                x_scale = 1.0;
+                y_scale = 1.0;
+                z_scale = 1.0;
+            }
             2 => {
                 x_scale = reader.read_raw_double();
-                y_scale = x_scale; z_scale = x_scale;
+                y_scale = x_scale;
+                z_scale = x_scale;
             }
             1 => {
                 x_scale = 1.0;
@@ -439,7 +535,16 @@ pub fn read_insert(reader: &mut DwgMergedReader, version: DwgVersion) -> InsertD
     let has_attribs = reader.read_bit();
     let block_handle = reader.read_handle();
 
-    InsertData { insert_point, x_scale, y_scale, z_scale, rotation, normal, has_attribs, block_handle }
+    InsertData {
+        insert_point,
+        x_scale,
+        y_scale,
+        z_scale,
+        rotation,
+        normal,
+        has_attribs,
+        block_handle,
+    }
 }
 
 pub fn read_minsert(reader: &mut DwgMergedReader, version: DwgVersion) -> MInsertData {
@@ -448,7 +553,13 @@ pub fn read_minsert(reader: &mut DwgMergedReader, version: DwgVersion) -> MInser
     let row_count = reader.read_bit_short();
     let column_spacing = reader.read_bit_double();
     let row_spacing = reader.read_bit_double();
-    MInsertData { insert, column_count, row_count, column_spacing, row_spacing }
+    MInsertData {
+        insert,
+        column_count,
+        row_count,
+        column_spacing,
+        row_spacing,
+    }
 }
 
 pub fn read_lwpolyline(reader: &mut DwgMergedReader, version: DwgVersion) -> LwPolylineData {
@@ -460,22 +571,50 @@ pub fn read_lwpolyline(reader: &mut DwgMergedReader, version: DwgVersion) -> LwP
     let has_bulges = (flag & 0x10) != 0;
     let has_widths = (flag & 0x20) != 0;
 
-    let constant_width = if has_constant_width { reader.read_bit_double() } else { 0.0 };
-    let elevation = if has_elevation { reader.read_bit_double() } else { 0.0 };
+    let constant_width = if has_constant_width {
+        reader.read_bit_double()
+    } else {
+        0.0
+    };
+    let elevation = if has_elevation {
+        reader.read_bit_double()
+    } else {
+        0.0
+    };
     // LWPOLYLINE stores its own thickness/extrusion as plain BD / 3BD — NOT the
     // self-compressing BT / BE forms used in the common entity data. Reading BT
     // (1 bit) where a BD (2-bit selector) lives, or BE (1 bit) where a 3BD lives,
     // under-reads and desyncs every field after it (garbage normal, garbage
     // point count) for any polyline that carries a thickness or extrusion flag,
     // while flag-free polylines still parse. Matches ACadSharp's readLwPolyline.
-    let thickness = if has_thickness { reader.read_bit_double() } else { 0.0 };
-    let normal = if has_normal { reader.read_3bit_double() } else { Vector3::UNIT_Z };
+    let thickness = if has_thickness {
+        reader.read_bit_double()
+    } else {
+        0.0
+    };
+    let normal = if has_normal {
+        reader.read_3bit_double()
+    } else {
+        Vector3::UNIT_Z
+    };
 
     let num_pts = safe_count(reader.read_bit_long());
-    let num_bulges = if has_bulges { safe_count(reader.read_bit_long()) } else { 0 };
+    let num_bulges = if has_bulges {
+        safe_count(reader.read_bit_long())
+    } else {
+        0
+    };
     let has_vertex_ids = (flag & 0x400) != 0;
-    let num_vertex_ids = if has_vertex_ids { safe_count(reader.read_bit_long()) } else { 0 };
-    let num_widths = if has_widths { safe_count(reader.read_bit_long()) } else { 0 };
+    let num_vertex_ids = if has_vertex_ids {
+        safe_count(reader.read_bit_long())
+    } else {
+        0
+    };
+    let num_widths = if has_widths {
+        safe_count(reader.read_bit_long())
+    } else {
+        0
+    };
 
     // Read vertex positions
     let mut xs = Vec::with_capacity(num_pts as usize);
@@ -541,14 +680,22 @@ pub fn read_lwpolyline(reader: &mut DwgMergedReader, version: DwgVersion) -> LwP
     let mut vertices = Vec::with_capacity(num_pts as usize);
     for i in 0..num_pts as usize {
         vertices.push(LwPolylineVertex {
-            x: xs[i], y: ys[i],
+            x: xs[i],
+            y: ys[i],
             bulge: bulges[i],
             start_width: start_widths[i],
             end_width: end_widths[i],
         });
     }
 
-    LwPolylineData { flag, constant_width, elevation, thickness, normal, vertices }
+    LwPolylineData {
+        flag,
+        constant_width,
+        elevation,
+        thickness,
+        normal,
+        vertices,
+    }
 }
 
 pub fn read_spline(
@@ -622,19 +769,26 @@ pub fn read_spline(
     }
 
     SplineData {
-        scenario, degree, rational, closed, periodic,
-        knot_tolerance, control_tolerance,
-        knots, control_points, weights,
-        fit_tolerance, begin_tangent, end_tangent, fit_points,
+        scenario,
+        degree,
+        rational,
+        closed,
+        periodic,
+        knot_tolerance,
+        control_tolerance,
+        knots,
+        control_points,
+        weights,
+        fit_tolerance,
+        begin_tangent,
+        end_tangent,
+        fit_points,
         knot_param,
     }
 }
 
 /// Shared text entity data reader (used by Text, AttDef, AttEntity).
-pub fn read_text_entity_data(
-    reader: &mut DwgMergedReader,
-    version: DwgVersion,
-) -> TextEntityData {
+pub fn read_text_entity_data(reader: &mut DwgMergedReader, version: DwgVersion) -> TextEntityData {
     if version.r13_14_only() {
         let elevation = reader.read_bit_double();
         let ix = reader.read_raw_double();
@@ -655,37 +809,83 @@ pub fn read_text_entity_data(
         TextEntityData {
             insertion_point: Vector3::new(ix, iy, elevation),
             alignment_point: Vector3::new(ax, ay, elevation),
-            normal, thickness, oblique_angle, rotation,
-            height, width_factor, value, generation,
-            horizontal_alignment, vertical_alignment,
+            normal,
+            thickness,
+            oblique_angle,
+            rotation,
+            height,
+            width_factor,
+            value,
+            generation,
+            horizontal_alignment,
+            vertical_alignment,
             style_handle: 0,
         }
     } else {
         let data_flags = reader.read_byte();
-        let elevation = if (data_flags & 0x01) == 0 { reader.read_raw_double() } else { 0.0 };
+        let elevation = if (data_flags & 0x01) == 0 {
+            reader.read_raw_double()
+        } else {
+            0.0
+        };
         let ix = reader.read_raw_double();
         let iy = reader.read_raw_double();
         let (ax, ay) = if (data_flags & 0x02) == 0 {
-            (reader.read_bit_double_with_default(ix),
-             reader.read_bit_double_with_default(iy))
-        } else { (0.0, 0.0) };
+            (
+                reader.read_bit_double_with_default(ix),
+                reader.read_bit_double_with_default(iy),
+            )
+        } else {
+            (0.0, 0.0)
+        };
         let normal = reader.read_bit_extrusion();
         let thickness = reader.read_bit_thickness();
-        let oblique_angle = if (data_flags & 0x04) == 0 { reader.read_raw_double() } else { 0.0 };
-        let rotation = if (data_flags & 0x08) == 0 { reader.read_raw_double() } else { 0.0 };
+        let oblique_angle = if (data_flags & 0x04) == 0 {
+            reader.read_raw_double()
+        } else {
+            0.0
+        };
+        let rotation = if (data_flags & 0x08) == 0 {
+            reader.read_raw_double()
+        } else {
+            0.0
+        };
         let height = reader.read_raw_double();
-        let width_factor = if (data_flags & 0x10) == 0 { reader.read_raw_double() } else { 1.0 };
+        let width_factor = if (data_flags & 0x10) == 0 {
+            reader.read_raw_double()
+        } else {
+            1.0
+        };
         let value = reader.read_variable_text();
-        let generation = if (data_flags & 0x20) == 0 { reader.read_bit_short() } else { 0 };
-        let horizontal_alignment = if (data_flags & 0x40) == 0 { reader.read_bit_short() } else { 0 };
-        let vertical_alignment = if (data_flags & 0x80) == 0 { reader.read_bit_short() } else { 0 };
+        let generation = if (data_flags & 0x20) == 0 {
+            reader.read_bit_short()
+        } else {
+            0
+        };
+        let horizontal_alignment = if (data_flags & 0x40) == 0 {
+            reader.read_bit_short()
+        } else {
+            0
+        };
+        let vertical_alignment = if (data_flags & 0x80) == 0 {
+            reader.read_bit_short()
+        } else {
+            0
+        };
 
         TextEntityData {
             insertion_point: Vector3::new(ix, iy, elevation),
             alignment_point: Vector3::new(ax, ay, elevation),
-            normal, thickness, oblique_angle, rotation,
-            height, width_factor, value, generation,
-            horizontal_alignment, vertical_alignment,
+            normal,
+            thickness,
+            oblique_angle,
+            rotation,
+            height,
+            width_factor,
+            value,
+            generation,
+            horizontal_alignment,
+            vertical_alignment,
             style_handle: 0,
         }
     }
@@ -707,7 +907,11 @@ pub fn read_mtext(
     let normal = reader.read_3bit_double();
     let x_direction = reader.read_3bit_double();
     let rectangle_width = reader.read_bit_double();
-    let rectangle_height = if version.r2007_plus() { reader.read_bit_double() } else { 0.0 };
+    let rectangle_height = if version.r2007_plus() {
+        reader.read_bit_double()
+    } else {
+        0.0
+    };
     let height = reader.read_bit_double();
     let attachment_point = reader.read_bit_short();
     let drawing_direction = reader.read_bit_short();
@@ -745,8 +949,13 @@ pub fn read_mtext(
     }
 
     // R2018+: "is NOT annotative" bit, then (when not annotative) a block of
-    // redundant fields followed by optional column data.
-    let mut is_annotative = true;
+    // redundant fields followed by optional column data. The inline annotative
+    // bit exists only from R2018 on; for older files MTEXT annotativeness is
+    // carried by its text style / annotation context, not the entity, so the
+    // default here must be `false` — defaulting to `true` would mark *every*
+    // pre-R2018 MTEXT annotative and (mis)scale it in annotation-scaled
+    // viewports.
+    let mut is_annotative = false;
     let mut column_type = 0i16;
     let mut column_count = 0i32;
     let mut column_flow_reversed = false;
@@ -811,12 +1020,33 @@ pub fn read_mtext(
     }
 
     MTextData {
-        insertion_point, normal, x_direction, rectangle_width, rectangle_height,
-        height, attachment_point, drawing_direction, extents_height, extents_width,
-        value, style_handle, linespacing_style, linespacing_factor, unknown_bit,
-        background_flags, background_scale, background_color, background_transparency,
-        is_annotative, column_type, column_count, column_flow_reversed,
-        column_auto_height, column_width, column_gutter, column_heights,
+        insertion_point,
+        normal,
+        x_direction,
+        rectangle_width,
+        rectangle_height,
+        height,
+        attachment_point,
+        drawing_direction,
+        extents_height,
+        extents_width,
+        value,
+        style_handle,
+        linespacing_style,
+        linespacing_factor,
+        unknown_bit,
+        background_flags,
+        background_scale,
+        background_color,
+        background_transparency,
+        is_annotative,
+        column_type,
+        column_count,
+        column_flow_reversed,
+        column_auto_height,
+        column_width,
+        column_gutter,
+        column_heights,
     }
 }
 
@@ -830,7 +1060,17 @@ pub fn read_shape(reader: &mut DwgMergedReader) -> ShapeData {
     let shape_number = reader.read_bit_short();
     let normal = reader.read_3bit_double();
     let style_handle = reader.read_handle();
-    ShapeData { insertion_point, size, rotation, relative_x_scale, oblique_angle, thickness, shape_number, normal, style_handle }
+    ShapeData {
+        insertion_point,
+        size,
+        rotation,
+        relative_x_scale,
+        oblique_angle,
+        thickness,
+        shape_number,
+        normal,
+        style_handle,
+    }
 }
 
 pub fn read_leader(reader: &mut DwgMergedReader, version: DwgVersion) -> LeaderData {
@@ -840,7 +1080,9 @@ pub fn read_leader(reader: &mut DwgMergedReader, version: DwgVersion) -> LeaderD
 
     let num_pts = safe_count(reader.read_bit_long());
     let mut vertices = Vec::with_capacity(num_pts as usize);
-    for _ in 0..num_pts { vertices.push(reader.read_3bit_double()); }
+    for _ in 0..num_pts {
+        vertices.push(reader.read_3bit_double());
+    }
 
     let origin = reader.read_3bit_double();
     let normal = reader.read_3bit_double();
@@ -883,11 +1125,21 @@ pub fn read_leader(reader: &mut DwgMergedReader, version: DwgVersion) -> LeaderD
     let dimstyle_handle = reader.read_handle();
 
     LeaderData {
-        unknown_bit, annotation_type, path_type, vertices,
-        origin, normal, horizontal_direction, block_offset,
-        annotation_offset, text_height, text_width,
-        hookline_on_x_dir, arrowhead_on,
-        annotation_handle, dimstyle_handle,
+        unknown_bit,
+        annotation_type,
+        path_type,
+        vertices,
+        origin,
+        normal,
+        horizontal_direction,
+        block_offset,
+        annotation_offset,
+        text_height,
+        text_width,
+        hookline_on_x_dir,
+        arrowhead_on,
+        annotation_handle,
+        dimstyle_handle,
     }
 }
 
@@ -904,7 +1156,13 @@ pub fn read_tolerance(reader: &mut DwgMergedReader, version: DwgVersion) -> Tole
     let text = reader.read_variable_text();
     let dimstyle_handle = reader.read_handle();
 
-    ToleranceData { insertion_point, direction, normal, text, dimstyle_handle }
+    ToleranceData {
+        insertion_point,
+        direction,
+        normal,
+        text,
+        dimstyle_handle,
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1007,25 +1265,66 @@ pub struct DimensionOrdinateData {
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HatchBoundaryEdgeLine { pub start: Vector2, pub end: Vector2 }
+pub struct HatchBoundaryEdgeLine {
+    pub start: Vector2,
+    pub end: Vector2,
+}
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HatchBoundaryEdgeArc { pub center: Vector2, pub radius: f64, pub start_angle: f64, pub end_angle: f64, pub ccw: bool }
+pub struct HatchBoundaryEdgeArc {
+    pub center: Vector2,
+    pub radius: f64,
+    pub start_angle: f64,
+    pub end_angle: f64,
+    pub ccw: bool,
+}
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HatchBoundaryEdgeEllipse { pub center: Vector2, pub major_endpoint: Vector2, pub minor_ratio: f64, pub start_angle: f64, pub end_angle: f64, pub ccw: bool }
+pub struct HatchBoundaryEdgeEllipse {
+    pub center: Vector2,
+    pub major_endpoint: Vector2,
+    pub minor_ratio: f64,
+    pub start_angle: f64,
+    pub end_angle: f64,
+    pub ccw: bool,
+}
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HatchBoundaryEdgeSpline { pub degree: i32, pub rational: bool, pub periodic: bool, pub knots: Vec<f64>, pub control_points: Vec<Vector3>, pub fit_points: Vec<Vector2>, pub start_tangent: Vector2, pub end_tangent: Vector2 }
+pub struct HatchBoundaryEdgeSpline {
+    pub degree: i32,
+    pub rational: bool,
+    pub periodic: bool,
+    pub knots: Vec<f64>,
+    pub control_points: Vec<Vector3>,
+    pub fit_points: Vec<Vector2>,
+    pub start_tangent: Vector2,
+    pub end_tangent: Vector2,
+}
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum HatchEdge { Line(HatchBoundaryEdgeLine), Arc(HatchBoundaryEdgeArc), Ellipse(HatchBoundaryEdgeEllipse), Spline(HatchBoundaryEdgeSpline) }
+pub enum HatchEdge {
+    Line(HatchBoundaryEdgeLine),
+    Arc(HatchBoundaryEdgeArc),
+    Ellipse(HatchBoundaryEdgeEllipse),
+    Spline(HatchBoundaryEdgeSpline),
+}
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HatchBoundaryPath { pub flags: i32, pub edges: Vec<HatchEdge>, pub polyline_vertices: Vec<(Vector2, f64)>, pub polyline_closed: bool, pub boundary_handle_count: i32 }
+pub struct HatchBoundaryPath {
+    pub flags: i32,
+    pub edges: Vec<HatchEdge>,
+    pub polyline_vertices: Vec<(Vector2, f64)>,
+    pub polyline_closed: bool,
+    pub boundary_handle_count: i32,
+}
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HatchPatternLine { pub angle: f64, pub base_point: Vector2, pub offset: Vector2, pub dashes: Vec<f64> }
+pub struct HatchPatternLine {
+    pub angle: f64,
+    pub base_point: Vector2,
+    pub offset: Vector2,
+    pub dashes: Vec<f64>,
+}
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HatchData {
@@ -1107,7 +1406,9 @@ pub struct Polyline2DData {
 pub struct Vertex2DData {
     pub handle: crate::types::Handle,
     pub flags: u8,
-    pub x: f64, pub y: f64, pub z: f64,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
     pub start_width: f64,
     pub end_width: f64,
     pub bulge: f64,
@@ -1203,6 +1504,9 @@ pub struct Ole2FrameData {
     pub mode: i16,
     pub data: Vec<u8>,
     pub trailing_byte: u8,
+    /// Frame corners decoded from the OLE data blob (see `ole2frame_corners`).
+    pub upper_left: Vector3,
+    pub lower_right: Vector3,
 }
 
 #[derive(Debug, Clone)]
@@ -1230,7 +1534,11 @@ pub fn read_common_dimension_data(
     version: DwgVersion,
     _dxf_version: DxfVersion,
 ) -> DimensionCommonData {
-    let version_byte = if version.r2010_plus() { reader.read_byte() } else { 0 };
+    let version_byte = if version.r2010_plus() {
+        reader.read_byte()
+    } else {
+        0
+    };
     let normal = reader.read_3bit_double();
     let text_mid = reader.read_2raw_double();
     let text_mid_z = reader.read_bit_double();
@@ -1266,81 +1574,166 @@ pub fn read_common_dimension_data(
     let block_handle = reader.read_handle();
 
     DimensionCommonData {
-        version_byte, normal,
+        version_byte,
+        normal,
         text_middle_point: Vector3::new(text_mid.x, text_mid.y, text_mid_z),
-        flags_byte, text, text_rotation, horizontal_direction,
-        ins_scale, ins_rotation,
-        attachment_point, linespacing_style, linespacing_factor,
-        actual_measurement, unknown_bit, flip_arrow1, flip_arrow2,
-        insertion_point, dimstyle_handle, block_handle,
+        flags_byte,
+        text,
+        text_rotation,
+        horizontal_direction,
+        ins_scale,
+        ins_rotation,
+        attachment_point,
+        linespacing_style,
+        linespacing_factor,
+        actual_measurement,
+        unknown_bit,
+        flip_arrow1,
+        flip_arrow2,
+        insertion_point,
+        dimstyle_handle,
+        block_handle,
     }
 }
 
-pub fn read_dimension_linear(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> DimensionLinearData {
+pub fn read_dimension_linear(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> DimensionLinearData {
     let common = read_common_dimension_data(reader, version, dxf_version);
     let first_point = reader.read_3bit_double();
     let second_point = reader.read_3bit_double();
     let definition_point = reader.read_3bit_double();
     let ext_line_rotation = reader.read_bit_double();
     let rotation = reader.read_bit_double();
-    DimensionLinearData { common, first_point, second_point, definition_point, ext_line_rotation, rotation }
+    DimensionLinearData {
+        common,
+        first_point,
+        second_point,
+        definition_point,
+        ext_line_rotation,
+        rotation,
+    }
 }
 
-pub fn read_dimension_aligned(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> DimensionAlignedData {
+pub fn read_dimension_aligned(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> DimensionAlignedData {
     let common = read_common_dimension_data(reader, version, dxf_version);
     let first_point = reader.read_3bit_double();
     let second_point = reader.read_3bit_double();
     let definition_point = reader.read_3bit_double();
     let ext_line_rotation = reader.read_bit_double();
-    DimensionAlignedData { common, first_point, second_point, definition_point, ext_line_rotation }
+    DimensionAlignedData {
+        common,
+        first_point,
+        second_point,
+        definition_point,
+        ext_line_rotation,
+    }
 }
 
-pub fn read_dimension_radius(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> DimensionRadiusData {
+pub fn read_dimension_radius(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> DimensionRadiusData {
     let common = read_common_dimension_data(reader, version, dxf_version);
     let definition_point = reader.read_3bit_double();
     let angle_vertex = reader.read_3bit_double();
     let leader_length = reader.read_bit_double();
-    DimensionRadiusData { common, definition_point, angle_vertex, leader_length }
+    DimensionRadiusData {
+        common,
+        definition_point,
+        angle_vertex,
+        leader_length,
+    }
 }
 
-pub fn read_dimension_diameter(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> DimensionDiameterData {
+pub fn read_dimension_diameter(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> DimensionDiameterData {
     let common = read_common_dimension_data(reader, version, dxf_version);
     let definition_point = reader.read_3bit_double();
     let angle_vertex = reader.read_3bit_double();
     let leader_length = reader.read_bit_double();
-    DimensionDiameterData { common, definition_point, angle_vertex, leader_length }
+    DimensionDiameterData {
+        common,
+        definition_point,
+        angle_vertex,
+        leader_length,
+    }
 }
 
-pub fn read_dimension_angular_2ln(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> DimensionAngular2LnData {
+pub fn read_dimension_angular_2ln(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> DimensionAngular2LnData {
     let common = read_common_dimension_data(reader, version, dxf_version);
     let dimension_arc = reader.read_2raw_double();
     let first_point = reader.read_3bit_double();
     let second_point = reader.read_3bit_double();
     let angle_vertex = reader.read_3bit_double();
     let definition_point = reader.read_3bit_double();
-    DimensionAngular2LnData { common, dimension_arc, first_point, second_point, angle_vertex, definition_point }
+    DimensionAngular2LnData {
+        common,
+        dimension_arc,
+        first_point,
+        second_point,
+        angle_vertex,
+        definition_point,
+    }
 }
 
-pub fn read_dimension_angular_3pt(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> DimensionAngular3PtData {
+pub fn read_dimension_angular_3pt(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> DimensionAngular3PtData {
     let common = read_common_dimension_data(reader, version, dxf_version);
     let definition_point = reader.read_3bit_double();
     let first_point = reader.read_3bit_double();
     let second_point = reader.read_3bit_double();
     let angle_vertex = reader.read_3bit_double();
-    DimensionAngular3PtData { common, definition_point, first_point, second_point, angle_vertex }
+    DimensionAngular3PtData {
+        common,
+        definition_point,
+        first_point,
+        second_point,
+        angle_vertex,
+    }
 }
 
-pub fn read_dimension_ordinate(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> DimensionOrdinateData {
+pub fn read_dimension_ordinate(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> DimensionOrdinateData {
     let common = read_common_dimension_data(reader, version, dxf_version);
     let definition_point = reader.read_3bit_double();
     let feature_location = reader.read_3bit_double();
     let leader_endpoint = reader.read_3bit_double();
     let is_ordinate_type_x = reader.read_byte() == 1;
-    DimensionOrdinateData { common, definition_point, feature_location, leader_endpoint, is_ordinate_type_x }
+    DimensionOrdinateData {
+        common,
+        definition_point,
+        feature_location,
+        leader_endpoint,
+        is_ordinate_type_x,
+    }
 }
 
 /// Read a hatch boundary path (both polyline and non-polyline variants).
-pub fn read_hatch_boundary_path(reader: &mut DwgMergedReader, version: DwgVersion) -> HatchBoundaryPath {
+pub fn read_hatch_boundary_path(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+) -> HatchBoundaryPath {
     let flags = reader.read_bit_long();
     let is_polyline = (flags & 2) != 0;
 
@@ -1364,7 +1757,13 @@ pub fn read_hatch_boundary_path(reader: &mut DwgMergedReader, version: DwgVersio
                     let start_angle = reader.read_bit_double();
                     let end_angle = reader.read_bit_double();
                     let ccw = reader.read_bit();
-                    edges.push(HatchEdge::Arc(HatchBoundaryEdgeArc { center, radius, start_angle, end_angle, ccw }));
+                    edges.push(HatchEdge::Arc(HatchBoundaryEdgeArc {
+                        center,
+                        radius,
+                        start_angle,
+                        end_angle,
+                        ccw,
+                    }));
                 }
                 3 => {
                     let center = reader.read_2raw_double();
@@ -1373,7 +1772,14 @@ pub fn read_hatch_boundary_path(reader: &mut DwgMergedReader, version: DwgVersio
                     let start_angle = reader.read_bit_double();
                     let end_angle = reader.read_bit_double();
                     let ccw = reader.read_bit();
-                    edges.push(HatchEdge::Ellipse(HatchBoundaryEdgeEllipse { center, major_endpoint, minor_ratio, start_angle, end_angle, ccw }));
+                    edges.push(HatchEdge::Ellipse(HatchBoundaryEdgeEllipse {
+                        center,
+                        major_endpoint,
+                        minor_ratio,
+                        start_angle,
+                        end_angle,
+                        ccw,
+                    }));
                 }
                 4 => {
                     let degree = reader.read_bit_long();
@@ -1382,11 +1788,17 @@ pub fn read_hatch_boundary_path(reader: &mut DwgMergedReader, version: DwgVersio
                     let num_knots = safe_count(reader.read_bit_long());
                     let num_ctrl = safe_count(reader.read_bit_long());
                     let mut knots = Vec::new();
-                    for _ in 0..num_knots { knots.push(reader.read_bit_double()); }
+                    for _ in 0..num_knots {
+                        knots.push(reader.read_bit_double());
+                    }
                     let mut control_points = Vec::new();
                     for _ in 0..num_ctrl {
                         let pt = reader.read_2raw_double();
-                        let w = if rational { reader.read_bit_double() } else { 1.0 };
+                        let w = if rational {
+                            reader.read_bit_double()
+                        } else {
+                            1.0
+                        };
                         control_points.push(Vector3::new(pt.x, pt.y, w));
                     }
                     let mut fit_points = Vec::new();
@@ -1395,12 +1807,23 @@ pub fn read_hatch_boundary_path(reader: &mut DwgMergedReader, version: DwgVersio
                     if version.r2010_plus() {
                         let num_fit = safe_count(reader.read_bit_long());
                         if num_fit > 0 {
-                            for _ in 0..num_fit { fit_points.push(reader.read_2raw_double()); }
+                            for _ in 0..num_fit {
+                                fit_points.push(reader.read_2raw_double());
+                            }
                             start_tangent = reader.read_2raw_double();
                             end_tangent = reader.read_2raw_double();
                         }
                     }
-                    edges.push(HatchEdge::Spline(HatchBoundaryEdgeSpline { degree, rational, periodic, knots, control_points, fit_points, start_tangent, end_tangent }));
+                    edges.push(HatchEdge::Spline(HatchBoundaryEdgeSpline {
+                        degree,
+                        rational,
+                        periodic,
+                        knots,
+                        control_points,
+                        fit_points,
+                        start_tangent,
+                        end_tangent,
+                    }));
                 }
                 _ => {}
             }
@@ -1411,7 +1834,11 @@ pub fn read_hatch_boundary_path(reader: &mut DwgMergedReader, version: DwgVersio
         let num_verts = safe_count(reader.read_bit_long());
         for _ in 0..num_verts {
             let pt = reader.read_2raw_double();
-            let bulge = if has_bulge { reader.read_bit_double() } else { 0.0 };
+            let bulge = if has_bulge {
+                reader.read_bit_double()
+            } else {
+                0.0
+            };
             polyline_vertices.push((pt, bulge));
         }
     }
@@ -1423,7 +1850,13 @@ pub fn read_hatch_boundary_path(reader: &mut DwgMergedReader, version: DwgVersio
     // associative boundary references.
     let boundary_handle_count = safe_count(reader.read_bit_long());
 
-    HatchBoundaryPath { flags, edges, polyline_vertices, polyline_closed, boundary_handle_count }
+    HatchBoundaryPath {
+        flags,
+        edges,
+        polyline_vertices,
+        polyline_closed,
+        boundary_handle_count,
+    }
 }
 
 pub fn read_hatch(reader: &mut DwgMergedReader, version: DwgVersion) -> HatchData {
@@ -1463,7 +1896,9 @@ pub fn read_hatch(reader: &mut DwgMergedReader, version: DwgVersion) -> HatchDat
     let mut has_derived = false;
     for _ in 0..num_paths {
         let p = read_hatch_boundary_path(reader, version);
-        if (p.flags & 4) != 0 { has_derived = true; }
+        if (p.flags & 4) != 0 {
+            has_derived = true;
+        }
         paths.push(p);
     }
 
@@ -1485,29 +1920,63 @@ pub fn read_hatch(reader: &mut DwgMergedReader, version: DwgVersion) -> HatchDat
             let offset = reader.read_2bit_double();
             let num_dashes = reader.read_bit_short();
             let mut dashes = Vec::new();
-            for _ in 0..num_dashes { dashes.push(reader.read_bit_double()); }
-            pattern_lines.push(HatchPatternLine { angle, base_point: base_pt, offset, dashes });
+            for _ in 0..num_dashes {
+                dashes.push(reader.read_bit_double());
+            }
+            pattern_lines.push(HatchPatternLine {
+                angle,
+                base_point: base_pt,
+                offset,
+                dashes,
+            });
         }
     }
 
-    let pixel_size = if has_derived { reader.read_bit_double() } else { 0.0 };
+    let pixel_size = if has_derived {
+        reader.read_bit_double()
+    } else {
+        0.0
+    };
 
     let num_seeds = safe_count(reader.read_bit_long());
     let mut seed_points = Vec::new();
-    for _ in 0..num_seeds { seed_points.push(reader.read_2raw_double()); }
+    for _ in 0..num_seeds {
+        seed_points.push(reader.read_2raw_double());
+    }
 
     // boundary handles are read externally (for each path, path.boundary_handle_count handles)
 
     HatchData {
-        gradient_enabled, gradient_reserved, gradient_angle, gradient_shift,
-        gradient_single_color, gradient_tint, gradient_colors, gradient_name,
-        elevation, normal, pattern_name, is_solid, is_associative,
-        paths, style, pattern_type, pattern_angle, pattern_scale, is_double,
-        pattern_lines, pixel_size, seed_points,
+        gradient_enabled,
+        gradient_reserved,
+        gradient_angle,
+        gradient_shift,
+        gradient_single_color,
+        gradient_tint,
+        gradient_colors,
+        gradient_name,
+        elevation,
+        normal,
+        pattern_name,
+        is_solid,
+        is_associative,
+        paths,
+        style,
+        pattern_type,
+        pattern_angle,
+        pattern_scale,
+        is_double,
+        pattern_lines,
+        pixel_size,
+        seed_points,
     }
 }
 
-pub fn read_viewport(reader: &mut DwgMergedReader, version: DwgVersion, _dxf_version: DxfVersion) -> ViewportData {
+pub fn read_viewport(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    _dxf_version: DxfVersion,
+) -> ViewportData {
     let center = reader.read_3bit_double();
     let width = reader.read_bit_double();
     let height = reader.read_bit_double();
@@ -1563,13 +2032,37 @@ pub fn read_viewport(reader: &mut DwgMergedReader, version: DwgVersion, _dxf_ver
     };
 
     ViewportData {
-        center, width, height, view_target, view_direction,
-        twist_angle, view_height, lens_length, front_clip_z, back_clip_z,
-        snap_angle, view_center, snap_base, snap_spacing, grid_spacing,
-        circle_sides, grid_major, frozen_layer_count, status_flags, render_mode,
-        ucs_per_viewport, ucs_origin, ucs_x_axis, ucs_y_axis, ucs_elevation,
-        ucs_ortho_type, shade_plot_mode, default_lighting, default_lighting_type,
-        brightness, contrast,
+        center,
+        width,
+        height,
+        view_target,
+        view_direction,
+        twist_angle,
+        view_height,
+        lens_length,
+        front_clip_z,
+        back_clip_z,
+        snap_angle,
+        view_center,
+        snap_base,
+        snap_spacing,
+        grid_spacing,
+        circle_sides,
+        grid_major,
+        frozen_layer_count,
+        status_flags,
+        render_mode,
+        ucs_per_viewport,
+        ucs_origin,
+        ucs_x_axis,
+        ucs_y_axis,
+        ucs_elevation,
+        ucs_ortho_type,
+        shade_plot_mode,
+        default_lighting,
+        default_lighting_type,
+        brightness,
+        contrast,
     }
 }
 
@@ -1581,8 +2074,21 @@ pub fn read_polyline2d(reader: &mut DwgMergedReader, version: DwgVersion) -> Pol
     let thickness = reader.read_bit_thickness();
     let elevation = reader.read_bit_double();
     let normal = reader.read_bit_extrusion();
-    let owned_count = if version.r2004_plus() { reader.read_bit_long() } else { 0 };
-    Polyline2DData { flags, smooth_surface, start_width, end_width, thickness, elevation, normal, owned_count }
+    let owned_count = if version.r2004_plus() {
+        reader.read_bit_long()
+    } else {
+        0
+    };
+    Polyline2DData {
+        flags,
+        smooth_surface,
+        start_width,
+        end_width,
+        thickness,
+        elevation,
+        normal,
+        owned_count,
+    }
 }
 
 pub fn read_vertex2d(reader: &mut DwgMergedReader, version: DwgVersion) -> Vertex2DData {
@@ -1598,28 +2104,59 @@ pub fn read_vertex2d(reader: &mut DwgMergedReader, version: DwgVersion) -> Verte
         (sw, ew)
     };
     let bulge = reader.read_bit_double();
-    let vertex_id = if version.r2010_plus() { reader.read_bit_long() } else { 0 };
+    let vertex_id = if version.r2010_plus() {
+        reader.read_bit_long()
+    } else {
+        0
+    };
     let tangent_dir = reader.read_bit_double();
-    Vertex2DData { handle: crate::types::Handle::NULL, flags, x, y, z, start_width, end_width, bulge, vertex_id, tangent_dir }
+    Vertex2DData {
+        handle: crate::types::Handle::NULL,
+        flags,
+        x,
+        y,
+        z,
+        start_width,
+        end_width,
+        bulge,
+        vertex_id,
+        tangent_dir,
+    }
 }
 
 pub fn read_polyline3d(reader: &mut DwgMergedReader, version: DwgVersion) -> Polyline3DData {
     let smooth_type = reader.read_byte();
     let closed_flag = reader.read_byte();
-    let owned_count = if version.r2004_plus() { reader.read_bit_long() } else { 0 };
-    Polyline3DData { smooth_type, closed_flag, owned_count }
+    let owned_count = if version.r2004_plus() {
+        reader.read_bit_long()
+    } else {
+        0
+    };
+    Polyline3DData {
+        smooth_type,
+        closed_flag,
+        owned_count,
+    }
 }
 
 pub fn read_vertex3d(reader: &mut DwgMergedReader) -> Vertex3DData {
     let flags = reader.read_byte();
     let position = reader.read_3bit_double();
-    Vertex3DData { handle: crate::types::Handle::NULL, flags, position }
+    Vertex3DData {
+        handle: crate::types::Handle::NULL,
+        flags,
+        position,
+    }
 }
 
 pub fn read_polyface_mesh(reader: &mut DwgMergedReader, version: DwgVersion) -> (i16, i16, i32) {
     let num_verts = reader.read_bit_short();
     let num_faces = reader.read_bit_short();
-    let owned_count = if version.r2004_plus() { reader.read_bit_long() } else { 0 };
+    let owned_count = if version.r2004_plus() {
+        reader.read_bit_long()
+    } else {
+        0
+    };
     (num_verts, num_faces, owned_count)
 }
 
@@ -1639,18 +2176,39 @@ pub fn read_pface_face(reader: &mut DwgMergedReader) -> PfaceFaceData {
     let index2 = reader.read_bit_short();
     let index3 = reader.read_bit_short();
     let index4 = reader.read_bit_short();
-    PfaceFaceData { handle: crate::types::Handle::NULL, index1, index2, index3, index4 }
+    PfaceFaceData {
+        handle: crate::types::Handle::NULL,
+        index1,
+        index2,
+        index3,
+        index4,
+    }
 }
 
-pub fn read_polygon_mesh(reader: &mut DwgMergedReader, version: DwgVersion) -> (i16, i16, i16, i16, i16, i16, i32) {
+pub fn read_polygon_mesh(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+) -> (i16, i16, i16, i16, i16, i16, i32) {
     let flags = reader.read_bit_short();
     let smooth_type = reader.read_bit_short();
     let m_count = reader.read_bit_short();
     let n_count = reader.read_bit_short();
     let m_smooth = reader.read_bit_short();
     let n_smooth = reader.read_bit_short();
-    let owned_count = if version.r2004_plus() { reader.read_bit_long() } else { 0 };
-    (flags, smooth_type, m_count, n_count, m_smooth, n_smooth, owned_count)
+    let owned_count = if version.r2004_plus() {
+        reader.read_bit_long()
+    } else {
+        0
+    };
+    (
+        flags,
+        smooth_type,
+        m_count,
+        n_count,
+        m_smooth,
+        n_smooth,
+        owned_count,
+    )
 }
 
 pub fn read_seqend(_reader: &mut DwgMergedReader) {
@@ -1676,18 +2234,40 @@ pub fn read_mline(reader: &mut DwgMergedReader) -> MLineData {
         for _ in 0..lines_in_style {
             let num_params = reader.read_bit_short();
             let mut params = Vec::with_capacity(num_params as usize);
-            for _ in 0..num_params { params.push(reader.read_bit_double()); }
+            for _ in 0..num_params {
+                params.push(reader.read_bit_double());
+            }
             let num_area = reader.read_bit_short();
             let mut area_params = Vec::with_capacity(num_area as usize);
-            for _ in 0..num_area { area_params.push(reader.read_bit_double()); }
-            segments.push(MLineSegmentData { parameters: params, area_fill_parameters: area_params });
+            for _ in 0..num_area {
+                area_params.push(reader.read_bit_double());
+            }
+            segments.push(MLineSegmentData {
+                parameters: params,
+                area_fill_parameters: area_params,
+            });
         }
-        vertices.push(MLineVertexData { position: pos, direction: dir, miter, segments });
+        vertices.push(MLineVertexData {
+            position: pos,
+            direction: dir,
+            miter,
+            segments,
+        });
     }
 
     let style_handle = reader.read_handle();
 
-    MLineData { scale_factor, justification, start_point, normal, openclosed, lines_in_style, vertex_count, vertices, style_handle }
+    MLineData {
+        scale_factor,
+        justification,
+        start_point,
+        normal,
+        openclosed,
+        lines_in_style,
+        vertex_count,
+        vertices,
+        style_handle,
+    }
 }
 
 pub fn read_mesh(reader: &mut DwgMergedReader) -> MeshData {
@@ -1697,7 +2277,9 @@ pub fn read_mesh(reader: &mut DwgMergedReader) -> MeshData {
 
     let num_verts = safe_count(reader.read_bit_long());
     let mut vertices = Vec::with_capacity(num_verts as usize);
-    for _ in 0..num_verts { vertices.push(reader.read_3bit_double()); }
+    for _ in 0..num_verts {
+        vertices.push(reader.read_3bit_double());
+    }
 
     let total_face_data = safe_count(reader.read_bit_long());
     let mut faces = Vec::new();
@@ -1723,11 +2305,21 @@ pub fn read_mesh(reader: &mut DwgMergedReader) -> MeshData {
 
     let num_creases = safe_count(reader.read_bit_long());
     let mut crease_values = Vec::with_capacity(num_creases as usize);
-    for _ in 0..num_creases { crease_values.push(reader.read_bit_double()); }
+    for _ in 0..num_creases {
+        crease_values.push(reader.read_bit_double());
+    }
 
     let _trailing = reader.read_bit_long();
 
-    MeshData { version, blend_crease, subdivision_level, vertices, faces, edges, crease_values }
+    MeshData {
+        version,
+        blend_crease,
+        subdivision_level,
+        vertices,
+        faces,
+        edges,
+        crease_values,
+    }
 }
 
 /// Decoded fields of an UNDERLAY reference (PDF / DWF / DGN).
@@ -1852,7 +2444,7 @@ fn read_cad_value(reader: &mut DwgMergedReader, version: DwgVersion) -> CellValu
     // every cell byte-aligned (verified against real drawings).
     match type_code {
         0 | 1 => v.numeric_value = reader.read_bit_long() as f64, // Unknown / Long
-        2 => v.numeric_value = reader.read_bit_double(),         // Double
+        2 => v.numeric_value = reader.read_bit_double(),          // Double
         4 | 0x200 => {
             // String / General — a text value; label it String so downstream
             // (DXF write, display) treats it as text.
@@ -1881,7 +2473,7 @@ fn read_cad_value(reader: &mut DwgMergedReader, version: DwgVersion) -> CellValu
             }
         }
         0x40 => v.handle_value = Some(Handle::from(reader.read_handle())), // Handle
-        _ => {}                                                            // Buffer / ResultBuffer — unmodelled
+        _ => {} // Buffer / ResultBuffer — unmodelled
     }
 
     if version.r2007_plus() {
@@ -1905,9 +2497,7 @@ fn read_border(reader: &mut DwgMergedReader) {
 
 /// Content format block. Returns (colour, text-style handle, text height,
 /// rotation) — the fields acadrust keeps on a cell content.
-fn read_cell_content_format(
-    reader: &mut DwgMergedReader,
-) -> (Color, Option<Handle>, f64, f64) {
+fn read_cell_content_format(reader: &mut DwgMergedReader) -> (Color, Option<Handle>, f64, f64) {
     reader.read_bit_long(); // property override flags
     reader.read_bit_long(); // property flags
     reader.read_bit_long(); // value data type
@@ -2321,7 +2911,11 @@ pub fn read_raster_image(reader: &mut DwgMergedReader, version: DwgVersion) -> R
     let brightness = reader.read_byte();
     let contrast = reader.read_byte();
     let fade = reader.read_byte();
-    let clip_inverted = if version.r2010_plus() { reader.read_bit() } else { false };
+    let clip_inverted = if version.r2010_plus() {
+        reader.read_bit()
+    } else {
+        false
+    };
 
     // Clip boundary
     let clip_type = reader.read_bit_short();
@@ -2343,9 +2937,20 @@ pub fn read_raster_image(reader: &mut DwgMergedReader, version: DwgVersion) -> R
     let reactor_handle = reader.read_handle();
 
     RasterImageData {
-        class_version, insertion_point, u_vector, v_vector, size,
-        flags, clipping_enabled, brightness, contrast, fade, clip_inverted,
-        clip_type, definition_handle, reactor_handle,
+        class_version,
+        insertion_point,
+        u_vector,
+        v_vector,
+        size,
+        flags,
+        clipping_enabled,
+        brightness,
+        contrast,
+        fade,
+        clip_inverted,
+        clip_type,
+        definition_handle,
+        reactor_handle,
         clip_boundary_vertices,
     }
 }
@@ -2357,26 +2962,165 @@ pub fn read_wipeout(reader: &mut DwgMergedReader, version: DwgVersion) -> Raster
 
 pub fn read_ole2frame(reader: &mut DwgMergedReader, version: DwgVersion) -> Ole2FrameData {
     let ver = reader.read_bit_short();
-    let mode = if version.r2000_plus() { reader.read_bit_short() } else { 0 };
-    // OLE binary data can be very large (embedded images/documents),
-    // so don't use safe_count (100 KB cap). Use a generous 10 MB cap instead.
-    let data_len = (reader.read_bit_long().max(0) as usize).min(10_000_000);
+    let mode = if version.r2000_plus() {
+        reader.read_bit_short()
+    } else {
+        0
+    };
+    // OLE binary data can be very large (embedded images/documents), so
+    // don't use safe_count (100 KB cap). Bound the declared length by what's
+    // actually left in the object stream instead of an arbitrary cap — a
+    // 10 MB ceiling used to truncate big embedded pictures mid-stream.
+    let declared = reader.read_bit_long().max(0) as usize;
+    let data_len = declared.min(reader.remaining_bytes());
     let data = reader.read_bytes(data_len);
-    let trailing_byte = if version.r2000_plus() { reader.read_byte() } else { 3 };
-    Ole2FrameData { version: ver, mode, data, trailing_byte }
+    let trailing_byte = if version.r2000_plus() {
+        reader.read_byte()
+    } else {
+        3
+    };
+    let (upper_left, lower_right) = ole2frame_corners(&data);
+    Ole2FrameData {
+        version: ver,
+        mode,
+        data,
+        trailing_byte,
+        upper_left,
+        lower_right,
+    }
 }
 
-pub fn read_attribute_definition(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> AttributeCommonData {
+/// Extract the frame's world corner points from an OLE2FRAME data blob. Unlike
+/// DXF (explicit codes 10/11), DWG stores the frame rectangle inside the OLE
+/// data: a 2-byte header followed by the four corner points — upper-left,
+/// upper-right, lower-right, lower-left — each three little-endian `f64`.
+///
+/// Returns `(upper_left, lower_right)` only when those four points form a
+/// consistent axis-aligned rectangle, so a blob that doesn't follow this layout
+/// (or is too short) leaves the corners at their defaults instead of yielding
+/// garbage. Round-trip is unaffected — the writer re-emits the blob verbatim.
+fn ole2frame_corners(data: &[u8]) -> (Vector3, Vector3) {
+    let default = (Vector3::new(1.0, 1.0, 0.0), Vector3::new(0.0, 0.0, 0.0));
+    if data.len() < 98 {
+        return default;
+    }
+    let rd = |o: usize| f64::from_le_bytes(data[o..o + 8].try_into().unwrap());
+    // Header is 2 bytes; each point is x,y,z (24 bytes).
+    let (p1x, p1y, p1z) = (rd(2), rd(10), rd(18)); // upper-left
+    let (p2x, p2y) = (rd(26), rd(34)); // upper-right
+    let (p3x, p3y, p3z) = (rd(50), rd(58), rd(66)); // lower-right
+    let (p4x, p4y) = (rd(74), rd(82)); // lower-left
+    let finite = [p1x, p1y, p1z, p2x, p2y, p3x, p3y, p3z, p4x, p4y]
+        .iter()
+        .all(|v| v.is_finite() && v.abs() < 1e15);
+    // Only trust the layout when the four points really are a rectangle: the top
+    // edge (p1,p2) and bottom edge (p3,p4) share a y; the left edge (p1,p4) and
+    // right edge (p2,p3) share an x.
+    let eq = |a: f64, b: f64| (a - b).abs() <= 1e-6 * (1.0 + a.abs().max(b.abs()));
+    if finite && eq(p1y, p2y) && eq(p3y, p4y) && eq(p1x, p4x) && eq(p2x, p3x) {
+        (Vector3::new(p1x, p1y, p1z), Vector3::new(p3x, p3y, p3z))
+    } else {
+        default
+    }
+}
+
+/// R2018+ multiline attribute payload. When an ATTRIB/ATTDEF reports
+/// `mtext_type > 1` the stream carries an embedded MTEXT object
+/// (`AcDbMTextObjectEmbedded`) between the type byte and the tag. It must be
+/// consumed in full or the tag / field-length / flags that follow shift.
+/// The only field we keep is the MTEXT `text` — it holds the real multiline
+/// value (`A\PB`) that the plain single-line `text_value` truncates to `A`.
+/// Handle reads pull from the separate handle stream, so getting a handle
+/// wrong cannot desync the main-stream tag; only the main-stream field
+/// sequence matters, and it mirrors LibreDWG's macro exactly.
+fn read_embedded_mtext_text(reader: &mut DwgMergedReader) -> String {
+    // Reduced common-entity preamble.
+    let _entmode = reader.main_mut().read_2bits();
+    let _num_reactors = reader.read_bit_long();
+    let _is_xdic_missing = reader.read_bit();
+    let _has_ds_data = reader.read_bit();
+    let _color_raw = reader.read_bit_short();
+    let _ltype_scale = reader.read_bit_double();
+    let _ltype_flags = reader.main_mut().read_2bits();
+    let _plotstyle_flags = reader.main_mut().read_2bits();
+    let _material_flags = reader.main_mut().read_2bits();
+    let _shadow_flags = reader.read_byte();
+    let _has_full_visualstyle = reader.read_bit();
+    let _has_face_visualstyle = reader.read_bit();
+    let _has_edge_visualstyle = reader.read_bit();
+    let _invisible = reader.read_bit_short();
+    let _linewt = reader.read_byte();
+    let _layer = reader.read_handle();
+
+    // MTEXT geometry.
+    let _ins_pt = reader.read_3bit_double();
+    let _extrusion = reader.read_3bit_double();
+    let _x_axis = reader.read_3bit_double();
+    let _rect_width = reader.read_bit_double();
+    let _rect_height = reader.read_bit_double();
+    let _text_height = reader.read_bit_double();
+    let _attachment = reader.read_bit_short();
+    let _flow_dir = reader.read_bit_short();
+    let _extents_width = reader.read_bit_double();
+    let _extents_height = reader.read_bit_double();
+    let text = reader.read_variable_text();
+    let _style = reader.read_handle();
+    let _linespace_style = reader.read_bit_short();
+    let _linespace_factor = reader.read_bit_double();
+    let _unknown_b0 = reader.read_bit();
+    let bg_fill_flag = reader.read_bit_long();
+    // R2018 signals a background fill with bit 0.
+    if bg_fill_flag & 1 != 0 {
+        let _bg_fill_scale = reader.read_bit_long();
+        let _bg_fill_color = reader.read_cm_color();
+        let _bg_fill_trans = reader.read_bit_long();
+    }
+    let _is_not_annotative = reader.read_bit();
+    let _is_really_locked = reader.read_bit();
+    let annotative_data_size = reader.read_bit_short();
+    if annotative_data_size > 0 {
+        let _ = reader.read_bytes(annotative_data_size as usize);
+    }
+    text
+}
+
+pub fn read_attribute_definition(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> AttributeCommonData {
     let mut text_data = read_text_entity_data(reader, version);
     text_data.style_handle = reader.read_handle();
 
-    let att_version = if version.r2010_plus() { reader.read_byte() } else { 0 };
-    let att_type = if version.r2018_plus(dxf_version) { reader.read_byte() } else { 1 };
+    let att_version = if version.r2010_plus() {
+        reader.read_byte()
+    } else {
+        0
+    };
+    let att_type = if version.r2018_plus(dxf_version) {
+        reader.read_byte()
+    } else {
+        1
+    };
+
+    // A multiline attribute (mtext_type > 1) embeds a full MTEXT here; its text
+    // is the real multiline default value, which the single-line field above
+    // truncates to the first line.
+    if att_type > 1 {
+        let mtext = read_embedded_mtext_text(reader);
+        if !mtext.is_empty() {
+            text_data.value = mtext;
+        }
+    }
 
     let tag = reader.read_variable_text();
     let field_length = reader.read_bit_short();
     let flags = reader.read_byte();
-    let lock_position = if version.r2007_plus() { reader.read_bit() } else { false };
+    let lock_position = if version.r2007_plus() {
+        reader.read_bit()
+    } else {
+        false
+    };
 
     // AttDef-specific: second version byte + prompt
     if version.r2010_plus() {
@@ -2384,24 +3128,68 @@ pub fn read_attribute_definition(reader: &mut DwgMergedReader, version: DwgVersi
     }
     let prompt = reader.read_variable_text();
 
-    AttributeCommonData { text_data, att_version, att_type, tag, prompt, field_length, flags, lock_position }
+    AttributeCommonData {
+        text_data,
+        att_version,
+        att_type,
+        tag,
+        prompt,
+        field_length,
+        flags,
+        lock_position,
+    }
 }
 
-pub fn read_attribute_entity(reader: &mut DwgMergedReader, version: DwgVersion, dxf_version: DxfVersion) -> AttributeCommonData {
+pub fn read_attribute_entity(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+) -> AttributeCommonData {
     let mut text_data = read_text_entity_data(reader, version);
     text_data.style_handle = reader.read_handle();
 
-    let att_version = if version.r2010_plus() { reader.read_byte() } else { 0 };
-    let att_type = if version.r2018_plus(dxf_version) { reader.read_byte() } else { 1 };
+    let att_version = if version.r2010_plus() {
+        reader.read_byte()
+    } else {
+        0
+    };
+    let att_type = if version.r2018_plus(dxf_version) {
+        reader.read_byte()
+    } else {
+        1
+    };
+
+    // A multiline attribute (mtext_type > 1) embeds a full MTEXT here; its text
+    // is the real multiline value, which the single-line field above truncates
+    // to the first line ("A" instead of "A\PB").
+    if att_type > 1 {
+        let mtext = read_embedded_mtext_text(reader);
+        if !mtext.is_empty() {
+            text_data.value = mtext;
+        }
+    }
 
     let tag = reader.read_variable_text();
     let field_length = reader.read_bit_short();
     let flags = reader.read_byte();
-    let lock_position = if version.r2007_plus() { reader.read_bit() } else { false };
+    let lock_position = if version.r2007_plus() {
+        reader.read_bit()
+    } else {
+        false
+    };
 
     // An ATTRIB instance carries no prompt in the stream — that lives on the
     // ATTDEF. Keep it empty so the shared struct stays consistent.
-    AttributeCommonData { text_data, att_version, att_type, tag, prompt: String::new(), field_length, flags, lock_position }
+    AttributeCommonData {
+        text_data,
+        att_version,
+        att_type,
+        tag,
+        prompt: String::new(),
+        field_length,
+        flags,
+        lock_position,
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2510,7 +3298,11 @@ pub fn read_multileader(
         let index = reader.read_bit_short();
         let width = reader.read_bit_double();
         block_attributes.push(BlockAttribute {
-            attribute_definition_handle: if def_handle != 0 { Some(Handle::from(def_handle)) } else { None },
+            attribute_definition_handle: if def_handle != 0 {
+                Some(Handle::from(def_handle))
+            } else {
+                None
+            },
             text,
             index,
             width,
@@ -2632,7 +3424,11 @@ fn read_multileader_annotation_context(
         text_string = reader.read_variable_text();
         text_normal = reader.read_3bit_double();
         let ts_handle = reader.read_handle();
-        text_style_handle = if ts_handle != 0 { Some(Handle::from(ts_handle)) } else { None };
+        text_style_handle = if ts_handle != 0 {
+            Some(Handle::from(ts_handle))
+        } else {
+            None
+        };
         text_location = reader.read_3bit_double();
         text_direction = reader.read_3bit_double();
         text_rotation = reader.read_bit_double();
@@ -2686,7 +3482,11 @@ fn read_multileader_annotation_context(
 
         if has_block_contents {
             let bh = reader.read_handle();
-            block_content_handle = if bh != 0 { Some(Handle::from(bh)) } else { None };
+            block_content_handle = if bh != 0 {
+                Some(Handle::from(bh))
+            } else {
+                None
+            };
             block_content_normal = reader.read_3bit_double();
             block_content_location = reader.read_3bit_double();
             block_content_scale = reader.read_3bit_double();
@@ -2781,7 +3581,10 @@ fn read_leader_root(
     for _ in 0..bp_count {
         let start_point = reader.read_3bit_double();
         let end_point = reader.read_3bit_double();
-        break_points.push(StartEndPointPair { start_point, end_point });
+        break_points.push(StartEndPointPair {
+            start_point,
+            end_point,
+        });
     }
 
     let leader_index = reader.read_bit_long();
@@ -2811,10 +3614,7 @@ fn read_leader_root(
     }
 }
 
-fn read_leader_line(
-    reader: &mut DwgMergedReader,
-    version: DwgVersion,
-) -> LeaderLine {
+fn read_leader_line(reader: &mut DwgMergedReader, version: DwgVersion) -> LeaderLine {
     let pt_count = safe_count(reader.read_bit_long());
     let mut points = Vec::with_capacity(pt_count as usize);
     for _ in 0..pt_count {
@@ -2831,7 +3631,10 @@ fn read_leader_line(
         for _ in 0..sep_count {
             let start_point = reader.read_3bit_double();
             let end_point = reader.read_3bit_double();
-            break_points.push(StartEndPointPair { start_point, end_point });
+            break_points.push(StartEndPointPair {
+                start_point,
+                end_point,
+            });
         }
     }
 
@@ -2855,13 +3658,22 @@ fn read_leader_line(
         path_type = MultiLeaderPathType::from(reader.read_bit_short());
         line_color = reader.read_cm_color();
         let lt_handle = reader.read_handle();
-        line_type_handle = if lt_handle != 0 { Some(Handle::from(lt_handle)) } else { None };
+        line_type_handle = if lt_handle != 0 {
+            Some(Handle::from(lt_handle))
+        } else {
+            None
+        };
         let lw = reader.read_bit_long();
         line_weight = crate::types::LineWeight::from_value(lw as i16);
         arrowhead_size = reader.read_bit_double();
         let ah_handle = reader.read_handle();
-        arrowhead_handle = if ah_handle != 0 { Some(Handle::from(ah_handle)) } else { None };
-        override_flags = LeaderLinePropertyOverrideFlags::from_bits_truncate(reader.read_bit_long() as u32);
+        arrowhead_handle = if ah_handle != 0 {
+            Some(Handle::from(ah_handle))
+        } else {
+            None
+        };
+        override_flags =
+            LeaderLinePropertyOverrideFlags::from_bits_truncate(reader.read_bit_long() as u32);
     }
 
     LeaderLine {
@@ -3062,7 +3874,14 @@ pub fn read_acis_entity(
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&raw[..8.min(raw.len())]);
         let end_marker = reader.read_bit_long() as u32;
-        AcisRevision { has_guid, major, minor1, minor2, bytes, end_marker }
+        AcisRevision {
+            has_guid,
+            major,
+            minor1,
+            minor2,
+            bytes,
+            end_marker,
+        }
     } else {
         AcisRevision::default()
     };
@@ -3093,12 +3912,10 @@ fn read_wire(reader: &mut DwgMergedReader) -> Wire {
         pts.push(reader.read_3bit_double());
     }
     let has_transform = reader.read_bit();
-    let (mut x_axis, mut y_axis, mut z_axis) =
-        (Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z);
+    let (mut x_axis, mut y_axis, mut z_axis) = (Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z);
     let mut translation = Vector3::ZERO;
     let mut scale = 1.0;
-    let (mut has_rotation, mut has_reflection, mut has_shear) =
-        (false, false, false);
+    let (mut has_rotation, mut has_reflection, mut has_shear) = (false, false, false);
     if has_transform {
         x_axis = reader.read_3bit_double();
         y_axis = reader.read_3bit_double();
@@ -3145,7 +3962,11 @@ mod tests {
     use crate::io::dwg::dwg_version::DwgVersion;
     use crate::types::DxfVersion;
 
-    fn make_reader(dwg: DwgVersion, dxf: DxfVersion, f: impl FnOnce(&mut DwgMergedWriter)) -> DwgMergedReader {
+    fn make_reader(
+        dwg: DwgVersion,
+        dxf: DxfVersion,
+        f: impl FnOnce(&mut DwgMergedWriter),
+    ) -> DwgMergedReader {
         let mut writer = DwgMergedWriter::new(dwg, dxf);
         f(&mut writer);
         let data = writer.merge();
@@ -3232,7 +4053,10 @@ mod tests {
             w.write_bit_double(0.0); // rotation
             w.write_3bit_double(Vector3::UNIT_Z); // normal
             w.write_bit(false); // has_attribs
-            w.write_handle(crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer, 0x50);
+            w.write_handle(
+                crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer,
+                0x50,
+            );
         });
         let ins = read_insert(&mut r, v);
         assert_eq!(ins.insert_point, Vector3::new(100.0, 200.0, 0.0));
@@ -3299,7 +4123,7 @@ mod tests {
         w.write_bit(false); // acis_empty = false (has data)
         w.write_bit(false); // unknown bit (per ODA/LibreDWG spec)
         w.write_bit_short(1); // acis_version = 1 (SAT text)
-        // Encrypt SAT with selective 159-substitution cipher
+                              // Encrypt SAT with selective 159-substitution cipher
         let mut full_sat = acis.sat_data.clone();
         full_sat.push_str("End-of-ACIS-data\n");
         let plain = full_sat.as_bytes();
@@ -3347,7 +4171,7 @@ mod tests {
         w.write_bit(false); // acis_empty = false
         w.write_bit(false); // unknown bit (per ODA/LibreDWG spec)
         w.write_bit_short(2); // acis_version = 2 (SAB binary)
-        // NO BL size prefix — reader infers size from remaining bits
+                              // NO BL size prefix — reader infers size from remaining bits
         w.write_bytes(&sab_data);
         w.write_bit(false); // wireframe_present = false
         w.write_bit(false); // acis_empty_bit

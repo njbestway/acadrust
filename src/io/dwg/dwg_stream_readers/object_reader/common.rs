@@ -122,6 +122,10 @@ pub const OBJ_DGNUNDERLAY: i16 = -14;
 pub const OBJ_HELIX: i16 = -15;
 // ACAD_TABLE (AcDbTable) is a class-based, INSERT-derived graphical entity.
 pub const OBJ_TABLE: i16 = -16;
+// AcDbLight (point/spot/distant light) is a class-based graphical entity. It is
+// parsed for its glyph geometry only; the record is preserved verbatim for
+// write-back, so no native encoder is needed.
+pub const OBJ_LIGHT: i16 = -17;
 
 // Class-based non-entity objects — also resolved via class mapping for
 // portable type codes.  The values here match ACadSharp's ObjectType.
@@ -156,6 +160,10 @@ pub const OBJ_SPATIALFILTER: i16 = 0x86; // 134
 pub const OBJ_PDFDEFINITION: i16 = 0x87; // 135
 pub const OBJ_DWFDEFINITION: i16 = 0x88; // 136
 pub const OBJ_DGNDEFINITION: i16 = 0x89; // 137
+// AcDbField (dynamic text field) is always class-based; 0x8A is a free internal
+// sentinel. Decoded into a side map (document.fields); the object itself stays
+// verbatim as Unknown for round-trip.
+pub const OBJ_FIELD: i16 = 0x8A; // 138
 
 /// Returns true if the type code is a graphical entity (not a table / object).
 pub fn is_entity_type(type_code: i16) -> bool {
@@ -165,7 +173,7 @@ pub fn is_entity_type(type_code: i16) -> bool {
     // MULTILEADER, MESH, IMAGE).
     // Class-based entity types (≥500) are NOT included here; the builder
     // checks the class's is_an_entity flag directly.
-    matches!(type_code, -16..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
+    matches!(type_code, -17..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
 }
 
 /// Returns true if the type code is a table control or entry.
@@ -187,6 +195,11 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "MESH" => Some(OBJ_MESH),
         "MULTILEADER" => Some(OBJ_MULTILEADER),
         "OLE2FRAME" => Some(OBJ_OLE2FRAME),
+        // AcDbViewRepBlockReference (Model Documentation drawing views, R2013+)
+        // is a subclass of AcDbBlockReference, so its record begins with the
+        // INSERT fields. Decode it as an INSERT to place the baked view
+        // geometry (the *A / *S view blocks) that the view border frames.
+        "ACDBVIEWREPBLOCKREFERENCE" => Some(OBJ_INSERT),
         // ACAD_SURFACE family (ACIS-backed graphical entities).
         "SURFACE" => Some(OBJ_SURFACE),
         "PLANESURFACE" => Some(OBJ_PLANESURFACE),
@@ -201,6 +214,7 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "DGNUNDERLAY" => Some(OBJ_DGNUNDERLAY),
         "HELIX" => Some(OBJ_HELIX),
         "ACAD_TABLE" => Some(OBJ_TABLE),
+        "LIGHT" => Some(OBJ_LIGHT),
         // Non-entity objects
         "ACDBDICTIONARYWDFLT" => Some(OBJ_DICTIONARYWDFLT),
         "DICTIONARYVAR" => Some(OBJ_DICTIONARYVAR),
@@ -222,6 +236,7 @@ pub fn dxf_name_to_type_code(dxf_name: &str) -> Option<i16> {
         "TABLECONTENT" => Some(OBJ_TABLECONTENT),
         "TABLESTYLE" => Some(OBJ_TABLESTYLE),
         "GEODATA" | "ACDBGEODATA" => Some(OBJ_GEODATA),
+        "FIELD" | "ACDBFIELD" => Some(OBJ_FIELD),
         "SPATIAL_FILTER" | "SPATIALFILTER" => Some(OBJ_SPATIALFILTER),
         "BLOCKVISIBILITYPARAMETER" => Some(OBJ_BLOCKVISIBILITYPARAMETER),
         "ACDB_BLOCKREPRESENTATION_DATA" | "BLOCKREPRESENTATION" => {

@@ -9,6 +9,7 @@ use crate::error::Result;
 use crate::objects::{
     Dictionary, DictionaryVariable, DictionaryWithDefault, Group, ImageDefinition,
     ImageDefinitionReactor, Layout, MLineStyle, Material, MultiLeaderStyle,
+    DimSubtype, ObjectContextData, ObjectContextKind,
     ObjectType, PlotSettings, RasterVariables, Scale, SortEntitiesTable, SpatialFilter,
     TableStyle, VisualStyle, BookColor, WipeoutVariables, XRecord,
 };
@@ -178,6 +179,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // === Drawing modes ===
         self.write_header_variable("$ORTHOMODE", |w| w.write_i16(70, if hdr.ortho_mode { 1 } else { 0 }))?;
+        self.write_header_variable("$OSMODE", |w| w.write_i16(70, hdr.object_snap_mode as i16))?;
         self.write_header_variable("$REGENMODE", |w| w.write_i16(70, if hdr.regen_mode { 1 } else { 0 }))?;
         self.write_header_variable("$FILLMODE", |w| w.write_i16(70, if hdr.fill_mode { 1 } else { 0 }))?;
         self.write_header_variable("$QTEXTMODE", |w| w.write_i16(70, if hdr.quick_text_mode { 1 } else { 0 }))?;
@@ -196,6 +198,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$CELWEIGHT", |w| w.write_i16(370, hdr.current_line_weight))?;
         self.write_header_variable("$CELTSCALE", |w| w.write_double(40, hdr.current_entity_linetype_scale))?;
         self.write_header_variable("$DISPSILH", |w| w.write_i16(70, if hdr.display_silhouette { 1 } else { 0 }))?;
+        self.write_header_variable("$LWDISPLAY", |w| w.write_bool(290, hdr.lineweight_display))?;
 
         // === Units ===
         self.write_header_variable("$LUNITS", |w| w.write_i16(70, hdr.linear_unit_format))?;
@@ -1044,8 +1047,39 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         Ok(())
     }
 
-    /// Write an entity with explicit owner
+    /// Write an entity with explicit owner, followed by its XDATA.
+    ///
+    /// XDATA must sit at the end of the entity's own group codes, before any
+    /// child records (VERTEX / ATTRIB / SEQEND). Writers that emit such inline
+    /// children — the polylines, INSERT-with-attributes, the mesh forms — and
+    /// ATTRIB (emitted inline by INSERT) write their own XDATA at the right
+    /// spot; every other entity gets it here. `Unknown` entities re-emit their
+    /// captured bytes verbatim, so they are skipped.
     fn write_entity_with_owner(&mut self, entity: &EntityType, owner: Handle) -> Result<()> {
+        self.write_entity_body(entity, owner)?;
+        if !matches!(
+            entity,
+            EntityType::Polyline(_)
+                | EntityType::Polyline2D(_)
+                | EntityType::Polyline3D(_)
+                | EntityType::Insert(_)
+                | EntityType::PolyfaceMesh(_)
+                | EntityType::PolygonMesh(_)
+                | EntityType::AttributeEntity(_)
+                | EntityType::Unknown(_)
+                // No DXF body is emitted for these (raw-DWG-only records), so
+                // their XDATA must not be emitted either.
+                | EntityType::SectionSymbol(_)
+                | EntityType::ViewBorder(_)
+        ) {
+            self.write_xdata(&entity.common().extended_data)?;
+        }
+        Ok(())
+    }
+
+    /// Dispatch to the per-type entity writer (no XDATA — see
+    /// [`write_entity_with_owner`](Self::write_entity_with_owner)).
+    fn write_entity_body(&mut self, entity: &EntityType, owner: Handle) -> Result<()> {
         match entity {
             EntityType::Point(e) => self.write_point(e, owner),
             EntityType::Line(e) => self.write_line(e, owner),
@@ -1083,6 +1117,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             // DXF surface export not yet supported; skip rather than emit
             // malformed geometry.
             EntityType::Surface(_) => Ok(()),
+            // Light glyphs are preserved via the DWG raw record; there is no
+            // native DXF encoder, so skip on DXF write (same as Surface).
+            EntityType::Light(_) => Ok(()),
+            // Same policy: preserved via the DWG raw record, no DXF encoder.
+            EntityType::SectionSymbol(_) | EntityType::ViewBorder(_) => Ok(()),
             EntityType::Table(e) => self.write_acad_table(e, owner),
             EntityType::Tolerance(e) => self.write_tolerance(e, owner),
             EntityType::PolyfaceMesh(e) => self.write_polyface_mesh(e, owner),
@@ -1320,6 +1359,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         self.writer.write_i16(70, flags)?;
 
+        // XDATA precedes the child VERTEX/SEQEND records.
+        self.write_xdata(&polyline.common.extended_data)?;
+
         // VERTEX and SEQEND are owned by the polyline entity
         let polyline_handle = polyline.common.handle;
 
@@ -1377,6 +1419,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if polyline.end_width != 0.0 {
             self.writer.write_double(41, polyline.end_width)?;
         }
+
+        // XDATA precedes the child VERTEX/SEQEND records.
+        self.write_xdata(&polyline.common.extended_data)?;
 
         // VERTEX and SEQEND are owned by the polyline entity
         let polyline_handle = polyline.common.handle;
@@ -1901,10 +1946,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(20, seed.y)?;
         }
 
-        // Extended data (e.g. HATCHBACKGROUNDCOLOR) — must be the last group
-        // codes of the entity.
-        self.write_xdata(&hatch.common.extended_data)?;
-
+        // XDATA (e.g. HATCHBACKGROUNDCOLOR) is emitted by write_entity_with_owner
+        // after this returns — HATCH has no child records to precede.
         Ok(())
     }
 
@@ -2090,6 +2133,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         self.write_normal(insert.normal)?;
 
+        // XDATA precedes the child ATTRIB/SEQEND records.
+        self.write_xdata(&insert.common.extended_data)?;
+
         // Write child ATTRIB entities + SEQEND when attributes are present
         if insert.has_attributes() {
             let insert_handle = insert.handle();
@@ -2169,7 +2215,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         
         // Polyline flags (bit 8 = 3D polyline)
         self.writer.write_i16(70, polyline.flags.to_bits() as i16)?;
-        
+
+        // XDATA precedes the child VERTEX/SEQEND records.
+        self.write_xdata(&polyline.common.extended_data)?;
+
         // Write vertices with proper subclass markers
         let polyline_handle = polyline.handle();
         for vertex in polyline.vertices.iter() {
@@ -2422,7 +2471,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         
         // Vertical alignment
         self.writer.write_i16(74, attrib.vertical_alignment.to_value())?;
-        
+
+        // XDATA precedes the parent INSERT's child SEQEND record.
+        self.write_xdata(&attrib.common.extended_data)?;
+
         Ok(())
     }
 
@@ -2516,6 +2568,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 ObjectType::MultiLeaderStyle(style) => self.write_multileader_style(style)?,
                 ObjectType::TableStyle(style) => self.write_table_style(style)?,
                 ObjectType::Scale(scale) => self.write_scale(scale)?,
+                ObjectType::ObjectContextData(ctx) => self.write_object_context_data(ctx)?,
                 ObjectType::SortEntitiesTable(table) => self.write_sort_entities_table(table)?,
                 ObjectType::DictionaryVariable(var) => self.write_dictionary_variable(var)?,
                 ObjectType::VisualStyle(obj) => self.write_visualstyle(obj)?,
@@ -3179,6 +3232,127 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Is unit scale
         self.writer.write_bool(290, scale.is_unit_scale)?;
+
+        Ok(())
+    }
+
+    /// Write an annotative per-object context leaf (`AcDb*ObjectContextData`)
+    /// as DXF group codes: the shared `AcDbObjectContextData` /
+    /// `AcDbAnnotScaleObjectContextData` base then the type-specific payload.
+    fn write_object_context_data(&mut self, ctx: &ObjectContextData) -> Result<()> {
+        self.writer.write_string(0, ctx.class_name())?;
+        self.writer.write_handle(5, ctx.handle)?;
+        if !ctx.reactors.is_empty() {
+            self.writer.write_string(102, "{ACAD_REACTORS")?;
+            for r in &ctx.reactors {
+                self.writer.write_handle(330, *r)?;
+            }
+            self.writer.write_string(102, "}")?;
+        }
+        self.writer.write_handle(330, ctx.owner_handle)?;
+
+        self.writer.write_subclass("AcDbObjectContextData")?;
+        self.writer.write_i16(70, ctx.class_version)?;
+        self.writer.write_bool(290, ctx.is_default)?;
+
+        self.writer.write_subclass("AcDbAnnotScaleObjectContextData")?;
+        self.writer.write_handle(340, ctx.scale)?;
+
+        match &ctx.kind {
+            ObjectContextKind::BlkRef { rotation, insertion, scale_factor } => {
+                self.writer.write_subclass("AcDbBlkRefObjectContextData")?;
+                self.writer.write_double(50, *rotation)?;
+                self.writer.write_double(10, insertion.x)?;
+                self.writer.write_double(20, insertion.y)?;
+                self.writer.write_double(30, insertion.z)?;
+                self.writer.write_double(41, scale_factor.x)?;
+                self.writer.write_double(42, scale_factor.y)?;
+                self.writer.write_double(43, scale_factor.z)?;
+            }
+            ObjectContextKind::Text { horizontal_mode, rotation, insertion, alignment } => {
+                self.writer.write_subclass("AcDbTextObjectContextData")?;
+                self.writer.write_i16(70, *horizontal_mode)?;
+                self.writer.write_double(50, *rotation)?;
+                self.writer.write_double(10, insertion.x)?;
+                self.writer.write_double(20, insertion.y)?;
+                self.writer.write_double(11, alignment.x)?;
+                self.writer.write_double(21, alignment.y)?;
+            }
+            ObjectContextKind::MText(m) => {
+                self.writer.write_subclass("AcDbMTextObjectContextData")?;
+                self.writer.write_i32(70, m.attachment)?;
+                // DXF emits ins_pt (10) then x_axis_dir (11) — reverse of binary.
+                self.writer.write_double(10, m.insertion.x)?;
+                self.writer.write_double(20, m.insertion.y)?;
+                self.writer.write_double(30, m.insertion.z)?;
+                self.writer.write_double(11, m.x_axis_dir.x)?;
+                self.writer.write_double(21, m.x_axis_dir.y)?;
+                self.writer.write_double(31, m.x_axis_dir.z)?;
+                self.writer.write_double(40, m.rect_width)?;
+                self.writer.write_double(41, m.rect_height)?;
+                self.writer.write_double(42, m.extents_width)?;
+                self.writer.write_double(43, m.extents_height)?;
+                self.writer.write_i32(71, m.column_type)?;
+                if m.column_type != 0 {
+                    if let Some(c) = &m.columns {
+                        self.writer.write_i32(72, c.num_heights)?;
+                        self.writer.write_double(44, c.width)?;
+                        self.writer.write_double(45, c.gutter)?;
+                        self.writer.write_bool(73, c.auto_height)?;
+                        self.writer.write_bool(74, c.flow_reversed)?;
+                        if !c.auto_height && m.column_type == 2 {
+                            for h in &c.heights {
+                                self.writer.write_double(46, *h)?;
+                            }
+                        }
+                    }
+                }
+            }
+            ObjectContextKind::Dim(d) => {
+                self.writer.write_subclass("AcDbDimensionObjectContextData")?;
+                self.writer.write_handle(2, d.block)?;
+                self.writer.write_bool(293, d.b293)?;
+                self.writer.write_double(10, d.def_pt.x)?;
+                self.writer.write_double(20, d.def_pt.y)?;
+                self.writer.write_double(30, 0.0)?;
+                self.writer.write_bool(294, d.is_def_textloc)?;
+                self.writer.write_double(140, d.text_rotation)?;
+                self.writer.write_bool(298, d.dimtofl)?;
+                self.writer.write_bool(291, d.dimosxd)?;
+                self.writer.write_bool(70, d.dimatfit)?;
+                self.writer.write_bool(292, d.dimtix)?;
+                self.writer.write_bool(71, d.dimtmove)?;
+                self.writer.write_i16(280, d.override_code as i16)?;
+                self.writer.write_bool(295, d.has_arrow2)?;
+                self.writer.write_bool(296, d.flip_arrow2)?;
+                self.writer.write_bool(297, d.flip_arrow1)?;
+                self.writer.write_subclass(d.subtype.subclass_marker())?;
+                let mut wp = |code: i32, p: &crate::types::Vector3| -> Result<()> {
+                    self.writer.write_double(code, p.x)?;
+                    self.writer.write_double(code + 10, p.y)?;
+                    self.writer.write_double(code + 20, p.z)?;
+                    Ok(())
+                };
+                match &d.subtype {
+                    DimSubtype::Aligned { dimline_pt } => wp(11, dimline_pt)?,
+                    DimSubtype::Angular { arc_pt } => wp(11, arc_pt)?,
+                    DimSubtype::Diametric { first_arc_pt, def_pt } => {
+                        wp(11, first_arc_pt)?;
+                        wp(12, def_pt)?;
+                    }
+                    DimSubtype::Radial { first_arc_pt } => wp(11, first_arc_pt)?,
+                    DimSubtype::RadialLarge { ovr_center, jog_point } => {
+                        wp(12, ovr_center)?;
+                        wp(13, jog_point)?;
+                    }
+                    DimSubtype::Ordinate { feature_location_pt, leader_endpt } => {
+                        wp(11, feature_location_pt)?;
+                        wp(12, leader_endpt)?;
+                    }
+                }
+            }
+            ObjectContextKind::Opaque => {}
+        }
 
         Ok(())
     }
@@ -4271,8 +4445,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         
         // Vertex count - MUST come before smooth surface type
         self.writer.write_i16(71, mesh.vertex_count() as i16)?;
-        // Face count - MUST come before smooth surface type  
+        // Face count - MUST come before smooth surface type
         self.writer.write_i16(72, mesh.face_count() as i16)?;
+
+        // XDATA precedes the child VERTEX/SEQEND records.
+        self.write_xdata(&mesh.common.extended_data)?;
 
         // Write vertices with proper subclass markers
         for vertex in mesh.vertices.iter() {
@@ -4559,6 +4736,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(220, mesh.normal.y)?;
             self.writer.write_double(230, mesh.normal.z)?;
         }
+
+        // XDATA precedes the child VERTEX/SEQEND records.
+        self.write_xdata(&mesh.common.extended_data)?;
 
         // VERTEX and SEQEND are owned by the mesh entity
         let mesh_handle = mesh.common.handle;

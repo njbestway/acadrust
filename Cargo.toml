@@ -44,7 +44,7 @@ encoding_rs = "0.8"
 prost = "0.13"
 
 # Serialization (optional)
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive", "rc"], optional = true }
 
 # XML parsing (optional, for COLLADA import)
 quick-xml = { version = "0.36", optional = true }

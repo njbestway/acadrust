@@ -4,11 +4,13 @@
 //! layouts, groups, and other organizational structures.
 
 mod block_visibility;
+mod dgn_linestyle;
 mod dictionary_variable;
 mod group;
 mod image_definition;
 mod mlinestyle;
 mod multileader_style;
+mod object_context_data;
 mod plot_settings;
 mod scale;
 mod sort_entities_table;
@@ -17,6 +19,7 @@ mod xrecord;
 mod stub_objects;
 
 pub use block_visibility::{BlockVisibilityParameter, BlockVisibilityState};
+pub use dgn_linestyle::{DgnLsComponent, DgnLsComponentType, DgnLsDefinition};
 pub use dictionary_variable::DictionaryVariable;
 pub use group::Group;
 pub use image_definition::{ImageDefinition, ImageDefinitionReactor, ResolutionUnit};
@@ -25,6 +28,9 @@ pub use image_definition::{ImageDefinition, ImageDefinitionReactor, ResolutionUn
 // analogue ImageDefinition.
 pub use crate::entities::underlay::UnderlayDefinition;
 pub use mlinestyle::{MLineStyle, MLineStyleElement, MLineStyleFlags};
+pub use object_context_data::{
+    DimContext, DimSubtype, MTextColumns, MTextContext, ObjectContextData, ObjectContextKind,
+};
 pub use multileader_style::{
     BlockContentConnectionType, LeaderContentType, LeaderDrawOrderType,
     LeaderLinePropertyOverrideFlags, MultiLeaderDrawOrderType, MultiLeaderPathType,
@@ -290,6 +296,9 @@ pub enum ObjectType {
     TableStyle(TableStyle),
     /// Scale object - named scale definition
     Scale(Scale),
+    /// Annotative per-object context data (`AcDb*ObjectContextData` leaf) — one
+    /// per-scale representation of an annotative object.
+    ObjectContextData(ObjectContextData),
     /// SortEntitiesTable object - entity draw order
     SortEntitiesTable(SortEntitiesTable),
     /// DictionaryVariable object - named variable in dictionary

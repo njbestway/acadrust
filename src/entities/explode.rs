@@ -827,6 +827,9 @@ impl EntityType {
             | EntityType::Shape(_)
             | EntityType::Underlay(_)
             | EntityType::Ole2Frame(_)
+            | EntityType::Light(_)
+            | EntityType::SectionSymbol(_)
+            | EntityType::ViewBorder(_)
             | EntityType::Unknown(_) => Vec::new(),
         }
     }
