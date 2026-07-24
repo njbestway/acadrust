@@ -860,8 +860,10 @@ fn resolve_color(color: acadrust::types::Color, layer_name: &str, doc: &CadDocum
         acadrust::types::Color::Index(i) => acadrust::types::Color::Index(i)
             .rgb()
             .unwrap_or((255, 255, 255)),
-        // ByLayer / ByBlock: resolve from layer table
-        _ => doc
+        // ByBlock: no parent block context → white (ACI 7)
+        acadrust::types::Color::ByBlock => (255, 255, 255),
+        // ByLayer: resolve from layer table
+        acadrust::types::Color::ByLayer => doc
             .layers
             .get(layer_name)
             .and_then(|l| l.color.rgb())

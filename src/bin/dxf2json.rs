@@ -463,14 +463,18 @@ fn pt(v: Vector3) -> Value {
 }
 
 /// Resolve the effective color of an Insert entity.
-/// ByLayer/ByBlock on the Insert itself falls back to its layer's color.
+/// ByLayer on the Insert itself falls back to its layer's color.
+/// ByBlock on the Insert means "inherit from parent block" — at the
+/// top level (model space) there is no parent, so it resolves to white (ACI 7).
 fn resolve_insert_color(ins: &Insert, doc: &CadDocument) -> Color {
     match ins.common.color {
-        Color::ByLayer | Color::ByBlock => doc
+        Color::ByLayer => doc
             .layers
             .get(&ins.common.layer)
             .map(|l| l.color)
             .unwrap_or(Color::Index(7)),
+        // ByBlock at top level → white (no parent block to inherit from)
+        Color::ByBlock => Color::Index(7),
         c => c,
     }
 }
@@ -479,8 +483,10 @@ fn resolve_color(color: Color, layer_name: &str, doc: &CadDocument) -> (u8, u8, 
     match color {
         Color::Rgb { r, g, b } => (r, g, b),
         Color::Index(i) => Color::Index(i).rgb().unwrap_or((255, 255, 255)),
-        // ByLayer / ByBlock: resolve from layer table
-        _ => doc
+        // ByBlock: no parent block context → white (ACI 7)
+        Color::ByBlock => (255, 255, 255),
+        // ByLayer: resolve from layer table
+        Color::ByLayer => doc
             .layers
             .get(layer_name)
             .and_then(|l| l.color.rgb())
