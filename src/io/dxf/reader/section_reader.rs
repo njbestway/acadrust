@@ -3369,6 +3369,22 @@ impl<'a> SectionReader<'a> {
                 break;
             }
 
+            // Code 101 marks the start of an "Embedded Object" section
+            // (AcDbMTextObject). Its group codes 10/20/30 and 11/21/31
+            // carry the X-axis direction and a *separate* insertion point
+            // that would overwrite the real MTEXT values. Skip everything
+            // from here until the next entity (code 0).
+            if pair.code == 101 {
+                // Drain remaining pairs until the next entity marker.
+                while let Some(p) = self.reader.read_pair()? {
+                    if p.code == 0 {
+                        self.reader.push_back(p);
+                        break;
+                    }
+                }
+                break;
+            }
+
             match pair.code {
                 8 => mtext.common.layer = pair.value_string.clone(),
                 62 => {

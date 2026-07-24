@@ -764,18 +764,24 @@ fn text_to_feature(text: &Text, doc: &CadDocument) -> Value {
     let plain = acadrust::entities::mtext_format::parse_plain_text(&text.value);
     let display_text = plain.to_plain_text();
     let h_align = match text.horizontal_alignment {
-        acadrust::entities::text::TextHorizontalAlignment::Left => "left",
-        acadrust::entities::text::TextHorizontalAlignment::Center => "center",
+        acadrust::entities::text::TextHorizontalAlignment::Left
+        | acadrust::entities::text::TextHorizontalAlignment::Aligned
+        | acadrust::entities::text::TextHorizontalAlignment::Fit => "left",
+        acadrust::entities::text::TextHorizontalAlignment::Center
+        | acadrust::entities::text::TextHorizontalAlignment::Middle => "center",
         acadrust::entities::text::TextHorizontalAlignment::Right => "right",
-        acadrust::entities::text::TextHorizontalAlignment::Middle => "middle",
-        _ => "left",
+    };
+    let v_align = match text.vertical_alignment {
+        acadrust::entities::text::TextVerticalAlignment::Top => "top",
+        acadrust::entities::text::TextVerticalAlignment::Middle => "middle",
+        _ => "bottom", // Baseline | Bottom
     };
     let mut props = base_props(&color, &text.common, doc);
     props.insert("text".into(), json!(display_text));
     props.insert("fontSize".into(), json!(text.height));
     props.insert("rotation".into(), json!(rotation_deg));
     props.insert("textAlign".into(), json!(h_align));
-    props.insert("textBaseline".into(), json!("bottom"));
+    props.insert("textBaseline".into(), json!(v_align));
     make_feature_with_code(
         "Point",
         pt(wcs),
@@ -791,12 +797,26 @@ fn mtext_to_features(mtext: &MText, doc: &CadDocument) -> Vec<Value> {
     let mtext_doc = acadrust::entities::mtext_format::parse_mtext(&mtext.value, true);
     let display_text = mtext_to_display_text(&mtext_doc);
     let alignment = mtext.attachment_point as i32;
+    // Map attachment_point (1-9) to OpenLayers textAlign / textBaseline
+    let (text_align, text_baseline) = match mtext.attachment_point {
+        AttachmentPoint::TopLeft => ("left", "top"),
+        AttachmentPoint::TopCenter => ("center", "top"),
+        AttachmentPoint::TopRight => ("right", "top"),
+        AttachmentPoint::MiddleLeft => ("left", "middle"),
+        AttachmentPoint::MiddleCenter => ("center", "middle"),
+        AttachmentPoint::MiddleRight => ("right", "middle"),
+        AttachmentPoint::BottomLeft => ("left", "bottom"),
+        AttachmentPoint::BottomCenter => ("center", "bottom"),
+        AttachmentPoint::BottomRight => ("right", "bottom"),
+    };
 
     let mut base = base_props(&color, &mtext.common, doc);
     base.insert("text".into(), json!(display_text));
     base.insert("fontSize".into(), json!(mtext.height));
     base.insert("rotation".into(), json!(rotation_deg));
     base.insert("align".into(), json!(alignment));
+    base.insert("textAlign".into(), json!(text_align));
+    base.insert("textBaseline".into(), json!(text_baseline));
     base.insert("rectWidth".into(), json!(mtext.rectangle_width));
     if let Some(rh) = mtext.rectangle_height {
         base.insert("rectHeight".into(), json!(rh));
@@ -999,18 +1019,24 @@ fn attrib_to_feature(attrib: &AttributeEntity, doc: &CadDocument) -> Value {
     let wcs = ocs_to_wcs(attrib.normal, attrib.insertion_point);
     let rotation_deg = calc_text_rotation(attrib.rotation, attrib.normal);
     let h_align = match attrib.horizontal_alignment {
-        acadrust::entities::attribute_definition::HorizontalAlignment::Left => "left",
-        acadrust::entities::attribute_definition::HorizontalAlignment::Center => "center",
+        acadrust::entities::attribute_definition::HorizontalAlignment::Left
+        | acadrust::entities::attribute_definition::HorizontalAlignment::Aligned
+        | acadrust::entities::attribute_definition::HorizontalAlignment::Fit => "left",
+        acadrust::entities::attribute_definition::HorizontalAlignment::Center
+        | acadrust::entities::attribute_definition::HorizontalAlignment::Middle => "center",
         acadrust::entities::attribute_definition::HorizontalAlignment::Right => "right",
-        acadrust::entities::attribute_definition::HorizontalAlignment::Middle => "middle",
-        _ => "left",
+    };
+    let v_align = match attrib.vertical_alignment {
+        acadrust::entities::attribute_definition::VerticalAlignment::Top => "top",
+        acadrust::entities::attribute_definition::VerticalAlignment::Middle => "middle",
+        _ => "bottom", // Baseline | Bottom
     };
     let mut props = base_props(&color, &attrib.common, doc);
     props.insert("text".into(), json!(attrib.value));
     props.insert("fontSize".into(), json!(attrib.height));
     props.insert("rotation".into(), json!(rotation_deg));
     props.insert("textAlign".into(), json!(h_align));
-    props.insert("textBaseline".into(), json!("bottom"));
+    props.insert("textBaseline".into(), json!(v_align));
     make_feature_with_code(
         "Point",
         pt(wcs),
