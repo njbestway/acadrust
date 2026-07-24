@@ -31,7 +31,7 @@ use std::path::Path;
 
 // Import MVT module
 use acadrust::mvt::{
-    clip_linestring, clip_point, clip_polygon, covering_tiles, encode_tile, LayerBuilder, BBox,
+    clip_linestring, clip_point, clip_polygon, covering_tiles, encode_tile, BBox, LayerBuilder,
 };
 
 // ── 弧线离散化最小角度步长（弧度），6° ──
@@ -220,7 +220,9 @@ fn main() -> acadrust::Result<()> {
                                 for seg in clipped {
                                     let tile_coords: Vec<(i32, i32)> = seg
                                         .iter()
-                                        .map(|(x, y)| world_to_tile(*x, *y, &tile_bbox, args.extent))
+                                        .map(|(x, y)| {
+                                            world_to_tile(*x, *y, &tile_bbox, args.extent)
+                                        })
                                         .collect();
                                     builder.add_linestring(&tile_coords, &f.properties);
                                     has_features = true;
@@ -283,25 +285,38 @@ fn geom_bbox(geom: &SimpleGeom) -> BBox {
     let mut max_y = f64::MIN;
     match geom {
         SimpleGeom::Point(x, y) => {
-            min_x = *x; min_y = *y; max_x = *x; max_y = *y;
+            min_x = *x;
+            min_y = *y;
+            max_x = *x;
+            max_y = *y;
         }
         SimpleGeom::LineString(coords) => {
             for (x, y) in coords {
-                min_x = min_x.min(*x); min_y = min_y.min(*y);
-                max_x = max_x.max(*x); max_y = max_y.max(*y);
+                min_x = min_x.min(*x);
+                min_y = min_y.min(*y);
+                max_x = max_x.max(*x);
+                max_y = max_y.max(*y);
             }
         }
         SimpleGeom::Polygon(rings) => {
             for ring in rings {
                 for (x, y) in ring {
-                    min_x = min_x.min(*x); min_y = min_y.min(*y);
-                    max_x = max_x.max(*x); max_y = max_y.max(*y);
+                    min_x = min_x.min(*x);
+                    min_y = min_y.min(*y);
+                    max_x = max_x.max(*x);
+                    max_y = max_y.max(*y);
                 }
             }
         }
     }
-    if min_x == max_x { min_x -= 1.0; max_x += 1.0; }
-    if min_y == max_y { min_y -= 1.0; max_y += 1.0; }
+    if min_x == max_x {
+        min_x -= 1.0;
+        max_x += 1.0;
+    }
+    if min_y == max_y {
+        min_y -= 1.0;
+        max_y += 1.0;
+    }
     BBox::new(min_x, min_y, max_x, max_y)
 }
 
@@ -362,11 +377,8 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
         let layer = entity.common().layer.clone();
         match entity {
             EntityType::Line(e) => {
-                let color = color_to_string(e.common.color);
-                let geom = SimpleGeom::LineString(vec![
-                        (e.start.x, e.start.y),
-                        (e.end.x, e.end.y),
-                    ]);
+                let color = resolve_color(e.common.color, &layer, &doc);
+                let geom = SimpleGeom::LineString(vec![(e.start.x, e.start.y), (e.end.x, e.end.y)]);
                 let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
                     geom,
@@ -377,7 +389,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
             }
             EntityType::Point(e) => {
                 let wcs = ocs_to_wcs(e.normal, e.location);
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let geom = SimpleGeom::Point(wcs.x, wcs.y);
                 let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
@@ -388,16 +400,12 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 });
             }
             EntityType::Circle(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let center = ocs_to_wcs(e.normal, e.center);
                 let mut coords = Vec::new();
                 for i in 0..=60 {
                     let angle = i as f64 * 2.0 * std::f64::consts::PI / 60.0;
-                    let local = Vector3::new(
-                        e.radius * angle.cos(),
-                        e.radius * angle.sin(),
-                        0.0,
-                    );
+                    let local = Vector3::new(e.radius * angle.cos(), e.radius * angle.sin(), 0.0);
                     let wcs_pt = center + Matrix3::arbitrary_axis(e.normal) * local;
                     coords.push((wcs_pt.x, wcs_pt.y));
                 }
@@ -411,7 +419,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 });
             }
             EntityType::Arc(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let pts = tessellate_arc(e.center, e.radius, e.start_angle, e.end_angle, e.normal);
                 let coords: Vec<(f64, f64)> = pts.iter().map(|p| (p.x, p.y)).collect();
                 let geom = SimpleGeom::LineString(coords);
@@ -424,7 +432,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 });
             }
             EntityType::LwPolyline(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let coords = lwpolyline_coords(e);
                 if coords.len() >= 2 {
                     let geom = SimpleGeom::LineString(coords);
@@ -438,9 +446,12 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 }
             }
             EntityType::Polyline(e) => {
-                let color = color_to_string(e.common.color);
-                let coords: Vec<(f64, f64)> =
-                    e.vertices.iter().map(|v| (v.location.x, v.location.y)).collect();
+                let color = resolve_color(e.common.color, &layer, &doc);
+                let coords: Vec<(f64, f64)> = e
+                    .vertices
+                    .iter()
+                    .map(|v| (v.location.x, v.location.y))
+                    .collect();
                 if coords.len() >= 2 {
                     let geom = SimpleGeom::LineString(coords);
                     let bbox = geom_bbox(&geom);
@@ -453,7 +464,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 }
             }
             EntityType::Polyline2D(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let coords = polyline2d_coords(e);
                 if coords.len() >= 2 {
                     let geom = SimpleGeom::LineString(coords);
@@ -468,7 +479,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
             }
             EntityType::Text(e) => {
                 let wcs = ocs_to_wcs(e.normal, e.insertion_point);
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let geom = SimpleGeom::Point(wcs.x, wcs.y);
                 let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
@@ -483,21 +494,18 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 });
             }
             EntityType::MText(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let geom = SimpleGeom::Point(e.insertion_point.x, e.insertion_point.y);
                 let bbox = geom_bbox(&geom);
                 features.push(SimpleFeature {
                     geom,
                     layer,
-                    properties: vec![
-                        ("color".into(), color),
-                        ("text".into(), e.value.clone()),
-                    ],
+                    properties: vec![("color".into(), color), ("text".into(), e.value.clone())],
                     bbox,
                 });
             }
             EntityType::Ellipse(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let coords = ellipse_coords(e);
                 if coords.len() >= 2 {
                     let geom = SimpleGeom::LineString(coords);
@@ -511,7 +519,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 }
             }
             EntityType::Spline(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let coords = spline_coords(e);
                 if coords.len() >= 2 {
                     let geom = SimpleGeom::LineString(coords);
@@ -525,7 +533,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 }
             }
             EntityType::Solid(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let ring = vec![
                     (e.first_corner.x, e.first_corner.y),
                     (e.second_corner.x, e.second_corner.y),
@@ -543,7 +551,7 @@ fn extract_all_features(doc: &CadDocument) -> Vec<SimpleFeature> {
                 });
             }
             EntityType::Face3D(e) => {
-                let color = color_to_string(e.common.color);
+                let color = resolve_color(e.common.color, &layer, &doc);
                 let mut ring = vec![
                     (e.first_corner.x, e.first_corner.y),
                     (e.second_corner.x, e.second_corner.y),
@@ -590,13 +598,13 @@ fn lwpolyline_coords(e: &LwPolyline) -> Vec<(f64, f64)> {
 
         if v.bulge.abs() > 1e-10 {
             let next = &e.vertices[(i + 1) % e.vertices.len()];
-            let bulge_pts = tessellate_bulge(
-                v.location,
-                next.location,
-                v.bulge,
-            );
+            let bulge_pts = tessellate_bulge(v.location, next.location, v.bulge);
             // Skip first and last (already added)
-            for bp in bulge_pts.iter().skip(1).take(bulge_pts.len().saturating_sub(2)) {
+            for bp in bulge_pts
+                .iter()
+                .skip(1)
+                .take(bulge_pts.len().saturating_sub(2))
+            {
                 let wcs = basis * Vector3::new(bp.x, bp.y, e.elevation);
                 coords.push((wcs.x, wcs.y));
             }
@@ -629,7 +637,11 @@ fn polyline2d_coords(e: &Polyline2D) -> Vec<(f64, f64)> {
                 Vector2::new(next.location.x, next.location.y),
                 v.bulge,
             );
-            for bp in bulge_pts.iter().skip(1).take(bulge_pts.len().saturating_sub(2)) {
+            for bp in bulge_pts
+                .iter()
+                .skip(1)
+                .take(bulge_pts.len().saturating_sub(2))
+            {
                 let wcs = basis * Vector3::new(bp.x, bp.y, e.elevation);
                 coords.push((wcs.x, wcs.y));
             }
@@ -717,12 +729,7 @@ fn spline_coords(e: &Spline) -> Vec<(f64, f64)> {
     coords
 }
 
-fn nurbs_evaluate(
-    control_points: &[Vector3],
-    knots: &[f64],
-    degree: usize,
-    u: f64,
-) -> Vector3 {
+fn nurbs_evaluate(control_points: &[Vector3], knots: &[f64], degree: usize, u: f64) -> Vector3 {
     let n = control_points.len();
     let _weights = vec![1.0; n]; // Default weights (unused for now)
 
@@ -832,7 +839,11 @@ fn tessellate_bulge(start: Vector2, end: Vector2, bulge: f64) -> Vec<Vector3> {
     pts.push(Vector3::new(start.x, start.y, 0.0));
     for i in 1..segments {
         let a = start_angle + i as f64 * step;
-        pts.push(Vector3::new(cx + radius * a.cos(), cy + radius * a.sin(), 0.0));
+        pts.push(Vector3::new(
+            cx + radius * a.cos(),
+            cy + radius * a.sin(),
+            0.0,
+        ));
     }
     pts.push(Vector3::new(end.x, end.y, 0.0));
     pts
@@ -843,17 +854,18 @@ fn ocs_to_wcs(normal: Vector3, point: Vector3) -> Vector3 {
     basis * point
 }
 
-fn color_to_string(color: acadrust::types::Color) -> String {
-    match color {
-        acadrust::types::Color::Rgb { r, g, b } => format!("#{:02x}{:02x}{:02x}", r, g, b),
-        acadrust::types::Color::Index(i) => {
-            if let Some((r, g, b)) = acadrust::types::Color::Index(i).rgb() {
-                format!("#{:02x}{:02x}{:02x}", r, g, b)
-            } else {
-                "#ffffff".to_string()
-            }
-        }
-        acadrust::types::Color::ByLayer => "#ffffff".to_string(),
-        acadrust::types::Color::ByBlock => "#000000".to_string(),
-    }
+fn resolve_color(color: acadrust::types::Color, layer_name: &str, doc: &CadDocument) -> String {
+    let (r, g, b) = match color {
+        acadrust::types::Color::Rgb { r, g, b } => (r, g, b),
+        acadrust::types::Color::Index(i) => acadrust::types::Color::Index(i)
+            .rgb()
+            .unwrap_or((255, 255, 255)),
+        // ByLayer / ByBlock: resolve from layer table
+        _ => doc
+            .layers
+            .get(layer_name)
+            .and_then(|l| l.color.rgb())
+            .unwrap_or((255, 255, 255)),
+    };
+    format!("#{:02x}{:02x}{:02x}", r, g, b)
 }
