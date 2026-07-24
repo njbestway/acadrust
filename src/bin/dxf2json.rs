@@ -98,9 +98,13 @@ pub fn convert_document(
         }
     }
 
-    // 2. Determine layers to process
+    // 2. Determine layers to process (skip off/frozen layers)
     let all_layer_names: Vec<String> = if filter_layers.is_empty() {
-        doc.layers.iter().map(|l| l.name.clone()).collect()
+        doc.layers
+            .iter()
+            .filter(|l| l.is_visible())
+            .map(|l| l.name.clone())
+            .collect()
     } else {
         filter_layers.to_vec()
     };
@@ -266,9 +270,13 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
 
     let exploded_by_layer = exploded_by_layer;
 
-    // 3. 确定要处理的图层
+    // 3. 确定要处理的图层（跳过关闭/冻结图层）
     let all_layer_names: Vec<String> = if cli.layers.is_empty() {
-        doc.layers.iter().map(|l| l.name.clone()).collect()
+        doc.layers
+            .iter()
+            .filter(|l| l.is_visible())
+            .map(|l| l.name.clone())
+            .collect()
     } else {
         cli.layers.clone()
     };
