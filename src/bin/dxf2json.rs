@@ -421,6 +421,7 @@ fn entity_to_features(entity: &EntityType, doc: &CadDocument) -> Option<Vec<Valu
         EntityType::LwPolyline(e) => lwpolyline_to_features(e, doc),
         EntityType::Polyline(e) => vec![polyline3d_to_feature(e, doc)],
         EntityType::Polyline2D(e) => vec![polyline2d_to_feature(e, doc)],
+        EntityType::Polyline3D(e) => vec![polyline3d_new_to_feature(e, doc)],
         EntityType::Ellipse(e) => vec![ellipse_to_feature(e, doc)],
         EntityType::Spline(e) => vec![spline_to_feature(e, doc)],
         EntityType::Hatch(e) => vec![hatch_to_feature(e, doc)],
@@ -1184,6 +1185,17 @@ fn polyline3d_to_feature(pl: &Polyline, doc: &CadDocument) -> Value {
     )
 }
 
+fn polyline3d_new_to_feature(pl: &Polyline3D, doc: &CadDocument) -> Value {
+    let color = color_to_rgb_string(pl.common.color, &pl.common.layer, doc);
+    let coords: Vec<Value> = pl.vertices.iter().map(|v| pt(v.position)).collect();
+    make_feature_with_code(
+        "LineString",
+        Value::Array(coords),
+        Value::Object(base_props(&color, &pl.common, doc)),
+        pl.common.handle.value(),
+    )
+}
+
 fn polyline2d_to_feature(pl: &Polyline2D, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(pl.common.color, &pl.common.layer, doc);
     let mut coords: Vec<Value> = Vec::new();
@@ -1353,8 +1365,8 @@ fn hatch_to_feature(hatch: &Hatch, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(hatch.common.color, &hatch.common.layer, doc);
     let basis = Matrix3::arbitrary_axis(hatch.normal);
 
-    // Convert all hatch paths to rings
-    let mut rings: Vec<Vec<Value>> = Vec::new();
+    // Collect rings together with their external flag
+    let mut ring_entries: Vec<(Vec<Value>, bool)> = Vec::new();
     for path in &hatch.paths {
         let mut ring: Vec<Value> = Vec::new();
         for edge in &path.edges {
@@ -1455,26 +1467,54 @@ fn hatch_to_feature(hatch: &Hatch, doc: &CadDocument) -> Value {
             ring.push(ring[0].clone());
         }
         if !ring.is_empty() {
-            rings.push(ring);
+            ring_entries.push((ring, path.flags.is_external()));
         }
     }
 
-    // GeoJSON MultiPolygon: all paths form one polygon with first ring as outer boundary
-    // and subsequent rings as holes (even-odd fill rule)
-    let polygon_coords = if !rings.is_empty() {
-        Value::Array(vec![Value::Array(
-            rings.into_iter().map(Value::Array).collect(),
-        )])
+    // Build GeoJSON geometry:
+    //   - Single ring → Polygon: [[ring]]
+    //   - One outer + holes  → Polygon: [[outer], [hole1], [hole2], ...]
+    //   - Multiple outers    → MultiPolygon: [[[outer1], [hole]], [[outer2]], ...]
+    let (geo_type, coords) = if ring_entries.is_empty() {
+        ("Polygon", Value::Array(vec![]))
     } else {
-        Value::Array(vec![])
+        let outer_count = ring_entries.iter().filter(|(_, ext)| *ext).count();
+        if outer_count <= 1 {
+            // All rings form a single polygon (first = outer, rest = holes)
+            let rings: Vec<Value> = ring_entries
+                .into_iter()
+                .map(|(r, _)| Value::Array(r))
+                .collect();
+            ("Polygon", Value::Array(rings))
+        } else {
+            // Multiple disconnected outer boundaries → MultiPolygon
+            // Assign each hole to the preceding outer boundary.
+            let mut polygons: Vec<Vec<Value>> = Vec::new();
+            let mut current: Vec<Value> = Vec::new();
+            for (ring, is_ext) in ring_entries {
+                if is_ext {
+                    if !current.is_empty() {
+                        polygons.push(current);
+                    }
+                    current = vec![Value::Array(ring)];
+                } else {
+                    current.push(Value::Array(ring));
+                }
+            }
+            if !current.is_empty() {
+                polygons.push(current);
+            }
+            let mp: Vec<Value> = polygons.into_iter().map(Value::Array).collect();
+            ("MultiPolygon", Value::Array(mp))
+        }
     };
 
     let mut hatch_props = base_props(&color, &hatch.common, doc);
     hatch_props.insert("fill".into(), json!(true));
     hatch_props.insert("entityType".into(), json!("hatch"));
     make_feature_with_code(
-        "MultiPolygon",
-        polygon_coords,
+        geo_type,
+        coords,
         Value::Object(hatch_props),
         hatch.common.handle.value(),
     )
