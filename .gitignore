@@ -32,3 +32,5 @@ output_*.json
 /docs/site/
 
 /ACadSharp-master/
+
+.qoder/
