@@ -1058,6 +1058,24 @@ fn hatch_to_feature(hatch: &Hatch, doc: &CadDocument) -> Value {
     let mut hatch_props = base_props(&color, &hatch.common, doc);
     hatch_props.insert("fill".into(), json!(true));
     hatch_props.insert("entityType".into(), json!("hatch"));
+    hatch_props.insert("isSolid".into(), json!(hatch.is_solid));
+    hatch_props.insert("patternName".into(), json!(hatch.pattern.name));
+    hatch_props.insert("patternScale".into(), json!(hatch.pattern_scale));
+    hatch_props.insert("patternAngle".into(), json!(hatch.pattern_angle.to_degrees()));
+
+    // Export pattern lines for non-solid hatches (for frontend canvas rendering)
+    if !hatch.is_solid && !hatch.pattern.lines.is_empty() {
+        let pat_lines: Vec<Value> = hatch.pattern.lines.iter().map(|pl| {
+            json!({
+                "angle": pl.angle.to_degrees(),
+                "basePoint": [pl.base_point.x, pl.base_point.y],
+                "offset": [pl.offset.x, pl.offset.y],
+                "dashes": pl.dash_lengths,
+            })
+        }).collect();
+        hatch_props.insert("patternLines".into(), Value::Array(pat_lines));
+    }
+
     make_feature_with_code("MultiPolygon", polygon_coords, Value::Object(hatch_props), hatch.common.handle.value())
 }
 
