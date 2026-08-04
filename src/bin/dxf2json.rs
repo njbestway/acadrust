@@ -725,21 +725,24 @@ fn circle_to_feature(circle: &Circle, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(circle.common.color, &circle.common.layer, doc);
     let center = ocs_to_wcs(circle.normal, circle.center);
     let mut coords = Vec::new();
-    let segments = 60;
-    for i in 0..=segments {
-        let angle = i as f64 * 2.0 * std::f64::consts::PI / segments as f64;
-        let local = Vector3::new(
-            circle.radius * angle.cos(),
-            circle.radius * angle.sin(),
-            0.0,
-        );
-        let wcs_pt = center + Matrix3::arbitrary_axis(circle.normal) * local;
-        coords.push(pt(wcs_pt));
-    }
+    // let segments = 60;
+    // for i in 0..=segments {
+    //     let angle = i as f64 * 2.0 * std::f64::consts::PI / segments as f64;
+    //     let local = Vector3::new(
+    //         circle.radius * angle.cos(),
+    //         circle.radius * angle.sin(),
+    //         0.0,
+    //     );
+    //     let wcs_pt = center + Matrix3::arbitrary_axis(circle.normal) * local;
+    //     coords.push(pt(wcs_pt));
+    // }
+    coords.push(pt(center));
+    let mut props = base_props(&color, &circle.common, doc);
+    props.insert("radius".into(), json!(circle.radius));
     make_feature_with_code(
-        "LineString",
+        "Circle",
         Value::Array(coords),
-        Value::Object(base_props(&color, &circle.common, doc)),
+        Value::Object(props),
         circle.common.handle.value(),
     )
 }
@@ -805,8 +808,53 @@ fn text_to_feature(text: &Text, doc: &CadDocument) -> Value {
     )
 }
 
+/// Resolve the color of an MText span from its inline formatting codes.
+///
+/// Priority:
+/// 1. `color_rgb` (from `\c<BGR>;` true-color code) — highest priority
+/// 2. `color = MTextColor::Index(n)` (from `\C<n>;` ACI code) — look up ACI table
+/// 3. `color = MTextColor::None` (from `\C256;` or `\C0;`) — ByLayer, resolve to
+///    `layer_color` (the layer's own color, independent of the entity color)
+/// 4. No color property set — fall back to `entity_color` (the entity-level color)
+fn resolve_mtext_span_color(
+    span: &acadrust::entities::mtext_format::MTextSpan,
+    entity_color: &str,
+    layer_color: &str,
+) -> String {
+    // True-color RGB override (from \c<BGR>;)
+    if let Some((r, g, b)) = span.properties.color_rgb {
+        return format!("{},{},{}", r, g, b);
+    }
+    // ACI index color (from \C<n>;)
+    if let Some(ref c) = span.properties.color {
+        use acadrust::entities::mtext_format::MTextColor;
+        match c {
+            MTextColor::Index(idx) => {
+                if let Some((r, g, b)) = acadrust::types::aci_to_rgb(*idx as u8) {
+                    return format!("{},{},{}", r, g, b);
+                }
+            }
+            MTextColor::TrueColor(v) => {
+                let r = ((v >> 16) & 0xFF) as u8;
+                let g = ((v >> 8) & 0xFF) as u8;
+                let b = (v & 0xFF) as u8;
+                return format!("{},{},{}", r, g, b);
+            }
+            MTextColor::None => {
+                // \C0 or \C256 = ByLayer: resolve to layer color
+                return layer_color.to_string();
+            }
+        }
+    }
+    // No color property at all — use entity color
+    entity_color.to_string()
+}
+
 fn mtext_to_features(mtext: &MText, doc: &CadDocument) -> Vec<Value> {
     let color = color_to_rgb_string(mtext.common.color, &mtext.common.layer, doc);
+    // Layer color: used by \C256 / \C0 (ByLayer) inline MText color resets,
+    // which should resolve to the layer's own color, not the entity's color.
+    let layer_color = color_to_rgb_string(Color::ByLayer, &mtext.common.layer, doc);
     let wcs = ocs_to_wcs(mtext.normal, mtext.insertion_point);
     let rotation_deg = calc_text_rotation(mtext.rotation, mtext.normal);
     let mtext_doc = acadrust::entities::mtext_format::parse_mtext(&mtext.value, true);
@@ -842,49 +890,70 @@ fn mtext_to_features(mtext: &MText, doc: &CadDocument) -> Vec<Value> {
         json!(mtext.line_spacing_style as i32),
     );
 
-    // Split multi-line MText into per-line Point features with computed positions
-    let lines: Vec<&str> = display_text.lines().collect();
-    if lines.len() <= 1 {
-        return vec![make_feature_with_code(
-            "Point",
-            pt(wcs),
-            Value::Object(base),
-            mtext.common.handle.value(),
-        )];
+    // Resolve inline MText color overrides (\C / \c codes) per span.
+    // Collect all distinct span colors; if any span overrides the entity color,
+    // output the first override as "color" and all per-span colors as "spanColors".
+    let span_colors: Vec<String> = mtext_doc
+        .paragraphs
+        .iter()
+        .flat_map(|p| p.spans.iter())
+        .map(|s| resolve_mtext_span_color(s, &color, &layer_color))
+        .collect();
+
+    let has_override = span_colors.iter().any(|c| c != &color);
+    if has_override {
+        // The first non-default span color becomes the primary color
+        if let Some(first_override) = span_colors.iter().find(|c| *c != &color) {
+            base.insert("color".into(), json!(first_override.clone()));
+        }
+        // Always output the full per-span color array so the frontend can
+        // render multi-color MText correctly.
+        base.insert("spanColors".into(), json!(span_colors));
     }
 
-    let line_height = mtext.height * mtext.line_spacing_factor * 1.2;
-    let total_height = line_height * (lines.len() as f64 - 1.0);
-    // Y offset for first line relative to insertion_point (Y-down in screen space)
-    let first_line_y_offset = match mtext.attachment_point {
-        AttachmentPoint::TopLeft | AttachmentPoint::TopCenter | AttachmentPoint::TopRight => 0.0,
-        AttachmentPoint::MiddleLeft
-        | AttachmentPoint::MiddleCenter
-        | AttachmentPoint::MiddleRight => -total_height / 2.0,
-        AttachmentPoint::BottomLeft
-        | AttachmentPoint::BottomCenter
-        | AttachmentPoint::BottomRight => -total_height,
-    };
+    // Split multi-line MText into per-line Point features with computed positions
+    // let lines: Vec<&str> = display_text.lines().collect();
+    // if lines.len() <= 1 {
+    return vec![make_feature_with_code(
+        "Point",
+        pt(wcs),
+        Value::Object(base),
+        mtext.common.handle.value(),
+    )];
+    // }
 
-    let features: Vec<Value> = lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let y_off = first_line_y_offset + i as f64 * line_height;
-            let pt_coord = Vector3::new(wcs.x, wcs.y - y_off, wcs.z);
-            let mut props = base.clone();
-            props.insert("text".into(), json!(line));
-            props.insert("lineIndex".into(), json!(i));
-            props.insert("lineCount".into(), json!(lines.len()));
-            make_feature_with_code(
-                "Point",
-                pt(pt_coord),
-                Value::Object(props),
-                mtext.common.handle.value(),
-            )
-        })
-        .collect();
-    features
+    // let line_height = mtext.height * mtext.line_spacing_factor * 1.2;
+    // let total_height = line_height * (lines.len() as f64 - 1.0);
+    // // Y offset for first line relative to insertion_point (Y-down in screen space)
+    // let first_line_y_offset = match mtext.attachment_point {
+    //     AttachmentPoint::TopLeft | AttachmentPoint::TopCenter | AttachmentPoint::TopRight => 0.0,
+    //     AttachmentPoint::MiddleLeft
+    //     | AttachmentPoint::MiddleCenter
+    //     | AttachmentPoint::MiddleRight => -total_height / 2.0,
+    //     AttachmentPoint::BottomLeft
+    //     | AttachmentPoint::BottomCenter
+    //     | AttachmentPoint::BottomRight => -total_height,
+    // };
+
+    // let features: Vec<Value> = lines
+    //     .iter()
+    //     .enumerate()
+    //     .map(|(i, line)| {
+    //         let y_off = first_line_y_offset + i as f64 * line_height;
+    //         let pt_coord = Vector3::new(wcs.x, wcs.y - y_off, wcs.z);
+    //         let mut props = base.clone();
+    //         props.insert("text".into(), json!(line));
+    //         props.insert("lineIndex".into(), json!(i));
+    //         props.insert("lineCount".into(), json!(lines.len()));
+    //         make_feature_with_code(
+    //             "Point",
+    //             pt(pt_coord),
+    //             Value::Object(props),
+    //             mtext.common.handle.value(),
+    //         )
+    //     })
+    //     .collect();
+    // features
 }
 
 /// Convert MTextDocument to display text, replacing subscript/superscript spans
@@ -1512,6 +1581,7 @@ fn hatch_to_feature(hatch: &Hatch, doc: &CadDocument) -> Value {
     let mut hatch_props = base_props(&color, &hatch.common, doc);
     hatch_props.insert("fill".into(), json!(true));
     hatch_props.insert("entityType".into(), json!("hatch"));
+    hatch_props.insert("patternName".into(), json!(hatch.pattern.name));
     make_feature_with_code(
         geo_type,
         coords,
