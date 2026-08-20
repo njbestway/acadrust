@@ -621,11 +621,17 @@ impl MTextParser {
         self.current_props_mut().second_color = None;
         self.current_props_mut().color_rgb = None;
 
-        // Read color1. ACI runs 0..=256 (0 ByBlock, 256 ByLayer both mean
-        // "inherit" here); an out-of-range value is invalid and ignored.
+        // Read color1. ACI runs 0..=256:
+        //   0 (ByBlock) and 256 (ByLayer) mean "reset to layer color",
+        //   represented explicitly as Some(MTextColor::None) so that the
+        //   consumer can distinguish "\C256;" from "no \C code at all".
         if let Some(c1) = self.parse_numeric_semicolon_value() {
             if c1 != 0 && c1 != 256 && c1 <= 256 {
                 self.current_props_mut().color = Some(MTextColor::from_index(c1));
+            } else if c1 == 0 || c1 == 256 {
+                // Explicitly mark "reset to ByLayer" so the downstream color
+                // resolver can use the layer color instead of the entity color.
+                self.current_props_mut().color = Some(MTextColor::None);
             }
 
             // Read color2 (ending color for gradient)
@@ -1161,8 +1167,11 @@ mod tests {
             Some(MTextColor::Index(1))
         );
         assert_eq!(doc.paragraphs[0].spans[1].text, " normal");
-        // After \C0;; the color is reset to None (by-block/default)
-        assert!(doc.paragraphs[0].spans[1].properties.color.is_none());
+        // After \C0;; the color is explicitly set to MTextColor::None (ByLayer/ByBlock reset)
+        assert_eq!(
+            doc.paragraphs[0].spans[1].properties.color,
+            Some(MTextColor::None)
+        );
     }
 
     #[test]
@@ -1401,16 +1410,16 @@ mod tests {
             .iter()
             .any(|s| s.text == "X" && s.properties.overline()));
         // `%%d` still resolves to the degree symbol in plain text.
-        assert_eq!(parse_plain_text("90%%d").paragraphs[0].to_plain_text(), "90°");
+        assert_eq!(
+            parse_plain_text("90%%d").paragraphs[0].to_plain_text(),
+            "90°"
+        );
     }
 
     #[test]
     fn test_plain_text_decimal_char_code() {
         // `%%176` → decimal 176 → '°'.
-        assert_eq!(
-            parse_plain_text("%%176").paragraphs[0].to_plain_text(),
-            "°"
-        );
+        assert_eq!(parse_plain_text("%%176").paragraphs[0].to_plain_text(), "°");
     }
 
     #[test]

@@ -11,6 +11,7 @@
 
 use acadrust::entities::*;
 use acadrust::objects::ObjectType;
+use acadrust::tables::DimStyle;
 use acadrust::types::{Color, Matrix3, Vector2, Vector3};
 use acadrust::{CadDocument, EntityType};
 #[cfg(not(feature = "server"))]
@@ -726,21 +727,24 @@ fn circle_to_feature(circle: &Circle, doc: &CadDocument) -> Value {
     let color = color_to_rgb_string(circle.common.color, &circle.common.layer, doc);
     let center = ocs_to_wcs(circle.normal, circle.center);
     let mut coords = Vec::new();
-    let segments = 60;
-    for i in 0..=segments {
-        let angle = i as f64 * 2.0 * std::f64::consts::PI / segments as f64;
-        let local = Vector3::new(
-            circle.radius * angle.cos(),
-            circle.radius * angle.sin(),
-            0.0,
-        );
-        let wcs_pt = center + Matrix3::arbitrary_axis(circle.normal) * local;
-        coords.push(pt(wcs_pt));
-    }
+    // let segments = 60;
+    // for i in 0..=segments {
+    //     let angle = i as f64 * 2.0 * std::f64::consts::PI / segments as f64;
+    //     let local = Vector3::new(
+    //         circle.radius * angle.cos(),
+    //         circle.radius * angle.sin(),
+    //         0.0,
+    //     );
+    //     let wcs_pt = center + Matrix3::arbitrary_axis(circle.normal) * local;
+    //     coords.push(pt(wcs_pt));
+    // }
+    coords.push(pt(center));
+    let mut props = base_props(&color, &circle.common, doc);
+    props.insert("radius".into(), json!(circle.radius));
     make_feature_with_code(
-        "LineString",
+        "Circle",
         Value::Array(coords),
-        Value::Object(base_props(&color, &circle.common, doc)),
+        Value::Object(props),
         circle.common.handle.value(),
     )
 }
@@ -806,8 +810,53 @@ fn text_to_feature(text: &Text, doc: &CadDocument) -> Value {
     )
 }
 
+/// Resolve the color of an MText span from its inline formatting codes.
+///
+/// Priority:
+/// 1. `color_rgb` (from `\c<BGR>;` true-color code) — highest priority
+/// 2. `color = MTextColor::Index(n)` (from `\C<n>;` ACI code) — look up ACI table
+/// 3. `color = MTextColor::None` (from `\C256;` or `\C0;`) — ByLayer, resolve to
+///    `layer_color` (the layer's own color, independent of the entity color)
+/// 4. No color property set — fall back to `entity_color` (the entity-level color)
+fn resolve_mtext_span_color(
+    span: &acadrust::entities::mtext_format::MTextSpan,
+    entity_color: &str,
+    layer_color: &str,
+) -> String {
+    // True-color RGB override (from \c<BGR>;)
+    if let Some((r, g, b)) = span.properties.color_rgb {
+        return format!("{},{},{}", r, g, b);
+    }
+    // ACI index color (from \C<n>;)
+    if let Some(ref c) = span.properties.color {
+        use acadrust::entities::mtext_format::MTextColor;
+        match c {
+            MTextColor::Index(idx) => {
+                if let Some((r, g, b)) = acadrust::types::aci_to_rgb(*idx as u8) {
+                    return format!("{},{},{}", r, g, b);
+                }
+            }
+            MTextColor::TrueColor(v) => {
+                let r = ((v >> 16) & 0xFF) as u8;
+                let g = ((v >> 8) & 0xFF) as u8;
+                let b = (v & 0xFF) as u8;
+                return format!("{},{},{}", r, g, b);
+            }
+            MTextColor::None => {
+                // \C0 or \C256 = ByLayer: resolve to layer color
+                return layer_color.to_string();
+            }
+        }
+    }
+    // No color property at all — use entity color
+    entity_color.to_string()
+}
+
 fn mtext_to_features(mtext: &MText, doc: &CadDocument) -> Vec<Value> {
     let color = color_to_rgb_string(mtext.common.color, &mtext.common.layer, doc);
+    // Layer color: used by \C256 / \C0 (ByLayer) inline MText color resets,
+    // which should resolve to the layer's own color, not the entity's color.
+    let layer_color = color_to_rgb_string(Color::ByLayer, &mtext.common.layer, doc);
     let wcs = ocs_to_wcs(mtext.normal, mtext.insertion_point);
     let rotation_deg = calc_text_rotation(mtext.rotation, mtext.normal);
     let mtext_doc = acadrust::entities::mtext_format::parse_mtext(&mtext.value, true);
@@ -843,49 +892,70 @@ fn mtext_to_features(mtext: &MText, doc: &CadDocument) -> Vec<Value> {
         json!(mtext.line_spacing_style as i32),
     );
 
-    // Split multi-line MText into per-line Point features with computed positions
-    let lines: Vec<&str> = display_text.lines().collect();
-    if lines.len() <= 1 {
-        return vec![make_feature_with_code(
-            "Point",
-            pt(wcs),
-            Value::Object(base),
-            mtext.common.handle.value(),
-        )];
+    // Resolve inline MText color overrides (\C / \c codes) per span.
+    // Collect all distinct span colors; if any span overrides the entity color,
+    // output the first override as "color" and all per-span colors as "spanColors".
+    let span_colors: Vec<String> = mtext_doc
+        .paragraphs
+        .iter()
+        .flat_map(|p| p.spans.iter())
+        .map(|s| resolve_mtext_span_color(s, &color, &layer_color))
+        .collect();
+
+    let has_override = span_colors.iter().any(|c| c != &color);
+    if has_override {
+        // The first non-default span color becomes the primary color
+        if let Some(first_override) = span_colors.iter().find(|c| *c != &color) {
+            base.insert("color".into(), json!(first_override.clone()));
+        }
+        // Always output the full per-span color array so the frontend can
+        // render multi-color MText correctly.
+        base.insert("spanColors".into(), json!(span_colors));
     }
 
-    let line_height = mtext.height * mtext.line_spacing_factor * 1.2;
-    let total_height = line_height * (lines.len() as f64 - 1.0);
-    // Y offset for first line relative to insertion_point (Y-down in screen space)
-    let first_line_y_offset = match mtext.attachment_point {
-        AttachmentPoint::TopLeft | AttachmentPoint::TopCenter | AttachmentPoint::TopRight => 0.0,
-        AttachmentPoint::MiddleLeft
-        | AttachmentPoint::MiddleCenter
-        | AttachmentPoint::MiddleRight => -total_height / 2.0,
-        AttachmentPoint::BottomLeft
-        | AttachmentPoint::BottomCenter
-        | AttachmentPoint::BottomRight => -total_height,
-    };
+    // Split multi-line MText into per-line Point features with computed positions
+    // let lines: Vec<&str> = display_text.lines().collect();
+    // if lines.len() <= 1 {
+    return vec![make_feature_with_code(
+        "Point",
+        pt(wcs),
+        Value::Object(base),
+        mtext.common.handle.value(),
+    )];
+    // }
 
-    let features: Vec<Value> = lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let y_off = first_line_y_offset + i as f64 * line_height;
-            let pt_coord = Vector3::new(wcs.x, wcs.y - y_off, wcs.z);
-            let mut props = base.clone();
-            props.insert("text".into(), json!(line));
-            props.insert("lineIndex".into(), json!(i));
-            props.insert("lineCount".into(), json!(lines.len()));
-            make_feature_with_code(
-                "Point",
-                pt(pt_coord),
-                Value::Object(props),
-                mtext.common.handle.value(),
-            )
-        })
-        .collect();
-    features
+    // let line_height = mtext.height * mtext.line_spacing_factor * 1.2;
+    // let total_height = line_height * (lines.len() as f64 - 1.0);
+    // // Y offset for first line relative to insertion_point (Y-down in screen space)
+    // let first_line_y_offset = match mtext.attachment_point {
+    //     AttachmentPoint::TopLeft | AttachmentPoint::TopCenter | AttachmentPoint::TopRight => 0.0,
+    //     AttachmentPoint::MiddleLeft
+    //     | AttachmentPoint::MiddleCenter
+    //     | AttachmentPoint::MiddleRight => -total_height / 2.0,
+    //     AttachmentPoint::BottomLeft
+    //     | AttachmentPoint::BottomCenter
+    //     | AttachmentPoint::BottomRight => -total_height,
+    // };
+
+    // let features: Vec<Value> = lines
+    //     .iter()
+    //     .enumerate()
+    //     .map(|(i, line)| {
+    //         let y_off = first_line_y_offset + i as f64 * line_height;
+    //         let pt_coord = Vector3::new(wcs.x, wcs.y - y_off, wcs.z);
+    //         let mut props = base.clone();
+    //         props.insert("text".into(), json!(line));
+    //         props.insert("lineIndex".into(), json!(i));
+    //         props.insert("lineCount".into(), json!(lines.len()));
+    //         make_feature_with_code(
+    //             "Point",
+    //             pt(pt_coord),
+    //             Value::Object(props),
+    //             mtext.common.handle.value(),
+    //         )
+    //     })
+    //     .collect();
+    // features
 }
 
 /// Convert MTextDocument to display text, replacing subscript/superscript spans
@@ -1580,76 +1650,159 @@ fn face3d_to_feature(f: &Face3D, doc: &CadDocument) -> Value {
         f.common.handle.value(),
     )
 }
+// fn dimension_to_features(dim: &Dimension, doc: &CadDocument) -> Vec<Value> {
+//     let base = dim.base();
+//     let color = color_to_rgb_string(base.common.color, &base.common.layer, doc);
+//     let handle = base.common.handle.value();
+//     let mut features = Vec::new();
+//     // 参考线（LineString）：大部分类型产生一条，Arc 可能需要多条
+//     let mut line_groups: Vec<Vec<Value>> = match dim {
+//         Dimension::Linear(d) => vec![vec![
+//             pt(d.first_point),
+//             pt(d.definition_point),
+//             pt(d.second_point),
+//         ]],
+//         Dimension::Aligned(d) => vec![vec![
+//             pt(d.first_point),
+//             pt(d.definition_point),
+//             pt(d.second_point),
+//         ]],
+//         Dimension::Radius(d) => vec![vec![pt(d.angle_vertex), pt(d.definition_point)]],
+//         Dimension::Diameter(d) => vec![vec![pt(d.angle_vertex), pt(d.definition_point)]],
+//         Dimension::Angular2Ln(d) => vec![vec![
+//             pt(d.first_point),
+//             pt(d.angle_vertex),
+//             pt(d.second_point),
+//             pt(d.dimension_arc),
+//         ]],
+//         Dimension::Angular3Pt(d) => vec![vec![
+//             pt(d.first_point),
+//             pt(d.angle_vertex),
+//             pt(d.second_point),
+//         ]],
+//         Dimension::Ordinate(d) => vec![vec![
+//             pt(d.definition_point),
+//             pt(d.feature_location),
+//             pt(d.leader_endpoint),
+//         ]],
+//         Dimension::Arc(d) => {
+//             // 圆心→弧起点、圆心→弧终点 + 可选引线
+//             let mut lines = vec![
+//                 vec![pt(d.center_point), pt(d.first_extension_point)],
+//                 vec![pt(d.center_point), pt(d.second_extension_point)],
+//             ];
+//             if d.has_leader {
+//                 lines.push(vec![pt(d.first_leader_point), pt(d.second_leader_point)]);
+//             }
+//             lines
+//         }
+//         Dimension::LargeRadial(d) => {
+//             // 折弯标注：definition_point → jog_point → chord_point
+//             vec![vec![pt(d.definition_point), pt(d.jog_point), pt(d.chord_point)]]
+//         }
+//     };
+//     for lc in line_groups.drain(..) {
+//         if lc.len() >= 2 {
+//             features.push(make_feature_with_code(
+//                 "LineString",
+//                 Value::Array(lc),
+//                 Value::Object(base_props(&color, &base.common, doc)),
+//                 handle,
+//             ));
+//         }
+//     }
+//     let dt = if !base.text.is_empty() {
+//         base.text.clone()
+//     } else if let Some(ref ut) = base.user_text {
+//         ut.clone()
+//     } else {
+//         format!("{:.2}", base.actual_measurement)
+//     };
+//     let ds = match dim {
+//         Dimension::Linear(_) => "linear",
+//         Dimension::Aligned(_) => "aligned",
+//         Dimension::Radius(_) => "radius",
+//         Dimension::Diameter(_) => "diameter",
+//         Dimension::Angular2Ln(_) => "angular",
+//         Dimension::Angular3Pt(_) => "angular3pt",
+//         Dimension::Ordinate(_) => "ordinate",
+//         Dimension::Arc(_) => "arc",
+//         Dimension::LargeRadial(_) => "large_radial",
+//     };
+//     let rot = calc_text_rotation(base.text_rotation, base.normal);
+//     let mut props = base_props(&color, &base.common, doc);
+//     props.insert("text".into(), json!(dt));
+//     props.insert("fontSize".into(), json!(0.0));
+//     props.insert("rotation".into(), json!(rot));
+//     props.insert("measurement".into(), json!(base.actual_measurement));
+//     props.insert("dimensionType".into(), json!(ds));
+//     features.push(make_feature_with_code(
+//         "Point",
+//         pt(base.text_middle_point),
+//         Value::Object(props),
+//         handle,
+//     ));
+//     features
+// }
 
-fn dimension_to_features(dim: &Dimension, doc: &CadDocument) -> Vec<Value> {
-    let base = dim.base();
-    let color = color_to_rgb_string(base.common.color, &base.common.layer, doc);
-    let handle = base.common.handle.value();
-    let mut features = Vec::new();
-    // 参考线（LineString）：大部分类型产生一条，Arc 可能需要多条
-    let mut line_groups: Vec<Vec<Value>> = match dim {
-        Dimension::Linear(d) => vec![vec![
-            pt(d.first_point),
-            pt(d.definition_point),
-            pt(d.second_point),
-        ]],
-        Dimension::Aligned(d) => vec![vec![
-            pt(d.first_point),
-            pt(d.definition_point),
-            pt(d.second_point),
-        ]],
-        Dimension::Radius(d) => vec![vec![pt(d.angle_vertex), pt(d.definition_point)]],
-        Dimension::Diameter(d) => vec![vec![pt(d.angle_vertex), pt(d.definition_point)]],
-        Dimension::Angular2Ln(d) => vec![vec![
-            pt(d.first_point),
-            pt(d.angle_vertex),
-            pt(d.second_point),
-            pt(d.dimension_arc),
-        ]],
-        Dimension::Angular3Pt(d) => vec![vec![
-            pt(d.first_point),
-            pt(d.angle_vertex),
-            pt(d.second_point),
-        ]],
-        Dimension::Ordinate(d) => vec![vec![
-            pt(d.definition_point),
-            pt(d.feature_location),
-            pt(d.leader_endpoint),
-        ]],
-        Dimension::Arc(d) => {
-            // 圆心→弧起点、圆心→弧终点 + 可选引线
-            let mut lines = vec![
-                vec![pt(d.center_point), pt(d.first_extension_point)],
-                vec![pt(d.center_point), pt(d.second_extension_point)],
-            ];
-            if d.has_leader {
-                lines.push(vec![pt(d.first_leader_point), pt(d.second_leader_point)]);
-            }
-            lines
-        }
-        Dimension::LargeRadial(d) => {
-            // 折弯标注：definition_point → jog_point → chord_point
-            vec![vec![pt(d.definition_point), pt(d.jog_point), pt(d.chord_point)]]
-        }
-    };
-    for lc in line_groups.drain(..) {
-        if lc.len() >= 2 {
-            features.push(make_feature_with_code(
-                "LineString",
-                Value::Array(lc),
-                Value::Object(base_props(&color, &base.common, doc)),
-                handle,
-            ));
+// ═══════════════════════════════════════════════════════════════
+//  Dimension 辅助函数
+// ═══════════════════════════════════════════════════════════════
+
+/// 查找 DimStyle（大小写不敏感）
+fn resolve_dim_style<'a>(style_name: &str, doc: &'a CadDocument) -> Option<&'a DimStyle> {
+    doc.dim_styles.get(style_name)
+}
+
+/// 获取 DimStyle 文字高度（dimtxt × dimscale），默认 2.5
+fn dim_text_height(style_name: &str, doc: &CadDocument) -> f64 {
+    resolve_dim_style(style_name, doc)
+        .map(|s| s.dimtxt * s.dimscale)
+        .unwrap_or(2.5)
+}
+
+/// 获取 DimStyle 箭头大小（dimasz × dimscale），默认 2.5
+fn dim_arrow_size(style_name: &str, doc: &CadDocument) -> f64 {
+    resolve_dim_style(style_name, doc)
+        .map(|s| s.dimasz * s.dimscale)
+        .unwrap_or(2.5)
+}
+
+/// 获取 DimStyle 文字颜色字符串，ByBlock(0) 时回退到实体颜色
+fn dim_text_color_str(style_name: &str, parent_color: Color, parent_layer: &str, doc: &CadDocument) -> String {
+    let aci = resolve_dim_style(style_name, doc)
+        .map(|s| s.dimclrt)
+        .unwrap_or(0);
+    if aci == 0 {
+        color_to_rgb_string(parent_color, parent_layer, doc)
+    } else {
+        color_to_rgb_string(Color::Index(aci as u8), parent_layer, doc)
+    }
+}
+
+/// 解析标注文字内容：优先 text > user_text > 格式化测量值
+fn dimension_display_text(base: &DimensionBase) -> String {
+    if !base.text.is_empty() {
+        return base.text.clone();
+    }
+    if let Some(ref ut) = base.user_text {
+        if !ut.is_empty() {
+            return ut.clone();
         }
     }
-    let dt = if !base.text.is_empty() {
-        base.text.clone()
-    } else if let Some(ref ut) = base.user_text {
-        ut.clone()
+    let m = base.actual_measurement;
+    if m.abs() < 1e-9 {
+        "0".to_string()
+    } else if (m - m.round()).abs() < 1e-9 {
+        format!("{}", m.round() as i64)
     } else {
-        format!("{:.2}", base.actual_measurement)
-    };
-    let ds = match dim {
+        format!("{:.2}", m)
+    }
+}
+
+/// 标注类型字符串
+fn dimension_type_str(dim: &Dimension) -> &'static str {
+    match dim {
         Dimension::Linear(_) => "linear",
         Dimension::Aligned(_) => "aligned",
         Dimension::Radius(_) => "radius",
@@ -1659,20 +1812,394 @@ fn dimension_to_features(dim: &Dimension, doc: &CadDocument) -> Vec<Value> {
         Dimension::Ordinate(_) => "ordinate",
         Dimension::Arc(_) => "arc",
         Dimension::LargeRadial(_) => "large_radial",
+    }
+}
+
+/// 生成带 dimensionPart 标记的 LineString Feature
+fn dim_line_feature(
+    coords: Vec<Value>,
+    part: &str,
+    color: &str,
+    common: &EntityCommon,
+    doc: &CadDocument,
+) -> Value {
+    let mut props = base_props(color, common, doc);
+    props.insert("dimensionPart".into(), json!(part));
+    make_feature_with_code("LineString", Value::Array(coords), Value::Object(props), common.handle.value())
+}
+
+/// 生成带 dimensionPart 标记的 Polygon（箭头）Feature
+fn dim_arrow_feature(
+    triangle: Vec<Value>,
+    part: &str,
+    color: &str,
+    common: &EntityCommon,
+    doc: &CadDocument,
+) -> Value {
+    let mut props = base_props(color, common, doc);
+    props.insert("dimensionPart".into(), json!(part));
+    props.insert("fill".into(), json!(true));
+    make_feature_with_code("Polygon", json!([triangle]), Value::Object(props), common.handle.value())
+}
+
+/// 生成等腰三角形箭头坐标（闭合：tip → p1 → p2 → tip）
+/// dir: 从尾部指向尖端的向量
+fn make_arrow_triangle(tip: Vector3, dir: Vector3, size: f64) -> Vec<Value> {
+    let len = dir.length();
+    if len < 1e-12 {
+        return vec![pt(tip), pt(tip), pt(tip), pt(tip)];
+    }
+    let d = dir / len;
+    let perp = Vector3::new(-d.y, d.x, 0.0);
+    let half_w = size * 0.3;
+    let tail = tip - d * size;
+    let p1 = tail + perp * half_w;
+    let p2 = tail - perp * half_w;
+    vec![pt(tip), pt(p1), pt(p2), pt(tip)]
+}
+
+/// 离散化角度弧线（vertex 为圆心，radius 为半径，WCS XY 平面）
+fn tessellate_angle_arc_pts(vertex: Vector3, start_angle: f64, end_angle: f64, radius: f64) -> Vec<Value> {
+    let mut sweep = end_angle - start_angle;
+    if sweep < 0.0 {
+        sweep += 2.0 * std::f64::consts::PI;
+    }
+    if sweep > 2.0 * std::f64::consts::PI {
+        sweep -= 2.0 * std::f64::consts::PI;
+    }
+    let segments = (sweep / SMALLEST_ANGLE).ceil().max(1.0) as usize;
+    let step = sweep / segments as f64;
+    let mut pts = Vec::with_capacity(segments + 1);
+    for i in 0..=segments {
+        let a = start_angle + i as f64 * step;
+        pts.push(pt(Vector3::new(
+            vertex.x + radius * a.cos(),
+            vertex.y + radius * a.sin(),
+            vertex.z,
+        )));
+    }
+    pts
+}
+
+/// 展开 Dimension 匿名块，将块内实体转为 GeoJSON Features
+/// ByBlock 颜色继承实体颜色，图层 "0" 继承实体图层
+fn expand_dimension_block(
+    block_name: &str,
+    parent_color: Color,
+    parent_layer: &str,
+    doc: &CadDocument,
+) -> Vec<Value> {
+    if block_name.is_empty() {
+        return Vec::new();
+    }
+    let br = match doc.block_records.get(block_name) {
+        Some(b) => b,
+        None => return Vec::new(),
     };
-    let rot = calc_text_rotation(base.text_rotation, base.normal);
+    let mut features = Vec::new();
+    for h in &br.entity_handles {
+        let entity = match doc.get_entity(*h) {
+            Some(e) => e,
+            None => continue,
+        };
+        let mut ent = entity.clone();
+        if ent.common().color == Color::ByBlock {
+            ent.common_mut().color = parent_color;
+        }
+        if ent.common().layer == "0" {
+            ent.common_mut().layer = parent_layer.to_string();
+        }
+        if let EntityType::Insert(ins) = &ent {
+            // 展开箭头 Insert 块（如 _CLOSED、_OBLIQUE 等箭头块引用）
+            let exploded = ins.explode_from_document(doc);
+            for mut sub in exploded {
+                if sub.common().color == Color::ByBlock {
+                    sub.common_mut().color = parent_color;
+                }
+                if sub.common().layer == "0" {
+                    sub.common_mut().layer = parent_layer.to_string();
+                }
+                if let Some(fs) = entity_to_features(&sub, doc) {
+                    for mut f in fs {
+                        if let Some(props) = f.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                            props.insert("dimensionPart".into(), json!("arrow"));
+                        }
+                        features.push(f);
+                    }
+                }
+            }
+        } else if let Some(fs) = entity_to_features(&ent, doc) {
+            for mut f in fs {
+                let geom_type = f.get("geometry")
+                    .and_then(|g| g.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(props) = f.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                    let part = match geom_type.as_str() {
+                        "LineString" => "dimensionLine",
+                        "Point" => "dimensionText",
+                        "Polygon" => "arrow",
+                        _ => "dimensionPart",
+                    };
+                    props.insert("dimensionPart".into(), json!(part));
+                }
+                features.push(f);
+            }
+        }
+    }
+    features
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Dimension 各类型 Fallback 几何生成
+// ═══════════════════════════════════════════════════════════════
+
+/// Linear 标注 Fallback 几何
+fn gen_linear_dim_features(d: &DimensionLinear, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let arrow_sz = dim_arrow_size(&d.base.style_name, doc);
+    let mut feats = Vec::new();
+    // 简化：definition_point 作为延伸线终点
+    let ext1_end = d.definition_point;
+    let ext2_end = d.definition_point + (d.second_point - d.first_point);
+    feats.push(dim_line_feature(vec![pt(d.first_point), pt(ext1_end)], "extension1", color, common, doc));
+    feats.push(dim_line_feature(vec![pt(d.second_point), pt(ext2_end)], "extension2", color, common, doc));
+    feats.push(dim_line_feature(vec![pt(ext1_end), pt(ext2_end)], "dimensionLine", color, common, doc));
+    feats.push(dim_arrow_feature(make_arrow_triangle(ext1_end, ext2_end - ext1_end, arrow_sz), "arrow1", color, common, doc));
+    feats.push(dim_arrow_feature(make_arrow_triangle(ext2_end, ext1_end - ext2_end, arrow_sz), "arrow2", color, common, doc));
+    feats
+}
+
+/// Aligned 标注 Fallback 几何
+fn gen_aligned_dim_features(d: &DimensionAligned, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let arrow_sz = dim_arrow_size(&d.base.style_name, doc);
+    let mut feats = Vec::new();
+    let line_dir = d.second_point - d.first_point;
+    let len = line_dir.length();
+    if len < 1e-12 { return feats; }
+    let unit = line_dir / len;
+    let perp = Vector3::new(-unit.y, unit.x, 0.0);
+    let offset = (d.definition_point - d.first_point).dot(&perp);
+    let ext1_end = d.first_point + perp * offset;
+    let ext2_end = d.second_point + perp * offset;
+    feats.push(dim_line_feature(vec![pt(d.first_point), pt(ext1_end)], "extension1", color, common, doc));
+    feats.push(dim_line_feature(vec![pt(d.second_point), pt(ext2_end)], "extension2", color, common, doc));
+    feats.push(dim_line_feature(vec![pt(ext1_end), pt(ext2_end)], "dimensionLine", color, common, doc));
+    feats.push(dim_arrow_feature(make_arrow_triangle(ext1_end, ext2_end - ext1_end, arrow_sz), "arrow1", color, common, doc));
+    feats.push(dim_arrow_feature(make_arrow_triangle(ext2_end, ext1_end - ext2_end, arrow_sz), "arrow2", color, common, doc));
+    feats
+}
+
+/// Radius 标注 Fallback 几何
+fn gen_radius_dim_features(d: &DimensionRadius, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let arrow_sz = dim_arrow_size(&d.base.style_name, doc);
+    let mut feats = Vec::new();
+    feats.push(dim_line_feature(vec![pt(d.angle_vertex), pt(d.definition_point)], "leader", color, common, doc));
+    let dir = d.angle_vertex - d.definition_point;
+    feats.push(dim_arrow_feature(make_arrow_triangle(d.definition_point, dir, arrow_sz), "arrow", color, common, doc));
+    feats
+}
+
+/// Diameter 标注 Fallback 几何
+fn gen_diameter_dim_features(d: &DimensionDiameter, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let arrow_sz = dim_arrow_size(&d.base.style_name, doc);
+    let mut feats = Vec::new();
+    feats.push(dim_line_feature(vec![pt(d.angle_vertex), pt(d.definition_point)], "diameterLine", color, common, doc));
+    feats.push(dim_arrow_feature(make_arrow_triangle(d.angle_vertex, d.definition_point - d.angle_vertex, arrow_sz), "arrow1", color, common, doc));
+    feats.push(dim_arrow_feature(make_arrow_triangle(d.definition_point, d.angle_vertex - d.definition_point, arrow_sz), "arrow2", color, common, doc));
+    feats
+}
+
+/// Angular2Ln 标注 Fallback 几何
+fn gen_angular2ln_dim_features(d: &DimensionAngular2Ln, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let mut feats = Vec::new();
+    feats.push(dim_line_feature(vec![pt(d.angle_vertex), pt(d.first_point)], "side1", color, common, doc));
+    feats.push(dim_line_feature(vec![pt(d.angle_vertex), pt(d.second_point)], "side2", color, common, doc));
+    let v1 = d.first_point - d.angle_vertex;
+    let v2 = d.second_point - d.angle_vertex;
+    let r = d.dimension_arc.distance(&d.angle_vertex);
+    if r > 1e-12 {
+        let a1 = v1.y.atan2(v1.x);
+        let a2 = v2.y.atan2(v2.x);
+        let arc_pts = tessellate_angle_arc_pts(d.angle_vertex, a1, a2, r);
+        if arc_pts.len() >= 2 {
+            feats.push(dim_line_feature(arc_pts, "arc", color, common, doc));
+        }
+    }
+    feats
+}
+
+/// Angular3Pt 标注 Fallback 几何
+fn gen_angular3pt_dim_features(d: &DimensionAngular3Pt, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let mut feats = Vec::new();
+    feats.push(dim_line_feature(vec![pt(d.angle_vertex), pt(d.first_point)], "side1", color, common, doc));
+    feats.push(dim_line_feature(vec![pt(d.angle_vertex), pt(d.second_point)], "side2", color, common, doc));
+    let v1 = d.first_point - d.angle_vertex;
+    let v2 = d.second_point - d.angle_vertex;
+    let r = d.definition_point.distance(&d.angle_vertex);
+    if r > 1e-12 {
+        let a1 = v1.y.atan2(v1.x);
+        let a2 = v2.y.atan2(v2.x);
+        let arc_pts = tessellate_angle_arc_pts(d.angle_vertex, a1, a2, r);
+        if arc_pts.len() >= 2 {
+            feats.push(dim_line_feature(arc_pts, "arc", color, common, doc));
+        }
+    }
+    feats
+}
+
+/// Ordinate 标注 Fallback 几何
+fn gen_ordinate_dim_features(d: &DimensionOrdinate, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    vec![dim_line_feature(vec![pt(d.feature_location), pt(d.leader_endpoint)], "leader", color, common, doc)]
+}
+
+/// Arc 弧长标注 Fallback 几何
+fn gen_arc_dim_features(d: &DimensionArc, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let arrow_sz = dim_arrow_size(&d.base.style_name, doc);
+    let mut feats = Vec::new();
+    // 两条从圆心到弧端点的引线
+    feats.push(dim_line_feature(
+        vec![pt(d.center_point), pt(d.first_extension_point)], "extension1", color, common, doc));
+    feats.push(dim_line_feature(
+        vec![pt(d.center_point), pt(d.second_extension_point)], "extension2", color, common, doc));
+    // 弧线（弧端点之间的圆弧）
+    let r = d.center_point.distance(&d.first_extension_point);
+    if r > 1e-12 {
+        let a1 = (d.first_extension_point.y - d.center_point.y)
+            .atan2(d.first_extension_point.x - d.center_point.x);
+        let a2 = (d.second_extension_point.y - d.center_point.y)
+            .atan2(d.second_extension_point.x - d.center_point.x);
+        let arc_pts = tessellate_angle_arc_pts(d.center_point, a1, a2, r);
+        if arc_pts.len() >= 2 {
+            feats.push(dim_line_feature(arc_pts, "arc", color, common, doc));
+        }
+    }
+    // 可选引线
+    if d.has_leader {
+        feats.push(dim_line_feature(
+            vec![pt(d.first_leader_point), pt(d.second_leader_point)], "leader", color, common, doc));
+        let dir = d.second_leader_point - d.first_leader_point;
+        feats.push(dim_arrow_feature(
+            make_arrow_triangle(d.second_leader_point, dir, arrow_sz), "arrow", color, common, doc));
+    }
+    feats
+}
+
+/// LargeRadial 折弯半径标注 Fallback 几何
+fn gen_large_radial_dim_features(d: &DimensionLargeRadial, color: &str, doc: &CadDocument) -> Vec<Value> {
+    let common = &d.base.common;
+    let arrow_sz = dim_arrow_size(&d.base.style_name, doc);
+    let mut feats = Vec::new();
+    // 折弯引线: definition_point → jog_point → chord_point
+    feats.push(dim_line_feature(
+        vec![pt(d.definition_point), pt(d.jog_point), pt(d.chord_point)], "jogLeader", color, common, doc));
+    // 箭头指向 definition_point（圆弧上的点）
+    let dir = d.definition_point - d.jog_point;
+    feats.push(dim_arrow_feature(
+        make_arrow_triangle(d.definition_point, dir, arrow_sz), "arrow", color, common, doc));
+    feats
+}
+
+/// 构建 Dimension 文字标注 Point Feature（始终添加）
+fn build_dimension_text_feature(dim: &Dimension, doc: &CadDocument) -> Value {
+    let base = dim.base();
+    let handle = base.common.handle.value();
+    let color = color_to_rgb_string(base.common.color, &base.common.layer, doc);
+    let text = dimension_display_text(base);
+    let font_size = dim_text_height(&base.style_name, doc);
+    let text_color = dim_text_color_str(&base.style_name, base.common.color, &base.common.layer, doc);
+    let rotation = calc_text_rotation(base.text_rotation, base.normal);
+    let dt = dimension_type_str(dim);
+
     let mut props = base_props(&color, &base.common, doc);
-    props.insert("text".into(), json!(dt));
-    props.insert("fontSize".into(), json!(0.0));
-    props.insert("rotation".into(), json!(rot));
+    props.insert("text".into(), json!(text));
+    props.insert("fontSize".into(), json!(font_size));
+    props.insert("textColor".into(), json!(text_color));
+    props.insert("rotation".into(), json!(rotation));
     props.insert("measurement".into(), json!(base.actual_measurement));
-    props.insert("dimensionType".into(), json!(ds));
-    features.push(make_feature_with_code(
-        "Point",
-        pt(base.text_middle_point),
-        Value::Object(props),
-        handle,
-    ));
+    props.insert("dimensionType".into(), json!(dt));
+    props.insert("styleName".into(), json!(base.style_name));
+    if let Dimension::Ordinate(d) = dim {
+        props.insert("ordinateAxis".into(), json!(if d.is_ordinate_type_x { "X" } else { "Y" }));
+    }
+    make_feature_with_code("Point", pt(base.text_middle_point), Value::Object(props), handle)
+}
+
+fn dimension_to_features(dim: &Dimension, doc: &CadDocument) -> Vec<Value> {
+    let base = dim.base();
+    let color = color_to_rgb_string(base.common.color, &base.common.layer, doc);
+    let mut features = Vec::new();
+    let mut block_has_text = false;
+
+    // 预计算尺寸标注语义属性（供块内文字增强使用）
+    let font_size = dim_text_height(&base.style_name, doc);
+    let text_color = dim_text_color_str(&base.style_name, base.common.color, &base.common.layer, doc);
+    let dt = dimension_type_str(dim);
+
+    // ① 尝试展开匿名块（AutoCAD 预渲染的精确几何）
+    if !base.block_name.is_empty() {
+        let mut block_feats = expand_dimension_block(
+            &base.block_name, base.common.color, &base.common.layer, doc
+        );
+        if !block_feats.is_empty() {
+            // 检查块内是否已包含文字 Point，并为文字 Feature 注入尺寸标注语义属性
+            for f in &mut block_feats {
+                let is_point = f.get("geometry")
+                    .and_then(|g| g.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("Point");
+                if is_point {
+                    block_has_text = true;
+                    if let Some(props) = f.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                        props.insert("dimensionType".into(), json!(dt));
+                        props.insert("measurement".into(), json!(base.actual_measurement));
+                        props.insert("styleName".into(), json!(base.style_name));
+                        // 仅当块内文字没有 fontSize 时注入
+                        if !props.contains_key("fontSize") {
+                            props.insert("fontSize".into(), json!(font_size));
+                        }
+                        if !props.contains_key("textColor") {
+                            props.insert("textColor".into(), json!(text_color));
+                        }
+                        if let Dimension::Ordinate(d) = dim {
+                            props.insert("ordinateAxis".into(), json!(if d.is_ordinate_type_x { "X" } else { "Y" }));
+                        }
+                    }
+                }
+            }
+            features.extend(block_feats);
+        }
+    }
+
+    // ② Fallback：从关键点生成完整几何
+    if features.is_empty() {
+        let geom_feats = match dim {
+            Dimension::Linear(d)    => gen_linear_dim_features(d, &color, doc),
+            Dimension::Aligned(d)   => gen_aligned_dim_features(d, &color, doc),
+            Dimension::Radius(d)    => gen_radius_dim_features(d, &color, doc),
+            Dimension::Diameter(d)  => gen_diameter_dim_features(d, &color, doc),
+            Dimension::Angular2Ln(d)=> gen_angular2ln_dim_features(d, &color, doc),
+            Dimension::Angular3Pt(d)=> gen_angular3pt_dim_features(d, &color, doc),
+            Dimension::Ordinate(d)  => gen_ordinate_dim_features(d, &color, doc),
+            Dimension::Arc(d)     => gen_arc_dim_features(d, &color, doc),
+            Dimension::LargeRadial(d) => gen_large_radial_dim_features(d, &color, doc),
+        };
+        features.extend(geom_feats);
+    }
+
+    // ③ 仅在匿名块不包含文字时，添加语义 Point Feature（避免重复显示数字）
+    if !block_has_text {
+        features.push(build_dimension_text_feature(dim, doc));
+    }
+
     features
 }
 

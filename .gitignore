@@ -34,3 +34,9 @@ output_*.json
 /ACadSharp-master/
 
 .qoder/
+
+config.toml
+
+tiles/
+
+front/
