@@ -82,29 +82,122 @@ pub fn encoding_from_code_page(code_page: &str) -> Option<&'static Encoding> {
 ///
 /// Returns `None` for truly unrecognized/zero code pages — callers should
 /// fall back to [`detect_encoding_from_bytes`] in that case.
-pub fn encoding_from_dwg_code_page(code_page: u16) -> Option<&'static Encoding> {
-    match code_page {
-        // Standard Windows code page numbers (reliable)
-        874 => Some(encoding_rs::WINDOWS_874),   // Thai
-        932 => Some(encoding_rs::SHIFT_JIS),      // Japanese
-        936 => Some(encoding_rs::GBK),            // Simplified Chinese
-        949 => Some(encoding_rs::EUC_KR),         // Korean
-        950 => Some(encoding_rs::BIG5),           // Traditional Chinese
-        1250 => Some(encoding_rs::WINDOWS_1250),  // Central European
-        1251 => Some(encoding_rs::WINDOWS_1251),  // Cyrillic
-        1252 => Some(encoding_rs::WINDOWS_1252),  // Western European
-        1253 => Some(encoding_rs::WINDOWS_1253),  // Greek
-        1254 => Some(encoding_rs::WINDOWS_1254),  // Turkish
-        1255 => Some(encoding_rs::WINDOWS_1255),  // Hebrew
-        1256 => Some(encoding_rs::WINDOWS_1256),  // Arabic
-        1257 => Some(encoding_rs::WINDOWS_1257),  // Baltic
-        1258 => Some(encoding_rs::WINDOWS_1258),  // Vietnamese
+// pub fn encoding_from_dwg_code_page(code_page: u16) -> Option<&'static Encoding> {
+//     match code_page {
+//         // Standard Windows code page numbers (reliable)
+//         874 => Some(encoding_rs::WINDOWS_874),   // Thai
+//         932 => Some(encoding_rs::SHIFT_JIS),      // Japanese
+//         936 => Some(encoding_rs::GBK),            // Simplified Chinese
+//         949 => Some(encoding_rs::EUC_KR),         // Korean
+//         950 => Some(encoding_rs::BIG5),           // Traditional Chinese
+//         1250 => Some(encoding_rs::WINDOWS_1250),  // Central European
+//         1251 => Some(encoding_rs::WINDOWS_1251),  // Cyrillic
+//         1252 => Some(encoding_rs::WINDOWS_1252),  // Western European
+//         1253 => Some(encoding_rs::WINDOWS_1253),  // Greek
+//         1254 => Some(encoding_rs::WINDOWS_1254),  // Turkish
+//         1255 => Some(encoding_rs::WINDOWS_1255),  // Hebrew
+//         1256 => Some(encoding_rs::WINDOWS_1256),  // Arabic
+//         1257 => Some(encoding_rs::WINDOWS_1257),  // Baltic
+//         1258 => Some(encoding_rs::WINDOWS_1258),  // Vietnamese
 
-        // Small index values (0-99) used by some R2004/AC1018 files are NOT
-        // reliable standard Windows code pages. Fall through to auto-detect.
-        0..=99 => None,
+//         // Small index values (0-99) used by some R2004/AC1018 files are NOT
+//         // reliable standard Windows code pages. Fall through to auto-detect.
+//         0..=99 => None,
 
-        _ => None,
+//         _ => None,
+//     }
+// }
+
+
+/// Resolve the compact code-page index stored in DWG file metadata.
+pub fn dwg_code_page_name(index: u16) -> &'static str {
+    match index {
+        1 => "ASCII",
+        2 => "ISO8859-1",
+        3 => "ISO8859-2",
+        4 => "ISO8859-3",
+        5 => "ISO8859-4",
+        6 => "ISO8859-5",
+        7 => "ISO8859-6",
+        8 => "ISO8859-7",
+        9 => "ISO8859-8",
+        10 => "ISO8859-9",
+        11 => "DOS437",
+        12 => "DOS850",
+        13 => "DOS852",
+        14 => "DOS855",
+        15 => "DOS857",
+        16 => "DOS860",
+        17 => "DOS861",
+        18 => "DOS863",
+        19 => "DOS864",
+        20 => "DOS865",
+        21 => "DOS869",
+        22 | 38 => "ANSI_932",
+        23 => "MAC-ROMAN",
+        24 | 41 => "BIG5",
+        25 | 40 => "KOREAN",
+        26 | 42 => "JOHAB",
+        27 => "DOS866",
+        28 => "ANSI_1250",
+        29 => "ANSI_1251",
+        30 => "ANSI_1252",
+        31 | 39 => "GB2312",
+        32 => "ANSI_1253",
+        33 => "ANSI_1254",
+        34 => "ANSI_1255",
+        35 => "ANSI_1256",
+        36 => "ANSI_1257",
+        37 => "ANSI_874",
+        43 => "UTF-8",
+        44 => "ANSI_1258",
+        _ => "ANSI_1252",
+    }
+}
+
+/// Convert a DXF `$DWGCODEPAGE` name to the compact DWG metadata index.
+pub fn dwg_code_page_index(code_page: &str) -> u16 {
+    match code_page.to_ascii_lowercase().as_str() {
+        "ascii" => 1,
+        "iso8859-1" | "iso_8859-1" => 2,
+        "iso8859-2" | "iso_8859-2" => 3,
+        "iso8859-3" | "iso_8859-3" => 4,
+        "iso8859-4" | "iso_8859-4" => 5,
+        "iso8859-5" | "iso_8859-5" => 6,
+        "iso8859-6" | "iso_8859-6" => 7,
+        "iso8859-7" | "iso_8859-7" => 8,
+        "iso8859-8" | "iso_8859-8" => 9,
+        "iso8859-9" | "iso_8859-9" => 10,
+        "dos437" => 11,
+        "dos850" => 12,
+        "dos852" => 13,
+        "dos855" => 14,
+        "dos857" => 15,
+        "dos860" => 16,
+        "dos861" => 17,
+        "dos863" => 18,
+        "dos864" => 19,
+        "dos865" => 20,
+        "dos869" => 21,
+        "ansi_932" | "dos932" => 22,
+        "mac-roman" => 23,
+        "big5" | "ansi_950" | "dos950" => 24,
+        "korean" | "ansi_949" => 25,
+        "johab" => 26,
+        "dos866" => 27,
+        "ansi_1250" | "ansi1250" => 28,
+        "ansi_1251" | "ansi1251" => 29,
+        "ansi_1252" | "ansi1252" => 30,
+        "gb2312" | "ansi_936" => 31,
+        "ansi_1253" | "ansi1253" => 32,
+        "ansi_1254" | "ansi1254" => 33,
+        "ansi_1255" | "ansi1255" => 34,
+        "ansi_1256" | "ansi1256" => 35,
+        "ansi_1257" | "ansi1257" => 36,
+        "ansi_874" => 37,
+        "utf-8" | "utf8" | "unicode" => 43,
+        "ansi_1258" | "ansi1258" => 44,
+        _ => 30,
     }
 }
 
@@ -192,6 +285,11 @@ pub fn detect_encoding_from_bytes(data: &[u8]) -> &'static Encoding {
     }
 
     best_encoding
+}
+
+pub fn encoding_from_dwg_code_page(index: u16) -> &'static Encoding {
+    encoding_from_code_page(dwg_code_page_name(index))
+        .unwrap_or(encoding_rs::WINDOWS_1252)
 }
 
 #[cfg(test)]

@@ -270,6 +270,7 @@ fn color_to_hex(color: Color) -> String {
         }
         Color::ByLayer => "#ffffff".to_string(),
         Color::ByBlock => "#000000".to_string(),
+        Color::None => "#ffffff".to_string(),
     }
 }
 
@@ -1074,46 +1075,68 @@ fn dimension_to_features(dim: &Dimension) -> Vec<Value> {
     let mut features = Vec::new();
 
     // 1. 参考线（LineString）：根据标注类型生成不同的参考几何
-    let line_coords: Vec<Value> = match dim {
+    //    大部分类型只产生一条 LineString，Arc 可能需要多条（两条引线 + 可选引线）
+    let mut line_groups: Vec<Vec<Value>> = match dim {
         Dimension::Linear(d) => {
-            vec![pt(d.first_point), pt(d.definition_point), pt(d.second_point)]
+            vec![vec![pt(d.first_point), pt(d.definition_point), pt(d.second_point)]]
         }
         Dimension::Aligned(d) => {
-            vec![pt(d.first_point), pt(d.definition_point), pt(d.second_point)]
+            vec![vec![pt(d.first_point), pt(d.definition_point), pt(d.second_point)]]
         }
         Dimension::Radius(d) => {
-            vec![pt(d.angle_vertex), pt(d.definition_point)]
+            vec![vec![pt(d.angle_vertex), pt(d.definition_point)]]
         }
         Dimension::Diameter(d) => {
-            vec![pt(d.angle_vertex), pt(d.definition_point)]
+            vec![vec![pt(d.angle_vertex), pt(d.definition_point)]]
         }
         Dimension::Angular2Ln(d) => {
-            vec![
+            vec![vec![
                 pt(d.first_point),
                 pt(d.angle_vertex),
                 pt(d.second_point),
                 pt(d.dimension_arc),
-            ]
+            ]]
         }
         Dimension::Angular3Pt(d) => {
-            vec![
+            vec![vec![
                 pt(d.first_point),
                 pt(d.angle_vertex),
                 pt(d.second_point),
-            ]
+            ]]
         }
         Dimension::Ordinate(d) => {
-            vec![pt(d.feature_location), pt(d.leader_endpoint)]
+            vec![vec![
+                pt(d.definition_point),
+                pt(d.feature_location),
+                pt(d.leader_endpoint),
+            ]]
+        }
+        Dimension::Arc(d) => {
+            // 两条从圆心到弧端点的引线 + 可选引线
+            let mut lines = vec![
+                vec![pt(d.center_point), pt(d.first_extension_point)],
+                vec![pt(d.center_point), pt(d.second_extension_point)],
+            ];
+            if d.has_leader {
+                lines.push(vec![pt(d.first_leader_point), pt(d.second_leader_point)]);
+            }
+            lines
+        }
+        Dimension::LargeRadial(d) => {
+            // 折弯标注：definition_point → jog_point → chord_point
+            vec![vec![pt(d.definition_point), pt(d.jog_point), pt(d.chord_point)]]
         }
     };
 
-    if line_coords.len() >= 2 {
-        features.push(make_feature_with_code(
-            "LineString",
-            Value::Array(line_coords),
-            json!({"color": color}),
-            handle,
-        ));
+    for line_coords in line_groups.drain(..) {
+        if line_coords.len() >= 2 {
+            features.push(make_feature_with_code(
+                "LineString",
+                Value::Array(line_coords),
+                json!({"color": color}),
+                handle,
+            ));
+        }
     }
 
     // 2. 标注文字（Point）：位于 text_middle_point
@@ -1134,6 +1157,8 @@ fn dimension_to_features(dim: &Dimension) -> Vec<Value> {
         Dimension::Angular2Ln(_) => "angular",
         Dimension::Angular3Pt(_) => "angular3pt",
         Dimension::Ordinate(_) => "ordinate",
+        Dimension::Arc(_) => "arc",
+        Dimension::LargeRadial(_) => "large_radial",
     };
 
     let rotation_deg = calc_text_rotation(base.text_rotation, base.normal);

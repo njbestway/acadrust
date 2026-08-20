@@ -857,7 +857,7 @@ impl<R: Read + Seek> DwgReader<R> {
         document.dwg_source_version = Some(dxf_version);
 
         // Resolve text encoding from DWG code page (critical for CJK files)
-        let encoding = match crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page) {
+        let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page) ;/* {
             Some(enc) => enc,
             None => {
                 // code_page is 0 or unrecognized — auto-detect from object section data
@@ -873,7 +873,7 @@ impl<R: Read + Seek> DwgReader<R> {
                     encoding_rs::WINDOWS_1252
                 }
             }
-        };
+        } */
 
         // 2. Read Classes (AcDb:Classes)
         match self.get_section_buffer("AcDb:Classes", &info) {

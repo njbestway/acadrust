@@ -492,6 +492,7 @@ fn resolve_color(color: Color, layer_name: &str, doc: &CadDocument) -> (u8, u8, 
             .get(layer_name)
             .and_then(|l| l.color.rgb())
             .unwrap_or((255, 255, 255)),
+        acadrust::types::Color::None => (255, 255, 255),
     }
 }
 
@@ -1585,35 +1586,61 @@ fn dimension_to_features(dim: &Dimension, doc: &CadDocument) -> Vec<Value> {
     let color = color_to_rgb_string(base.common.color, &base.common.layer, doc);
     let handle = base.common.handle.value();
     let mut features = Vec::new();
-    let lc: Vec<Value> = match dim {
-        Dimension::Linear(d) => vec![
+    // 参考线（LineString）：大部分类型产生一条，Arc 可能需要多条
+    let mut line_groups: Vec<Vec<Value>> = match dim {
+        Dimension::Linear(d) => vec![vec![
             pt(d.first_point),
             pt(d.definition_point),
             pt(d.second_point),
-        ],
-        Dimension::Aligned(d) => vec![
+        ]],
+        Dimension::Aligned(d) => vec![vec![
             pt(d.first_point),
             pt(d.definition_point),
             pt(d.second_point),
-        ],
-        Dimension::Radius(d) => vec![pt(d.angle_vertex), pt(d.definition_point)],
-        Dimension::Diameter(d) => vec![pt(d.angle_vertex), pt(d.definition_point)],
-        Dimension::Angular2Ln(d) => vec![
+        ]],
+        Dimension::Radius(d) => vec![vec![pt(d.angle_vertex), pt(d.definition_point)]],
+        Dimension::Diameter(d) => vec![vec![pt(d.angle_vertex), pt(d.definition_point)]],
+        Dimension::Angular2Ln(d) => vec![vec![
             pt(d.first_point),
             pt(d.angle_vertex),
             pt(d.second_point),
             pt(d.dimension_arc),
-        ],
-        Dimension::Angular3Pt(d) => vec![pt(d.first_point), pt(d.angle_vertex), pt(d.second_point)],
-        Dimension::Ordinate(d) => vec![pt(d.feature_location), pt(d.leader_endpoint)],
+        ]],
+        Dimension::Angular3Pt(d) => vec![vec![
+            pt(d.first_point),
+            pt(d.angle_vertex),
+            pt(d.second_point),
+        ]],
+        Dimension::Ordinate(d) => vec![vec![
+            pt(d.definition_point),
+            pt(d.feature_location),
+            pt(d.leader_endpoint),
+        ]],
+        Dimension::Arc(d) => {
+            // 圆心→弧起点、圆心→弧终点 + 可选引线
+            let mut lines = vec![
+                vec![pt(d.center_point), pt(d.first_extension_point)],
+                vec![pt(d.center_point), pt(d.second_extension_point)],
+            ];
+            if d.has_leader {
+                lines.push(vec![pt(d.first_leader_point), pt(d.second_leader_point)]);
+            }
+            lines
+        }
+        Dimension::LargeRadial(d) => {
+            // 折弯标注：definition_point → jog_point → chord_point
+            vec![vec![pt(d.definition_point), pt(d.jog_point), pt(d.chord_point)]]
+        }
     };
-    if lc.len() >= 2 {
-        features.push(make_feature_with_code(
-            "LineString",
-            Value::Array(lc),
-            Value::Object(base_props(&color, &base.common, doc)),
-            handle,
-        ));
+    for lc in line_groups.drain(..) {
+        if lc.len() >= 2 {
+            features.push(make_feature_with_code(
+                "LineString",
+                Value::Array(lc),
+                Value::Object(base_props(&color, &base.common, doc)),
+                handle,
+            ));
+        }
     }
     let dt = if !base.text.is_empty() {
         base.text.clone()
@@ -1630,6 +1657,8 @@ fn dimension_to_features(dim: &Dimension, doc: &CadDocument) -> Vec<Value> {
         Dimension::Angular2Ln(_) => "angular",
         Dimension::Angular3Pt(_) => "angular3pt",
         Dimension::Ordinate(_) => "ordinate",
+        Dimension::Arc(_) => "arc",
+        Dimension::LargeRadial(_) => "large_radial",
     };
     let rot = calc_text_rotation(base.text_rotation, base.normal);
     let mut props = base_props(&color, &base.common, doc);

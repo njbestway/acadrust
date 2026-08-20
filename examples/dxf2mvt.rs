@@ -868,6 +868,7 @@ fn resolve_color(color: acadrust::types::Color, layer_name: &str, doc: &CadDocum
             .get(layer_name)
             .and_then(|l| l.color.rgb())
             .unwrap_or((255, 255, 255)),
+        acadrust::types::Color::None => (255, 255, 255),
     };
     format!("#{:02x}{:02x}{:02x}", r, g, b)
 }

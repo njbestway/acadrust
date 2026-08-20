@@ -188,7 +188,7 @@ impl DwgMergedReader {
             _mode: mode,
             dxf_version,
             raw_data: None,
-            encoding: encoding_rs::WINDOWS_1252,
+            encoding,
             handle_bits: 0,
             ref_handle: 0,
             handle_start_bit: 0,
