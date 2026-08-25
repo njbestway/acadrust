@@ -607,9 +607,13 @@ impl Insert {
     /// [`CadDocument`](crate::document::CadDocument) by `block_name` and
     /// calls [`explode`](Self::explode).
     ///
+    /// Nested INSERT entities (block references within the block) are
+    /// recursively expanded so that all geometry is flattened into the
+    /// returned list.
+    ///
     /// Returns an empty `Vec` when the block record is not found.
     pub fn explode_from_document(&self, document: &crate::document::CadDocument) -> Vec<EntityType> {
-        match document.block_records.get(&self.block_name) {
+        let mut result = match document.block_records.get(&self.block_name) {
             Some(br) => {
                 let entities: Vec<EntityType> = br
                     .entity_handles
@@ -619,6 +623,48 @@ impl Insert {
                 self.explode(&entities)
             }
             None => Vec::new(),
+        };
+
+        // Recursively expand any nested INSERT entities produced by the
+        // first-level explode.  The outer explode already applied this
+        // insert's transform and resolved ByBlock / layer-"0" properties,
+        // so nested inserts carry world-space geometry that still needs
+        // to be flattened.
+        Self::expand_nested_inserts(&mut result, document);
+
+        result
+    }
+
+    /// Recursively expand INSERT entities found in `entities`.
+    ///
+    /// Each INSERT is replaced by the geometry it references (recursively
+    /// expanded).  Property resolution (ByBlock color, layer "0") is
+    /// re-applied at every nesting level so the final entities carry
+    /// correct visual properties.
+    fn expand_nested_inserts(
+        entities: &mut Vec<EntityType>,
+        document: &crate::document::CadDocument,
+    ) {
+        let mut i = 0;
+        while i < entities.len() {
+            if let EntityType::Insert(_) = &entities[i] {
+                let nested = entities.remove(i);
+                if let EntityType::Insert(nested_ins) = nested {
+                    let mut expanded = nested_ins.explode_from_document(document);
+                    // Re-resolve properties through this nesting level
+                    for sub in &mut expanded {
+                        nested_ins.resolve_properties(sub.common_mut());
+                    }
+                    // Insert the expanded entities at the current position
+                    for (j, e) in expanded.into_iter().enumerate() {
+                        entities.insert(i + j, e);
+                    }
+                    // Don't increment i — the newly inserted entities
+                    // at position i need to be checked for further nesting
+                }
+            } else {
+                i += 1;
+            }
         }
     }
 }

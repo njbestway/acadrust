@@ -1617,11 +1617,14 @@ fn solid_to_feature(s: &Solid, doc: &CadDocument) -> Value {
     let p2 = b * s.second_corner;
     let p3 = b * s.third_corner;
     let p4 = b * s.fourth_corner;
-    let mut r = vec![pt(p1), pt(p2), pt(p3)];
-    if !s.is_triangle() {
-        r.push(pt(p4));
-    }
-    r.push(r[0].clone());
+    // DXF Solid stores corners in Z-order: p1↔p3 are diagonally opposite,
+    // p2↔p4 are diagonally opposite.  Tracing p1→p2→p3→p4 would produce a
+    // self-intersecting "bowtie".  Use perimeter order p1→p2→p4→p3 instead.
+    let r = if s.is_triangle() {
+        vec![pt(p1), pt(p2), pt(p3), pt(p1)]
+    } else {
+        vec![pt(p1), pt(p2), pt(p4), pt(p3), pt(p1)]
+    };
     let mut props = base_props(&c, &s.common, doc);
     props.insert("fill".into(), json!(true));
     props.insert("entityType".into(), json!("solid"));
@@ -1635,6 +1638,8 @@ fn solid_to_feature(s: &Solid, doc: &CadDocument) -> Value {
 
 fn face3d_to_feature(f: &Face3D, doc: &CadDocument) -> Value {
     let c = color_to_rgb_string(f.common.color, &f.common.layer, doc);
+    // Unlike SOLID (Z-order), 3DFACE stores corners in sequential perimeter
+    // order, so p1→p2→p3→p4 traces the edges correctly.
     let mut r = vec![pt(f.first_corner), pt(f.second_corner), pt(f.third_corner)];
     if !f.is_triangle() {
         r.push(pt(f.fourth_corner));
