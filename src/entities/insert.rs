@@ -719,12 +719,10 @@ impl Insert {
     /// Expand this INSERT's block definition into entities, using the
     /// cache for the direct (single-level) expansion only.
     ///
-    /// **Important**: the cache stores only the direct `explode()` result
-    /// (block entities with this INSERT's transform applied), NOT the
-    /// fully-expanded result including nested INSERTs.  This ensures
-    /// correctness when the same block is referenced by INSERTs with
-    /// different transforms — nested INSERTs must be expanded per-call
-    /// to apply their own unique transforms.
+    /// **Important**: the cache key includes the INSERT's transform
+    /// parameters (position, rotation, scale, normal) to ensure that
+    /// different INSERTs referencing the same block with different
+    /// transforms get correctly transformed geometry.
     fn explode_from_document_inner(
         &self,
         document: &crate::document::CadDocument,
@@ -737,18 +735,26 @@ impl Insert {
             return Vec::new();
         }
 
+        // Build a transform-aware cache key: same block with different
+        // transforms must produce different cache entries.
+        let cache_key = format!(
+            "{}|{:.10}|{:.10}|{:.10}|{:.10}|{:.10}|{:.10}|{:.10}|{:.10}|{:.10}|{:.10}",
+            self.block_name,
+            self.insert_point.x, self.insert_point.y, self.insert_point.z,
+            self.rotation,
+            self.x_scale, self.y_scale, self.z_scale,
+            self.normal.x, self.normal.y, self.normal.z,
+        );
+
         // Fast path: return cached DIRECT expansion (Arc clone, ~10ns per entity).
-        // This cache only contains the single-level explode() result,
-        // NOT the fully-expanded result with nested INSERTs resolved.
-        if let Some(cached) = cache.get(&self.block_name) {
+        if let Some(cached) = cache.get(&cache_key) {
             return cached.clone();
         }
 
         visited.insert(self.block_name.clone());
 
         // Direct expansion: explode() applies this INSERT's transform
-        // to the block's entities.  This result is safe to cache because
-        // it only depends on the block definition and this INSERT's transform.
+        // to the block's entities.
         let result_owned: Vec<EntityType> = match document.block_records.get(&self.block_name) {
             Some(br) => {
                 let entities: Vec<EntityType> = br
@@ -766,10 +772,7 @@ impl Insert {
 
         visited.remove(&self.block_name);
 
-        // Cache the DIRECT expansion only.  Nested INSERT expansion is
-        // done by the caller (expand_nested_inserts) because it depends
-        // on the specific INSERT's transform context.
-        cache.insert(self.block_name.clone(), result.clone());
+        cache.insert(cache_key, result.clone());
 
         result
     }
