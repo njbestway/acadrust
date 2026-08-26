@@ -68,17 +68,18 @@ pub fn convert_document(
 ) -> Vec<(String, Value)> {
     // 1. Explode Insert entities (model space only)
     let ms_handle = doc.header.model_space_block_handle;
-    let mut exploded_by_layer: HashMap<String, Vec<EntityType>> = HashMap::new();
+    let mut exploded_by_layer: HashMap<String, Vec<std::sync::Arc<EntityType>>> = HashMap::new();
+    let mut block_cache: HashMap<String, Vec<std::sync::Arc<EntityType>>> = HashMap::new();
     for entity in doc
         .entities()
         .filter(|e| e.common().owner_handle == ms_handle)
     {
         if let EntityType::Insert(ins) = entity {
             let insert_color = resolve_insert_color(ins, doc);
-            let mut exploded = ins.explode_from_document(doc);
+            let mut exploded = ins.explode_from_document_cached(doc, &mut block_cache);
             for sub in &mut exploded {
                 if sub.common().color == Color::ByBlock {
-                    sub.common_mut().color = insert_color;
+                    std::sync::Arc::make_mut(sub).common_mut().color = insert_color;
                 }
             }
             for sub_entity in exploded {
@@ -94,7 +95,7 @@ pub fn convert_document(
                 exploded_by_layer
                     .entry(layer)
                     .or_default()
-                    .push(EntityType::AttributeEntity(a));
+                    .push(std::sync::Arc::new(EntityType::AttributeEntity(a)));
             }
         }
     }
@@ -205,6 +206,9 @@ fn main() -> acadrust::Result<()> {
 /// 处理单个 DXF/DWG 文件
 #[cfg(not(feature = "server"))]
 fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
+    use std::time::Instant;
+    let t_total = Instant::now();
+
     // 1. 读取文件
     let ext = Path::new(input_file)
         .extension()
@@ -212,6 +216,7 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
         .unwrap_or("dxf")
         .to_lowercase();
 
+    let t0 = Instant::now();
     let doc = if ext == "dwg" {
         if !cli.quiet {
             println!("Reading DWG: {}", input_file);
@@ -224,37 +229,50 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
         }
         DxfReader::from_file(input_file)?.read()?
     };
-
     if !cli.quiet {
         println!(
-            "  Version: {}, Layers: {}, Entities: {}",
+            "  Version: {}, Layers: {}, Entities: {} ({:.2}s)",
             doc.version.as_str(),
             doc.layers.iter().count(),
-            doc.entities().count()
+            doc.entities().count(),
+            t0.elapsed().as_secs_f64()
         );
     }
 
     // 2. 展开所有 Insert（块引用）——仅模型空间的 Insert
+    let t1 = Instant::now();
     let ms_handle = doc.header.model_space_block_handle;
-    let mut exploded_by_layer: std::collections::HashMap<String, Vec<EntityType>> =
+    let mut exploded_by_layer: std::collections::HashMap<String, Vec<std::sync::Arc<EntityType>>> =
         std::collections::HashMap::new();
+    let mut block_cache: HashMap<String, Vec<std::sync::Arc<EntityType>>> = HashMap::new();
+    let mut insert_count = 0u32;
+    let mut t_explode_total = std::time::Duration::ZERO;
+    let mut t_props_total = std::time::Duration::ZERO;
+    let mut t_insert_total = std::time::Duration::ZERO;
 
     for entity in doc
         .entities()
         .filter(|e| e.common().owner_handle == ms_handle)
     {
         if let EntityType::Insert(ins) = entity {
+            insert_count += 1;
             let insert_color = resolve_insert_color(ins, &doc);
-            let mut exploded = ins.explode_from_document(&doc);
+            let te = Instant::now();
+            let mut exploded = ins.explode_from_document_cached(&doc, &mut block_cache);
+            t_explode_total += te.elapsed();
+            let tp = Instant::now();
             for sub in &mut exploded {
                 if sub.common().color == Color::ByBlock {
-                    sub.common_mut().color = insert_color;
+                    std::sync::Arc::make_mut(sub).common_mut().color = insert_color;
                 }
             }
+            t_props_total += tp.elapsed();
+            let ti = Instant::now();
             for sub_entity in exploded {
                 let layer = sub_entity.common().layer.clone();
                 exploded_by_layer.entry(layer).or_default().push(sub_entity);
             }
+            t_insert_total += ti.elapsed();
             for attrib in &ins.attributes {
                 let mut a = attrib.clone();
                 if a.common.color == Color::ByBlock {
@@ -264,12 +282,26 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
                 exploded_by_layer
                     .entry(layer)
                     .or_default()
-                    .push(EntityType::AttributeEntity(a));
+                    .push(std::sync::Arc::new(EntityType::AttributeEntity(a)));
             }
         }
     }
 
     let exploded_by_layer = exploded_by_layer;
+    if !cli.quiet {
+        let exploded_count: usize = exploded_by_layer.values().map(|v| v.len()).sum();
+        println!(
+            "  Insert explode: {} inserts → {} entities, cache={} blocks ({:.2}s)",
+            insert_count, exploded_count, block_cache.len(),
+            t1.elapsed().as_secs_f64()
+        );
+        println!(
+            "    explode={:.2}s, props={:.2}s, insert={:.2}s",
+            t_explode_total.as_secs_f64(),
+            t_props_total.as_secs_f64(),
+            t_insert_total.as_secs_f64()
+        );
+    }
 
     // 3. 确定要处理的图层（跳过关闭/冻结图层）
     let all_layer_names: Vec<String> = if cli.layers.is_empty() {
@@ -283,6 +315,7 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
     };
 
     // 4. 按图层输出
+    let t2 = Instant::now();
     let mut layer_count = 0u32;
 
     // 当 --merge-xref 启用时，将 "图层名 @ N" 分组到基础图层名
@@ -363,6 +396,8 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
     }
 
     if !cli.quiet {
+        println!("  Layer conversion: {} layer files ({:.2}s)", layer_count, t2.elapsed().as_secs_f64());
+        println!("  Total: {:.2}s", t_total.elapsed().as_secs_f64());
         println!("  Output: {} layer files in {}/", layer_count, cli.output);
     }
 
@@ -376,7 +411,7 @@ fn process_file(input_file: &str, cli: &Cli) -> acadrust::Result<()> {
 fn collect_layer_features(
     doc: &CadDocument,
     layer_name: &str,
-    exploded_by_layer: &std::collections::HashMap<String, Vec<EntityType>>,
+    exploded_by_layer: &std::collections::HashMap<String, Vec<std::sync::Arc<EntityType>>>,
 ) -> Vec<Value> {
     if layer_name == "定位基准线" {
         return collect_positioning_baseline_features(doc, layer_name, exploded_by_layer);
@@ -1916,15 +1951,20 @@ fn expand_dimension_block(
         }
         if let EntityType::Insert(ins) = &ent {
             // 展开箭头 Insert 块（如 _CLOSED、_OBLIQUE 等箭头块引用）
-            let exploded = ins.explode_from_document(doc);
-            for mut sub in exploded {
-                if sub.common().color == Color::ByBlock {
-                    sub.common_mut().color = parent_color;
+            let mut exploded = ins.explode_from_document(doc);
+            for sub in &mut exploded {
+                if sub.common().color == Color::ByBlock
+                    || sub.common().layer == "0"
+                {
+                    let sub_mut = std::sync::Arc::make_mut(sub);
+                    if sub_mut.common().color == Color::ByBlock {
+                        sub_mut.common_mut().color = parent_color;
+                    }
+                    if sub_mut.common().layer == "0" {
+                        sub_mut.common_mut().layer = parent_layer.to_string();
+                    }
                 }
-                if sub.common().layer == "0" {
-                    sub.common_mut().layer = parent_layer.to_string();
-                }
-                if let Some(fs) = entity_to_features(&sub, doc) {
+                if let Some(fs) = entity_to_features(sub, doc) {
                     for mut f in fs {
                         if let Some(props) = f.get_mut("properties").and_then(|p| p.as_object_mut()) {
                             props.insert("dimensionPart".into(), json!("arrow"));
@@ -2280,7 +2320,7 @@ fn xtag(xml: &str, tag: &str) -> Option<String> {
 fn collect_positioning_baseline_features(
     doc: &CadDocument,
     layer_name: &str,
-    exploded_by_layer: &std::collections::HashMap<String, Vec<EntityType>>,
+    exploded_by_layer: &std::collections::HashMap<String, Vec<std::sync::Arc<EntityType>>>,
 ) -> Vec<Value> {
     let mut features = Vec::new();
     struct TI {
