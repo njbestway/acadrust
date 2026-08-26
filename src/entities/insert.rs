@@ -1,7 +1,9 @@
 //! Insert entity (block reference)
 
+use std::sync::Arc;
+
 use crate::entities::{Entity, EntityCommon, EntityType, AttributeEntity};
-use crate::entities::{Arc, Ellipse};
+use crate::entities::{Arc as GeoArc, Ellipse};
 use crate::types::{
     BoundingBox3D, Color, Handle, LineWeight, Matrix3, Matrix4, Transform,
     Transparency, Vector3,
@@ -246,6 +248,22 @@ impl Insert {
 
     // ── Transform helpers ─────────────
 
+    /// Returns `true` when the INSERT transform reduces to a simple
+    /// translation (unit scale, zero rotation, Z-up normal).
+    ///
+    /// For such inserts, the expensive per-entity OCS→WCS transform
+    /// can be replaced by a cheap coordinate offset, dramatically
+    /// speeding up block expansion.
+    fn is_translation_only(&self) -> bool {
+        (self.x_scale - 1.0).abs() < 1e-10
+            && (self.y_scale - 1.0).abs() < 1e-10
+            && (self.z_scale - 1.0).abs() < 1e-10
+            && self.rotation.abs() < 1e-10
+            && (self.normal.z.abs() - 1.0).abs() < 1e-10
+            && self.normal.x.abs() < 1e-10
+            && self.normal.y.abs() < 1e-10
+    }
+
     /// Build the full OCS → WCS transform that positions the block
     /// contents into world space.
     ///
@@ -344,6 +362,14 @@ impl Insert {
     /// * All other entities are cloned and
     ///   [`apply_transform`](Entity::apply_transform) is called.
     pub fn explode(&self, block_entities: &[EntityType]) -> Vec<EntityType> {
+        // Fast path: when the INSERT transform is a pure translation
+        // (scale=1, rotation=0, normal=Z), skip the expensive per-entity
+        // OCS→WCS conversion and Arc/Circle special handling.
+        // Just clone entities and add the insertion-point offset.
+        if !self.is_minsert() && self.is_translation_only() {
+            return self.explode_translate_fast(block_entities);
+        }
+
         let transforms = self.array_transforms();
         let mut result = Vec::new();
 
@@ -355,6 +381,50 @@ impl Insert {
             }
         }
 
+        result
+    }
+
+    /// Fast-path explode for translation-only INSERTs (scale=1, rotation=0,
+    /// normal=Z).  Clones each entity and applies a simple coordinate offset
+    /// via [`translate`](Entity::translate), bypassing the expensive
+    /// OCS→WCS matrix conversion and Arc/Circle special handling in
+    /// [`explode_single`](Self::explode_single).
+    fn explode_translate_fast(&self, block_entities: &[EntityType]) -> Vec<EntityType> {
+        let offset = self.insert_point;
+        let mut result = Vec::with_capacity(block_entities.len());
+        let has_offset = offset.x.abs() > 1e-15 || offset.y.abs() > 1e-15 || offset.z.abs() > 1e-15;
+        for entity in block_entities {
+            match entity {
+                EntityType::Block(_) | EntityType::BlockEnd(_) | EntityType::AttributeDefinition(_) => {}
+                // Circle → Ellipse conversion is needed so downstream code
+                // (renderers, GeoJSON converters) can uniformly handle ellipses.
+                EntityType::Circle(circle) => {
+                    let mut ellipse = crate::entities::Ellipse {
+                        common: circle.common.clone(),
+                        center: if has_offset {
+                            circle.center + offset
+                        } else {
+                            circle.center
+                        },
+                        major_axis: Vector3::UNIT_X * circle.radius,
+                        minor_axis_ratio: 1.0,
+                        start_parameter: 0.0,
+                        end_parameter: std::f64::consts::TAU,
+                        normal: circle.normal,
+                    };
+                    self.resolve_properties(&mut ellipse.common);
+                    result.push(EntityType::Ellipse(ellipse));
+                }
+                _ => {
+                    let mut cloned = entity.clone();
+                    if has_offset {
+                        cloned.as_entity_mut().translate(offset);
+                    }
+                    self.resolve_properties(cloned.common_mut());
+                    result.push(cloned);
+                }
+            }
+        }
         result
     }
 
@@ -437,7 +507,7 @@ impl Insert {
     }
 
     /// Explode an arc with uniform XY scale — keeps it as an Arc.
-    fn explode_arc_uniform(&self, arc: &Arc, transform: &Transform) -> EntityType {
+    fn explode_arc_uniform(&self, arc: &GeoArc, transform: &Transform) -> EntityType {
         // DXF arcs store `center` in OCS (arbitrary-axis algorithm with the
         // arc's normal). Convert everything to WCS, apply the INSERT transform
         // in WCS, then project back into the new arc's OCS so the renderer
@@ -488,7 +558,7 @@ impl Insert {
         let new_start_angle = ds_ocs.y.atan2(ds_ocs.x);
         let new_end_angle = de_ocs.y.atan2(de_ocs.x);
 
-        let mut new_arc = Arc::from_center_radius_angles(
+        let mut new_arc = GeoArc::from_center_radius_angles(
             new_center_ocs,
             new_radius,
             new_start_angle,
@@ -513,7 +583,7 @@ impl Insert {
     }
 
     /// Explode an arc with non-uniform XY scale — converts to an elliptical arc (Ellipse).
-    fn explode_arc_to_ellipse(&self, arc: &Arc, transform: &Transform) -> EntityType {
+    fn explode_arc_to_ellipse(&self, arc: &GeoArc, transform: &Transform) -> EntityType {
         // ARC stores `center` in OCS; ELLIPSE is a WCS entity. Convert on the
         // way in (identity for the common Z-up normal). The arc's angles are
         // measured against the OCS X axis, which becomes the ellipse's major
@@ -609,11 +679,59 @@ impl Insert {
     ///
     /// Nested INSERT entities (block references within the block) are
     /// recursively expanded so that all geometry is flattened into the
-    /// returned list.
+    /// returned list.  Circular references are detected and broken to
+    /// prevent infinite recursion.
     ///
     /// Returns an empty `Vec` when the block record is not found.
-    pub fn explode_from_document(&self, document: &crate::document::CadDocument) -> Vec<EntityType> {
-        let mut result = match document.block_records.get(&self.block_name) {
+    pub fn explode_from_document(&self, document: &crate::document::CadDocument) -> Vec<Arc<EntityType>> {
+        let mut visited = std::collections::HashSet::new();
+        let mut cache = std::collections::HashMap::new();
+        self.explode_from_document_inner(document, &mut visited, 0, &mut cache)
+    }
+
+    /// Cached variant of [`explode_from_document`](Self::explode_from_document).
+    ///
+    /// When processing many INSERT entities that share the same block
+    /// definitions (the common case), the `cache` avoids redundant
+    /// recursive expansions: each unique block is expanded once and
+    /// the result is cloned for subsequent references.
+    ///
+    /// **Usage**: create a single `HashMap` before the loop over INSERT
+    /// entities and pass it to every call.  The map accumulates
+    /// expansions across calls.
+    pub fn explode_from_document_cached(
+        &self,
+        document: &crate::document::CadDocument,
+        cache: &mut std::collections::HashMap<String, Vec<Arc<EntityType>>>,
+    ) -> Vec<Arc<EntityType>> {
+        let mut visited = std::collections::HashSet::new();
+        self.explode_from_document_inner(document, &mut visited, 0, cache)
+    }
+
+    /// Maximum nesting depth for recursive block expansion.
+    const MAX_EXPLODE_DEPTH: u32 = 64;
+
+    fn explode_from_document_inner(
+        &self,
+        document: &crate::document::CadDocument,
+        visited: &mut std::collections::HashSet<String>,
+        depth: u32,
+        cache: &mut std::collections::HashMap<String, Vec<Arc<EntityType>>>,
+    ) -> Vec<Arc<EntityType>> {
+        // Guard against circular references and excessive depth
+        if depth >= Self::MAX_EXPLODE_DEPTH || visited.contains(&self.block_name) {
+            return Vec::new();
+        }
+
+        // Fast path: return cached expansion (Arc clone, ~10ns per entity).
+        if let Some(cached) = cache.get(&self.block_name) {
+            return cached.clone();
+        }
+
+        visited.insert(self.block_name.clone());
+
+        // First-time expansion: explode() internals unchanged (owned EntityType).
+        let result_owned: Vec<EntityType> = match document.block_records.get(&self.block_name) {
             Some(br) => {
                 let entities: Vec<EntityType> = br
                     .entity_handles
@@ -625,47 +743,84 @@ impl Insert {
             None => Vec::new(),
         };
 
-        // Recursively expand any nested INSERT entities produced by the
-        // first-level explode.  The outer explode already applied this
-        // insert's transform and resolved ByBlock / layer-"0" properties,
-        // so nested inserts carry world-space geometry that still needs
-        // to be flattened.
-        Self::expand_nested_inserts(&mut result, document);
+        // Wrap in Arc (cheap: heap alloc + move, ~50ns per entity).
+        let mut result: Vec<Arc<EntityType>> = result_owned.into_iter().map(Arc::new).collect();
+
+        // Recursively expand any nested INSERT entities.
+        Self::expand_nested_inserts(&mut result, document, visited, depth + 1, cache);
+
+        visited.remove(&self.block_name);
+
+        // Store in cache (Arc clone, ~10ns per entity).
+        cache.insert(self.block_name.clone(), result.clone());
 
         result
     }
 
     /// Recursively expand INSERT entities found in `entities`.
     ///
-    /// Each INSERT is replaced by the geometry it references (recursively
-    /// expanded).  Property resolution (ByBlock color, layer "0") is
-    /// re-applied at every nesting level so the final entities carry
-    /// correct visual properties.
+    /// Uses a two-phase approach: first identify and expand all nested INSERTs,
+    /// then rebuild the Vec in a single pass.  This avoids the O(n²) cost of
+    /// repeated `Vec::remove` + `Vec::insert` operations.
+    ///
+    /// Property resolution uses `Arc::make_mut` for copy-on-write: entities
+    /// that don't need property changes share the same Arc allocation.
     fn expand_nested_inserts(
-        entities: &mut Vec<EntityType>,
+        entities: &mut Vec<Arc<EntityType>>,
         document: &crate::document::CadDocument,
+        visited: &mut std::collections::HashSet<String>,
+        depth: u32,
+        cache: &mut std::collections::HashMap<String, Vec<Arc<EntityType>>>,
     ) {
-        let mut i = 0;
-        while i < entities.len() {
-            if let EntityType::Insert(_) = &entities[i] {
-                let nested = entities.remove(i);
-                if let EntityType::Insert(nested_ins) = nested {
-                    let mut expanded = nested_ins.explode_from_document(document);
-                    // Re-resolve properties through this nesting level
-                    for sub in &mut expanded {
-                        nested_ins.resolve_properties(sub.common_mut());
-                    }
-                    // Insert the expanded entities at the current position
-                    for (j, e) in expanded.into_iter().enumerate() {
-                        entities.insert(i + j, e);
-                    }
-                    // Don't increment i — the newly inserted entities
-                    // at position i need to be checked for further nesting
+        if depth >= Self::MAX_EXPLODE_DEPTH {
+            return;
+        }
+
+        // Phase 1: Find all nested INSERTs and expand them.
+        let mut expansions: Vec<(usize, Vec<Arc<EntityType>>)> = Vec::new();
+        for (i, entity) in entities.iter().enumerate() {
+            if let EntityType::Insert(nested_ins) = entity.as_ref() {
+                if visited.contains(&nested_ins.block_name)
+                    || depth >= Self::MAX_EXPLODE_DEPTH
+                {
+                    continue;
                 }
-            } else {
-                i += 1;
+                let mut expanded = nested_ins.explode_from_document_inner(
+                    document, visited, depth, cache,
+                );
+                // Resolve properties via COW: only deep-copies the Arc
+                // when the refcount > 1 (i.e., shared with cache).
+                for sub in &mut expanded {
+                    nested_ins.resolve_properties(Arc::make_mut(sub).common_mut());
+                }
+                expansions.push((i, expanded));
             }
         }
+
+        if expansions.is_empty() {
+            return;
+        }
+
+        // Phase 2: Rebuild Vec in a single pass, replacing INSERTs
+        // with their expanded content.
+        let old = std::mem::take(entities);
+        let extra: usize = expansions.iter().map(|(_, e)| e.len()).sum();
+        let mut new_entities = Vec::with_capacity(old.len() + extra);
+        let mut exp_iter = expansions.into_iter().peekable();
+
+        for (i, entity) in old.into_iter().enumerate() {
+            match exp_iter.peek() {
+                Some(&(idx, _)) if idx == i => {
+                    let (_, expanded) = exp_iter.next().unwrap();
+                    new_entities.extend(expanded);
+                }
+                _ => {
+                    new_entities.push(entity);
+                }
+            }
+        }
+
+        *entities = new_entities;
     }
 }
 
@@ -947,7 +1102,7 @@ mod tests {
 
     #[test]
     fn explode_arc_identity() {
-        let arc = Arc::from_center_radius_angles(
+        let arc = GeoArc::from_center_radius_angles(
             Vector3::ZERO,
             5.0,
             0.0,
@@ -971,7 +1126,7 @@ mod tests {
 
     #[test]
     fn explode_arc_with_translation() {
-        let arc = Arc::from_center_radius_angles(
+        let arc = GeoArc::from_center_radius_angles(
             Vector3::ZERO,
             10.0,
             0.0,
@@ -992,7 +1147,7 @@ mod tests {
 
     #[test]
     fn explode_arc_with_uniform_scale() {
-        let arc = Arc::from_center_radius_angles(
+        let arc = GeoArc::from_center_radius_angles(
             Vector3::new(1.0, 1.0, 0.0),
             2.0,
             0.0,
@@ -1013,7 +1168,7 @@ mod tests {
 
     #[test]
     fn explode_arc_non_uniform_becomes_ellipse() {
-        let arc = Arc::from_center_radius_angles(
+        let arc = GeoArc::from_center_radius_angles(
             Vector3::ZERO,
             5.0,
             0.0,
@@ -1049,7 +1204,7 @@ mod tests {
                 Vector3::new(1.0, 0.0, 0.0),
             )),
             EntityType::Circle(Circle::from_center_radius(Vector3::ZERO, 1.0)),
-            EntityType::Arc(Arc::from_center_radius_angles(
+            EntityType::Arc(GeoArc::from_center_radius_angles(
                 Vector3::ZERO, 1.0, 0.0, PI,
             )),
         ];
@@ -1177,7 +1332,7 @@ mod tests {
 
     #[test]
     fn explode_arc_layer_zero_inherits() {
-        let mut arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, PI);
+        let mut arc = GeoArc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, PI);
         arc.common.layer = "0".to_string();
         let block_entities = vec![EntityType::Arc(arc)];
 
@@ -1219,7 +1374,7 @@ mod tests {
 
     #[test]
     fn explode_arc_preserves_layer() {
-        let mut arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, PI);
+        let mut arc = GeoArc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, PI);
         arc.common.layer = "ArcLayer".to_string();
         let block_entities = vec![EntityType::Arc(arc)];
 
@@ -1243,7 +1398,7 @@ mod tests {
     /// Reconstruct an arc's three sample points (start, midpoint, end) in WCS,
     /// using the renderer's OCS-axis convention. `arc.center` is interpreted as
     /// OCS coordinates (per DXF arbitrary-axis algorithm).
-    fn arc_sample_points(arc: &Arc) -> (Vector3, Vector3, Vector3) {
+    fn arc_sample_points(arc: &GeoArc) -> (Vector3, Vector3, Vector3) {
         let basis = Matrix3::arbitrary_axis(arc.normal);
         let center_wcs = basis * arc.center;
         let ccw_end = if arc.end_angle >= arc.start_angle {
@@ -1262,7 +1417,7 @@ mod tests {
     #[test]
     fn explode_arc_mirror_x_preserves_sweep_direction() {
         // Original arc traces Q1 from (r,0) through (~0.707r, ~0.707r) to (0,r).
-        let arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
+        let arc = GeoArc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
         let block_entities = vec![EntityType::Arc(arc)];
 
         // Mirror-X (x_scale = -1) should produce a CCW arc through Q2.
@@ -1285,7 +1440,7 @@ mod tests {
 
     #[test]
     fn explode_arc_mirror_y_preserves_sweep_direction() {
-        let arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
+        let arc = GeoArc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
         let block_entities = vec![EntityType::Arc(arc)];
 
         // Mirror-Y (y_scale = -1) → mirrored arc should trace Q4.
@@ -1307,7 +1462,7 @@ mod tests {
     fn explode_arc_double_mirror_is_rotation() {
         // x_scale = -1, y_scale = -1 has det = +1 (a 180° rotation), so the
         // normal must NOT be flipped and the arc should land in Q3.
-        let arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
+        let arc = GeoArc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
         let block_entities = vec![EntityType::Arc(arc)];
 
         let insert = Insert::new("B", Vector3::ZERO).with_scale(-1.0, -1.0, 1.0);
@@ -1333,7 +1488,7 @@ mod tests {
         // position correctly. Earlier the center was stored as WCS, which made
         // the renderer apply the new OCS basis a second time and flip the X
         // back — placing the arc at the mirror of where it should be.
-        let arc = Arc::from_center_radius_angles(
+        let arc = GeoArc::from_center_radius_angles(
             Vector3::new(5.0, 3.0, 0.0),
             1.0,
             0.0,
@@ -1365,7 +1520,7 @@ mod tests {
     fn explode_arc_mirror_x_with_translation_position_preserved() {
         // Same regression but with both mirror and INSERT translation —
         // catches any leftover confusion between WCS/OCS center.
-        let arc = Arc::from_center_radius_angles(
+        let arc = GeoArc::from_center_radius_angles(
             Vector3::new(2.0, 0.0, 0.0),
             1.0,
             0.0,
@@ -1395,7 +1550,7 @@ mod tests {
 
     #[test]
     fn explode_arc_mirror_flips_normal() {
-        let arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
+        let arc = GeoArc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
         let block_entities = vec![EntityType::Arc(arc)];
 
         let insert = Insert::new("B", Vector3::ZERO).with_scale(-1.0, 1.0, 1.0);
@@ -1435,7 +1590,7 @@ mod tests {
     #[test]
     fn explode_arc_mirror_x_nonuniform_to_ellipse() {
         // Non-uniform XY scale with mirror: arc → ellipse, sweep preserved.
-        let arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
+        let arc = GeoArc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, FRAC_PI_2);
         let block_entities = vec![EntityType::Arc(arc)];
 
         // Mirror-X plus stretch X by 2: total X factor = -2, Y factor = 1.
