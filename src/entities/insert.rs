@@ -686,15 +686,18 @@ impl Insert {
     pub fn explode_from_document(&self, document: &crate::document::CadDocument) -> Vec<Arc<EntityType>> {
         let mut visited = std::collections::HashSet::new();
         let mut cache = std::collections::HashMap::new();
-        self.explode_from_document_inner(document, &mut visited, 0, &mut cache)
+        let mut result = self.explode_from_document_inner(document, &mut visited, 0, &mut cache);
+        Self::expand_nested_inserts(&mut result, document, &mut visited, 1, &mut cache);
+        result
     }
 
     /// Cached variant of [`explode_from_document`](Self::explode_from_document).
     ///
     /// When processing many INSERT entities that share the same block
     /// definitions (the common case), the `cache` avoids redundant
-    /// recursive expansions: each unique block is expanded once and
-    /// the result is cloned for subsequent references.
+    /// block expansions: each unique block's direct entities are cached
+    /// and cloned for subsequent references.  Nested INSERTs are
+    /// expanded per-call to ensure correct transform application.
     ///
     /// **Usage**: create a single `HashMap` before the loop over INSERT
     /// entities and pass it to every call.  The map accumulates
@@ -705,12 +708,23 @@ impl Insert {
         cache: &mut std::collections::HashMap<String, Vec<Arc<EntityType>>>,
     ) -> Vec<Arc<EntityType>> {
         let mut visited = std::collections::HashSet::new();
-        self.explode_from_document_inner(document, &mut visited, 0, cache)
+        let mut result = self.explode_from_document_inner(document, &mut visited, 0, cache);
+        Self::expand_nested_inserts(&mut result, document, &mut visited, 1, cache);
+        result
     }
 
     /// Maximum nesting depth for recursive block expansion.
     const MAX_EXPLODE_DEPTH: u32 = 64;
 
+    /// Expand this INSERT's block definition into entities, using the
+    /// cache for the direct (single-level) expansion only.
+    ///
+    /// **Important**: the cache stores only the direct `explode()` result
+    /// (block entities with this INSERT's transform applied), NOT the
+    /// fully-expanded result including nested INSERTs.  This ensures
+    /// correctness when the same block is referenced by INSERTs with
+    /// different transforms — nested INSERTs must be expanded per-call
+    /// to apply their own unique transforms.
     fn explode_from_document_inner(
         &self,
         document: &crate::document::CadDocument,
@@ -723,14 +737,18 @@ impl Insert {
             return Vec::new();
         }
 
-        // Fast path: return cached expansion (Arc clone, ~10ns per entity).
+        // Fast path: return cached DIRECT expansion (Arc clone, ~10ns per entity).
+        // This cache only contains the single-level explode() result,
+        // NOT the fully-expanded result with nested INSERTs resolved.
         if let Some(cached) = cache.get(&self.block_name) {
             return cached.clone();
         }
 
         visited.insert(self.block_name.clone());
 
-        // First-time expansion: explode() internals unchanged (owned EntityType).
+        // Direct expansion: explode() applies this INSERT's transform
+        // to the block's entities.  This result is safe to cache because
+        // it only depends on the block definition and this INSERT's transform.
         let result_owned: Vec<EntityType> = match document.block_records.get(&self.block_name) {
             Some(br) => {
                 let entities: Vec<EntityType> = br
@@ -744,14 +762,13 @@ impl Insert {
         };
 
         // Wrap in Arc (cheap: heap alloc + move, ~50ns per entity).
-        let mut result: Vec<Arc<EntityType>> = result_owned.into_iter().map(Arc::new).collect();
-
-        // Recursively expand any nested INSERT entities.
-        Self::expand_nested_inserts(&mut result, document, visited, depth + 1, cache);
+        let result: Vec<Arc<EntityType>> = result_owned.into_iter().map(Arc::new).collect();
 
         visited.remove(&self.block_name);
 
-        // Store in cache (Arc clone, ~10ns per entity).
+        // Cache the DIRECT expansion only.  Nested INSERT expansion is
+        // done by the caller (expand_nested_inserts) because it depends
+        // on the specific INSERT's transform context.
         cache.insert(self.block_name.clone(), result.clone());
 
         result
@@ -787,6 +804,12 @@ impl Insert {
                 }
                 let mut expanded = nested_ins.explode_from_document_inner(
                     document, visited, depth, cache,
+                );
+                // Recursively expand any nested INSERTs within the expansion.
+                // This is necessary because explode_from_document_inner only
+                // returns the direct (single-level) expansion.
+                Self::expand_nested_inserts(
+                    &mut expanded, document, visited, depth + 1, cache,
                 );
                 // Resolve properties via COW: only deep-copies the Arc
                 // when the refcount > 1 (i.e., shared with cache).
