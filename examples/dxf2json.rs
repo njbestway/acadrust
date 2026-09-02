@@ -82,7 +82,7 @@ fn main() -> acadrust::Result<()> {
     //
     // Insert 的 attributes（ATTRIB）携带实际属性值和 WCS 坐标，
     // 也需要按图层归集。
-    let mut exploded_by_layer: std::collections::HashMap<String, Vec<EntityType>> =
+    let mut exploded_by_layer: std::collections::HashMap<String, Vec<std::sync::Arc<EntityType>>> =
         std::collections::HashMap::new();
 
     for entity in doc.entities() {
@@ -102,7 +102,7 @@ fn main() -> acadrust::Result<()> {
                 exploded_by_layer
                     .entry(layer)
                     .or_default()
-                    .push(EntityType::AttributeEntity(attrib.clone()));
+                    .push(std::sync::Arc::new(EntityType::AttributeEntity(attrib.clone())));
             }
         }
     }
@@ -175,7 +175,7 @@ fn main() -> acadrust::Result<()> {
 fn collect_layer_features(
     doc: &CadDocument,
     layer_name: &str,
-    exploded_by_layer: &std::collections::HashMap<String, Vec<EntityType>>,
+    exploded_by_layer: &std::collections::HashMap<String, Vec<std::sync::Arc<EntityType>>>,
 ) -> Vec<Value> {
     // 定位基准线：走 Text-Line 关联逻辑
     if layer_name == "定位基准线" {
