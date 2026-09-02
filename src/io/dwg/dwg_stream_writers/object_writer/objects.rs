@@ -187,7 +187,7 @@ fn transcode_xrecord_xdata(
             .0
             .into_owned();
             p += len;
-            s
+            crate::io::dxf::code_page::decode_mif_escapes(&s)
         };
         if tgt_unicode {
             let utf16: Vec<u16> = text
@@ -199,8 +199,8 @@ fn transcode_xrecord_xdata(
                 out.extend_from_slice(&u.to_le_bytes());
             }
         } else {
-            let encoded = target_encoding.encode(&text).0;
-            let bytes = &encoded.as_ref()[..encoded.len().min(u16::MAX as usize)];
+            let encoded = crate::io::dxf::code_page::encode_legacy_string(&text, target_encoding);
+            let bytes = &encoded[..encoded.len().min(u16::MAX as usize)];
             out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
             out.push(target_code_page);
             out.extend_from_slice(&bytes);
@@ -230,8 +230,9 @@ fn encode_xrecord_entries(
                         output.extend_from_slice(&unit.to_le_bytes());
                     }
                 } else {
-                    let encoded = encoding.encode(value).0;
-                    let bytes = encoded.as_ref();
+                    let encoded =
+                        crate::io::dxf::code_page::encode_legacy_string(value, encoding);
+                    let bytes: &[u8] = encoded.as_ref();
                     output.extend_from_slice(
                         &(bytes.len().min(u16::MAX as usize) as u16).to_le_bytes(),
                     );
@@ -344,11 +345,37 @@ impl<'a> DwgObjectWriter<'a> {
             }
             ObjectType::DynamicBlock(value) => self.write_dynamic_block(value),
             ObjectType::Associative(value) => self.write_associative_object(value),
-            ObjectType::ClassObject(value) => self.write_class_object(value),
+            ObjectType::ClassObject(value) => {
+                if let ClassObjectData::CsacDocumentOptions(data) = &value.data {
+                    if let Some(raw) = &data.raw_dwg_data {
+                        if self.raw_passthrough_compatible(data.raw_dwg_version) {
+                            self.register_raw_object(
+                                value.handle,
+                                raw,
+                                data.raw_dwg_handle_bits,
+                            );
+                            return;
+                        }
+                    }
+                }
+                self.write_class_object(value)
+            }
             ObjectType::DataObject(value) => self.write_data_object(value),
             ObjectType::Field(value) => self.write_field_object(value),
             ObjectType::FieldList(value) => self.write_field_list(value),
             ObjectType::RegisteredClass(value) => {
+                if value.properties.is_empty() {
+                    if let Some(raw) = &value.raw_dwg_data {
+                        if self.raw_passthrough_compatible(value.raw_dwg_version) {
+                            self.register_raw_object(
+                                value.handle,
+                                raw,
+                                value.raw_dwg_handle_bits,
+                            );
+                            return;
+                        }
+                    }
+                }
                 self.write_registered_class_object(value)
             }
             ObjectType::DgnLineStyle(value) => {
@@ -1264,24 +1291,28 @@ impl<'a> DwgObjectWriter<'a> {
         }
     }
 
-    /// Returns `true` when the object at `handle` will actually be
-    /// serialized by `write_object`. Entries pointing to un-writable
-    /// objects must be excluded from dictionary records so the DWG doesn't contain
-    /// dangling handle references.
+    /// Returns `true` when the record at `handle` will be serialized.
     pub(super) fn is_writable_object(&self, handle: &Handle) -> bool {
         match self.document.objects.get(handle) {
-            None => false,
+            None => match self.document.get_entity(*handle) {
+                Some(crate::entities::EntityType::Unknown(entity)) => entity
+                    .raw_dwg_data
+                    .as_ref()
+                    .is_some_and(|_| {
+                        self.raw_passthrough_compatible(entity.dwg_source_version)
+                    }),
+                Some(_) => true,
+                None => false,
+            },
             Some(obj) => match obj {
                 ObjectType::VisualStyle(_) => {
                     (self.version.r2007_plus()
-                        || (self.version.r13_14_only()
-                            && self.document.dwg_source_version == Some(self.dxf_version)))
+                        || self.document.dwg_source_version == Some(self.dxf_version))
                         && self.document.classes.get_by_name("VISUALSTYLE").is_some()
                 }
                 ObjectType::Material(_) => {
                     (self.version.r2007_plus()
-                        || (self.version.r13_14_only()
-                            && self.document.dwg_source_version == Some(self.dxf_version)))
+                        || self.document.dwg_source_version == Some(self.dxf_version))
                         && self.document.classes.get_by_name("MATERIAL").is_some()
                 }
                 ObjectType::TableStyle(_) => {

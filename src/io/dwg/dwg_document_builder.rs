@@ -20,6 +20,18 @@ use crate::io::dwg::dwg_stream_readers::object_reader::common::*;
 use crate::io::dwg::dwg_stream_readers::object_reader::entities;
 use crate::io::dwg::dwg_stream_readers::object_reader::objects;
 use crate::io::dwg::dwg_stream_readers::object_reader::tables;
+
+/// Recognize AutoCAD's hidden per-viewport layer-override records.
+///
+/// These records use `<base layer> @ <decimal viewport handle>` names but
+/// resolve as the base layer in AutoCAD's public layer table.
+fn viewport_override_base_layer(name: &str) -> Option<&str> {
+    let (base, viewport) = name.rsplit_once(" @ ")?;
+    (!base.is_empty()
+        && !viewport.is_empty()
+        && viewport.bytes().all(|byte| byte.is_ascii_digit()))
+    .then_some(base)
+}
 use crate::io::dwg::dwg_stream_readers::object_reader::{DwgObjectReader, EntityCommonData};
 use crate::io::dwg::parallel::{
     filter_map_slice, for_each_mut, map_chunks, map_mut, worker_count,
@@ -637,11 +649,14 @@ impl DwgDocumentBuilder {
                 let table_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match type_code {
                         OBJ_LAYER => {
-                            let data = tables::read_layer(
+                            let mut data = tables::read_layer(
                                 &mut reader,
                                 self.obj_reader.version(),
                                 self.obj_reader.dxf_version(),
                             );
+                            if let Some(base) = viewport_override_base_layer(&data.name) {
+                                data.name = base.to_owned();
+                            }
                             Some(ParsedEntry::Layer(obj_handle, data))
                         }
                         OBJ_BLOCK_HEADER => {
@@ -898,6 +913,8 @@ impl DwgDocumentBuilder {
                     layer.is_plottable = data.plottable;
                     layer.line_weight = LineWeight::from_value(data.line_weight);
                     layer.color = data.color;
+                    layer.color_name.clone_from(&data.color_name);
+                    layer.book_name.clone_from(&data.book_name);
                     if let Some(app_handle) = layer_transparency_app_handle {
                         if let Some(bytes) = document
                             .eed_by_handle
@@ -1735,6 +1752,38 @@ impl DwgDocumentBuilder {
                     if let Some(style_name) = style_name {
                         if let EntityType::MLine(mline) = std::sync::Arc::make_mut(entity) {
                             mline.style_name = style_name;
+                        }
+                    }
+                }
+            }
+        }
+
+        // TOLERANCE stores its dimension style as a handle in DWG, while the
+        // public entity model also exposes the resolved name used by property
+        // editors and DXF output. Table entries and entities are decoded in
+        // separate passes, so restore the name only after the DIMSTYLE table is
+        // complete. Keep the handle authoritative and leave unresolved values
+        // untouched for lossless round-tripping.
+        {
+            let style_names: HashMap<Handle, String> = document
+                .dim_styles
+                .iter()
+                .map(|style| (style.handle, style.name.clone()))
+                .collect();
+            if !style_names.is_empty() {
+                for entity in &mut document.entities {
+                    let style_name = match entity.as_ref() {
+                        EntityType::Tolerance(tolerance) => tolerance
+                            .dimension_style_handle
+                            .and_then(|handle| style_names.get(&handle))
+                            .cloned(),
+                        _ => None,
+                    };
+                    if let Some(style_name) = style_name {
+                        if let EntityType::Tolerance(tolerance) =
+                            std::sync::Arc::make_mut(entity)
+                        {
+                            tolerance.dimension_style_name = style_name;
                         }
                     }
                 }
@@ -2584,6 +2633,13 @@ impl DwgDocumentBuilder {
             }
         }
 
+        document.header.current_layer_name = document
+            .layers
+            .iter()
+            .find(|layer| layer.handle == document.header.current_layer_handle)
+            .map(|layer| layer.name.clone())
+            .unwrap_or_default();
+
         // ── Post-pass: guarantee the mandatory *Model_Space / *Paper_Space ──
         // block records exist and enumerate their geometry.
         //
@@ -2671,6 +2727,8 @@ impl DwgDocumentBuilder {
                 Self::rebuild_block_membership(document, None, None);
             }
         }
+
+        document.resolve_book_colors();
 
         // The current model-space annotation scale (CANNOSCALE) is not carried
         // in the DWG header stream, only in the AcDbVariableDictionary. Reflect
@@ -3337,6 +3395,7 @@ impl DwgDocumentBuilder {
                     e.direction = data.direction;
                     e.normal = data.normal;
                     e.dimension_style_handle = Some(Handle::from(data.dimstyle_handle));
+                    e.dimension_style_name.clear();
                     e.dwg_unknown_short = data.unknown_short;
                     e.text_height = data.text_height;
                     e.dimension_gap = data.dimgap;
@@ -3679,6 +3738,7 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular2Ln(dim)));
                 }
                 OBJ_DIMENSION_ANG_3PT => {
@@ -3694,6 +3754,7 @@ impl DwgDocumentBuilder {
                     dim.second_point = data.second_point;
                     dim.angle_vertex = data.angle_vertex;
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Angular3Pt(dim)));
                 }
                 OBJ_DIMENSION_ORDINATE => {
@@ -3710,6 +3771,8 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
+                    dim.refresh_measurement();
                     let _ = document.add_entity(EntityType::Dimension(Dimension::Ordinate(dim)));
                 }
                 OBJ_ARC_DIMENSION => {
@@ -3722,6 +3785,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     dim.first_extension_point = data.first_extension_point;
                     dim.second_extension_point = data.second_extension_point;
                     dim.center_point = data.center_point;
@@ -3743,6 +3807,7 @@ impl DwgDocumentBuilder {
                     dim.base.common = entity_common;
                     map_dimension_common(&mut dim.base, &data.common, &maps);
                     dim.definition_point = data.definition_point;
+                    dim.base.definition_point = data.definition_point;
                     dim.chord_point = data.chord_point;
                     dim.jog_angle = data.jog_angle;
                     dim.override_center = data.override_center;
@@ -4187,6 +4252,11 @@ impl DwgDocumentBuilder {
                     e.brightness = data.brightness;
                     e.contrast = data.contrast;
                     e.fade = data.fade;
+                    e.clip_mode = if data.clip_inverted {
+                        crate::entities::WipeoutClipMode::Inside
+                    } else {
+                        crate::entities::WipeoutClipMode::Outside
+                    };
                     e.clip_type = if data.clip_type == 1 {
                         crate::entities::WipeoutClipType::Rectangular
                     } else {
@@ -4441,9 +4511,14 @@ impl DwgDocumentBuilder {
                         .unwrap_or("");
                     match cpp_class {
                         "CAcLayoutPrintConfig" => {
-                            let data = entities::read_layout_print_config(
+                            let mut data = entities::read_layout_print_config(
                                 &mut reader,
                             );
+                            if let ExtendedEntityData::LayoutPrintConfig(value) = &mut data {
+                                value.raw_dwg_data = Some(reader.raw_merged_data());
+                                value.raw_dwg_handle_bits = reader.get_handle_bits();
+                                value.raw_dwg_version = Some(document.version);
+                            }
                             let _ = document.add_entity(EntityType::Extended(
                                 ExtendedEntity {
                                     common: entity_common,
@@ -5357,6 +5432,9 @@ impl DwgDocumentBuilder {
                                 properties: envelope.properties,
                                 payload: envelope.payload,
                                 object_ids,
+                                raw_dwg_data: None,
+                                raw_dwg_handle_bits: 0,
+                                raw_dwg_version: None,
                             },
                         )
                     } else {
@@ -5937,6 +6015,9 @@ impl DwgDocumentBuilder {
                                         properties: Vec::new(),
                                         payload,
                                         object_ids,
+                                        raw_dwg_data: Some(reader.raw_merged_data()),
+                                        raw_dwg_handle_bits: reader.get_handle_bits(),
+                                        raw_dwg_version: Some(document.version),
                                     },
                                 ),
                             );
@@ -7102,4 +7183,25 @@ fn map_entity_common(
     // right modeler entity in object-stream order.
     common.has_ds_data = data.has_ds_data;
     common
+}
+
+#[cfg(test)]
+mod sdb_regression_tests {
+    use super::viewport_override_base_layer;
+
+    #[test]
+    fn recognizes_only_viewport_override_shadow_layer_names() {
+        assert_eq!(
+            viewport_override_base_layer("A-ANNO-TXT @ 8"),
+            Some("A-ANNO-TXT")
+        );
+        assert_eq!(
+            viewport_override_base_layer("A-ANNO-NOTE @ 48"),
+            Some("A-ANNO-NOTE")
+        );
+        assert_eq!(viewport_override_base_layer("user@domain"), None);
+        assert_eq!(viewport_override_base_layer("Layer @ viewport"), None);
+        assert_eq!(viewport_override_base_layer(" @ 8"), None);
+        assert_eq!(viewport_override_base_layer("Layer @ "), None);
+    }
 }

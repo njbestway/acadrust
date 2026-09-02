@@ -35,6 +35,43 @@ fn sanitize_symbol_name(name: &str) -> String {
         .collect()
 }
 
+/// Whether a 2D heavy polyline can be down-saved as LWPOLYLINE.
+///
+/// LWPOLYLINE cannot represent 3D polylines, polygon/polyface meshes or
+/// curve-/spline-fitted polylines (fit data and vertex flags have no
+/// light equivalent), so those keep the legacy POLYLINE/VERTEX/SEQEND
+/// form. Plain 2D polylines only carry the CLOSED (1) and PLINEGEN (128)
+/// flags, which LWPOLYLINE maps 1:1.
+pub(crate) fn polyline2d_downsaves_to_lwpolyline(polyline: &Polyline2D) -> bool {
+    (polyline.flags.bits() & !0x81) == 0
+        && polyline.smooth_surface == SmoothSurfaceType::None
+        && polyline.vertices.iter().all(|v| v.flags.bits() == 0)
+}
+
+/// Associative-framework object classes that CAD applications cannot
+/// restore from the raw records this writer produces (the dependency
+/// payloads need data the DWG reader does not capture). Writing them makes
+/// applications flag the file for recovery while skipping the objects
+/// anyway, which also leaves dangling dictionary entries behind. Dropping
+/// them keeps round-tripped files clean (issue #51 BricsCAD audit).
+fn is_unrestorable_assoc_object(type_name: &str) -> bool {
+    // Normalize: the DWG class names carry underscores (e.g.
+    // ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION) while the DXF records do not.
+    let normalized: String = type_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "ACDBASSOCDEPENDENCY"
+            | "ACDBASSOCVALUEDEPENDENCY"
+            | "ACDBASSOCGEOMDEPENDENCY"
+            | "ACDBASSOCVARIABLE"
+            | "ACDBASSOC2DCONSTRAINTGROUP"
+    ) || normalized.starts_with("ACDBDYNAMICBLOCKPURGEPREVENTER")
+}
+
 /// Writes all DXF sections
 pub struct SectionWriter<'a, W: DxfStreamWriter> {
     writer: &'a mut W,
@@ -98,12 +135,28 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // have no DXF representation (Unknown with no raw_dxf_codes):
         // write_unknown_object skips those, so any reference to them would
         // dangle and must be filtered out, or strict CAD readers reject the
-        // file on audit.
+        // file on audit. Unknown associative-framework objects are excluded
+        // as well: applications cannot restore them from the records this
+        // writer produces and audit-skip them, which would leave dangling
+        // dictionary entries behind (issue #51 BricsCAD audit).
         for (h, obj) in document.objects.iter() {
-            if let ObjectType::Unknown { raw_dxf_codes, .. } = obj {
-                if raw_dxf_codes.is_none() {
-                    continue;
+            match obj {
+                ObjectType::Unknown { raw_dxf_codes, type_name, .. } => {
+                    if raw_dxf_codes.is_none() || is_unrestorable_assoc_object(type_name) {
+                        continue;
+                    }
                 }
+                ObjectType::Associative(assoc) => {
+                    if is_unrestorable_assoc_object(&assoc.dxf_name) {
+                        continue;
+                    }
+                }
+                ObjectType::DynamicBlock(dynamic) => {
+                    if is_unrestorable_assoc_object(&dynamic.dxf_name) {
+                        continue;
+                    }
+                }
+                _ => {}
             }
             set.insert(*h);
         }
@@ -237,14 +290,57 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$ATTMODE", |w| w.write_i16(70, hdr.attribute_visibility))?;
         self.write_header_variable("$TEXTSIZE", |w| w.write_double(40, hdr.text_height))?;
         self.write_header_variable("$TRACEWID", |w| w.write_double(40, hdr.trace_width))?;
+        self.write_header_variable("$SKETCHINC", |w| w.write_double(40, hdr.sketch_increment))?;
+        self.write_header_variable("$SKPOLY", |w| w.write_i16(70, hdr.sketch_type.clamp(0, 2)))?;
+        let sketch_tolerance = if hdr.sketch_tolerance.is_finite() {
+            hdr.sketch_tolerance.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        self.write_header_variable("$SKTOLERANCE", |w| w.write_double(40, sketch_tolerance))?;
         self.write_header_variable("$TEXTSTYLE", |w| w.write_string(7, &hdr.current_text_style_name))?;
         self.write_header_variable("$CMLSTYLE", |w| w.write_string(2, &hdr.multiline_style))?;
-        self.write_header_variable("$CTABLESTYLE", |w| w.write_string(2, &hdr.current_table_style_name))?;
-        self.write_header_variable("$CMLEADERSTYLE", |w| w.write_string(2, &hdr.current_mleader_style_name))?;
+        // $CTABLESTYLE / $CMLEADERSTYLE are only written when they differ
+        // from the "Standard" default: BricsCAD (V20) does not write them
+        // itself and its audit reports them as unknown system variables,
+        // flagging the file for recovery (issue #51). $CANNOSCALE is always
+        // skipped for the same reason.
+        if !hdr.current_table_style_name.is_empty()
+            && !hdr.current_table_style_name.eq_ignore_ascii_case("Standard")
+        {
+            self.write_header_variable("$CTABLESTYLE", |w| {
+                w.write_string(2, &hdr.current_table_style_name)
+            })?;
+        }
+        if !hdr.current_mleader_style_name.is_empty()
+            && !hdr.current_mleader_style_name.eq_ignore_ascii_case("Standard")
+        {
+            self.write_header_variable("$CMLEADERSTYLE", |w| {
+                w.write_string(2, &hdr.current_mleader_style_name)
+            })?;
+        }
         self.write_header_variable("$CLAYER", |w| w.write_string(8, &hdr.current_layer_name))?;
         self.write_header_variable("$CELTYPE", |w| w.write_string(6, &hdr.current_linetype_name))?;
         self.write_header_variable("$CECOLOR", |w| w.write_i16(62, hdr.current_entity_color.approximate_index()))?;
-        self.write_header_variable("$CELWEIGHT", |w| w.write_i16(370, hdr.current_line_weight))?;
+        // CELWEIGHT must be a valid lineweight (-3..-1 presets or one of the
+        // fixed hundredths-of-mm values); values outside the DXF table (e.g.
+        // a raw DWG lineweight index such as 29) are rejected by CAD
+        // applications on load (issue #51 BricsCAD audit) — fall back to
+        // BYLAYER.
+        const VALID_LINEWEIGHTS: [i16; 54] = [
+            0, 5, 9, 13, 14, 15, 16, 18, 20, 23, 25, 30, 35, 40, 45, 50, 53, 55, 60, 65, 70, 75,
+            78, 80, 85, 90, 95, 100, 103, 105, 109, 112, 118, 120, 125, 130, 135, 140, 145, 150,
+            155, 158, 160, 165, 170, 175, 180, 185, 190, 195, 200, 205, 209, 211,
+        ];
+        let celweight = {
+            let v = hdr.current_line_weight;
+            if (-3..=-1).contains(&v) || VALID_LINEWEIGHTS.contains(&v) {
+                v
+            } else {
+                -1
+            }
+        };
+        self.write_header_variable("$CELWEIGHT", |w| w.write_i16(370, celweight))?;
         self.write_header_variable("$CELTSCALE", |w| w.write_double(40, hdr.current_entity_linetype_scale))?;
         self.write_header_variable("$DISPSILH", |w| w.write_i16(70, if hdr.display_silhouette { 1 } else { 0 }))?;
         self.write_header_variable("$LWDISPLAY", |w| w.write_bool(290, hdr.lineweight_display))?;
@@ -324,6 +420,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // === Misc ===
         self.write_header_variable("$SPLFRAME", |w| w.write_i16(70, if hdr.spline_frame { 1 } else { 0 }))?;
+        self.write_header_variable("$SOLIDHIST", |w| w.write_i16(70, if hdr.record_solid_history { 1 } else { 0 }))?;
+        self.write_header_variable("$SHOWHIST", |w| w.write_i16(70, hdr.show_solid_history.clamp(0, 2)))?;
         self.write_header_variable("$SPLINETYPE", |w| w.write_i16(70, hdr.spline_type))?;
         self.write_header_variable("$SPLINESEGS", |w| w.write_i16(70, hdr.spline_segments))?;
         self.write_header_variable("$SURFTAB1", |w| w.write_i16(70, hdr.surface_tab1))?;
@@ -339,9 +437,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$PLIMCHECK", |w| w.write_i16(70, if hdr.paper_space_limit_check { 1 } else { 0 }))?;
         self.write_header_variable("$VISRETAIN", |w| w.write_i16(70, if hdr.retain_xref_visibility { 1 } else { 0 }))?;
 
-        // === Current annotation scale (R2008+) ===
-        self.write_header_variable("$CANNOSCALE", |w| w.write_string(1, &hdr.current_annotation_scale))?;
-        self.write_header_variable("$CANNOSCALEVALUE", |w| w.write_double(40, hdr.annotation_scale_value))?;
+        // === Plot style mode ===
+        // $PSTYLEMODE is a boolean (code 290) telling the reader whether
+        // plot-style references resolve against a named (1) or
+        // color-dependent (0) table. Writing it with the wrong code - or
+        // omitting it - makes the reader default to color-dependent mode,
+        // where the layers' PlotStyleName Ids fail validation on audit
+        // (issue #51 BricsCAD audit).
+        self.write_header_variable("$PSTYLEMODE", |w| w.write_bool(290, hdr.plotstyle_mode))?;
 
         // === Time ===
         self.write_header_variable("$TDCREATE", |w| w.write_double(40, hdr.create_date_julian))?;
@@ -711,6 +814,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if let Some(tc) = layer.color.to_true_color_value() {
             self.writer.write_i32(420, tc)?;
         }
+        if self.dxf_version >= DxfVersion::AC1018 {
+            if let Some(name) = crate::io::dxf::join_color_book_name(
+                layer.book_name.as_deref(),
+                layer.color_name.as_deref(),
+            ) {
+                self.writer.write_string(430, &name)?;
+            }
+        }
 
         // Linetype name
         self.writer.write_string(6, &layer.line_type)?;
@@ -719,6 +830,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i16(370, layer.line_weight.value())?;
 
         // R2000+ layer records require a hard pointer to a plot-style object.
+        // NOTE (issue #51): BricsCAD's audit only accepts the reference when
+        // the NOD's ACAD_PLOTSTYLENAME entry is a soft pointer (350) and the
+        // plot style dictionary matches its export form; see
+        // is_canonical_hard_owner_key.
         if self.dxf_version >= DxfVersion::AC1015 {
             let plotstyle_handle = if layer.plotstyle_handle.is_null() {
                 self.normal_plotstyle_handle
@@ -959,7 +1074,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let table_handle = document.app_ids.handle();
         self.write_table_header("APPID", document.app_ids.len(), table_handle, document)?;
 
+        // The ACAD RegApp record must be the table's first entry: CAD
+        // applications map XDATA applications by table index and require
+        // ACAD at index 0 (issue #51 BricsCAD audit: "RegApp ACAD has
+        // invalid index 1").
+        let mut wrote_acad = false;
         for appid in document.app_ids.iter() {
+            if appid.name().eq_ignore_ascii_case("ACAD") {
+                self.write_appid_entry(appid, table_handle, document)?;
+                wrote_acad = true;
+                break;
+            }
+        }
+        for appid in document.app_ids.iter() {
+            if wrote_acad && appid.name().eq_ignore_ascii_case("ACAD") {
+                continue;
+            }
             self.write_appid_entry(appid, table_handle, document)?;
         }
 
@@ -2191,9 +2321,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(90, value.operation_major)?;
                 self.writer.write_i32(91, value.operation_minor)?;
                 self.writer.write_double(40, value.height)?;
-                self.writer.write_double(41, value.major_radius)?;
-                self.writer.write_double(42, value.minor_radius)?;
-                self.writer.write_double(43, value.x_radius)?;
+                self.writer.write_double(41, value.base_x_radius)?;
+                self.writer.write_double(42, value.base_y_radius)?;
+                self.writer.write_double(43, value.top_radius)?;
             }
             SolidHistoryOperation::Pyramid(value) => {
                 self.write_solid_history_base_dxf(&value.base)?;
@@ -2371,9 +2501,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         self.writer.write_string(0, &object.dxf_name)?;
         self.writer.write_handle(5, object.handle)?;
+        // Reactors referencing objects dropped from the output (e.g.
+        // unrestorable associative-framework dependencies) must be filtered,
+        // otherwise the record dangles and the file is flagged for recovery.
         if !object.reactors.is_empty() {
             self.writer.write_string(102, "{ACAD_REACTORS")?;
             for reactor in &object.reactors {
+                if !self.valid_handles.is_empty() && !self.valid_handles.contains(reactor) {
+                    continue;
+                }
                 self.writer.write_handle(330, *reactor)?;
             }
             self.writer.write_string(102, "}")?;
@@ -3008,8 +3144,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_i16(60, 1)?;
         }
 
-        // Transparency (code 440) — only for AC1018+ and non-opaque
-        if self.dxf_version >= DxfVersion::AC1018 && !common.transparency.is_opaque() {
+        // Transparency (code 440) — ByLayer is the implicit default.
+        if self.dxf_version >= DxfVersion::AC1018 && !common.transparency.is_by_layer() {
             self.writer.write_i32(440, common.transparency.to_dxf_value())?;
         }
 
@@ -3195,6 +3331,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     /// Write POLYLINE entity (2D polyline)
     fn write_polyline2d(&mut self, polyline: &Polyline2D, owner: Handle) -> Result<()> {
+        // Down-save plain 2D polylines to LWPOLYLINE for R2000+ output.
+        // Writing every heavy polyline back as POLYLINE/VERTEX/SEQEND is a
+        // large structural divergence from the source drawing, and some CAD
+        // applications flag the resurrected VERTEX owner wiring on save.
+        if self.dxf_version >= DxfVersion::AC1015
+            && polyline2d_downsaves_to_lwpolyline(polyline)
+        {
+            return self.write_polyline2d_as_lwpolyline(polyline, owner);
+        }
         self.writer.write_entity_type("POLYLINE")?;
         self.write_common_entity_data(&polyline.common, owner)?;
         self.writer.write_subclass("AcDb2dPolyline")?;
@@ -3260,6 +3405,64 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbEntity")?;
         self.writer.write_string(8, &polyline.common.layer)?;
 
+        Ok(())
+    }
+
+    /// Down-save a plain 2D heavy polyline as LWPOLYLINE (R2000+ output).
+    ///
+    /// Per-vertex widths are baked in: a VERTEX without codes 40/41 inherits
+    /// the POLYLINE default width, and LWPOLYLINE has no default-width slot —
+    /// the same baking the DXF reader applies when it reads a heavy polyline.
+    fn write_polyline2d_as_lwpolyline(
+        &mut self,
+        polyline: &Polyline2D,
+        owner: Handle,
+    ) -> Result<()> {
+        self.writer.write_entity_type("LWPOLYLINE")?;
+        self.write_common_entity_data(&polyline.common, owner)?;
+        self.writer.write_subclass("AcDbPolyline")?;
+        self.writer.write_i32(90, polyline.vertices.len() as i32)?;
+
+        let mut flags: i16 = 0;
+        if polyline.flags.is_closed() {
+            flags |= 1;
+        }
+        if polyline.flags.bits() & 128 != 0 {
+            flags |= 128;
+        }
+        self.writer.write_i16(70, flags)?;
+
+        self.writer.write_double(38, polyline.elevation)?;
+        if polyline.thickness != 0.0 {
+            self.writer.write_double(39, polyline.thickness)?;
+        }
+
+        for vertex in &polyline.vertices {
+            self.writer.write_double(10, vertex.location.x)?;
+            self.writer.write_double(20, vertex.location.y)?;
+            let start_width = if vertex.start_width != 0.0 {
+                vertex.start_width
+            } else {
+                polyline.start_width
+            };
+            let end_width = if vertex.end_width != 0.0 {
+                vertex.end_width
+            } else {
+                polyline.end_width
+            };
+            self.writer.write_double(40, start_width)?;
+            self.writer.write_double(41, end_width)?;
+            self.writer.write_double(42, vertex.bulge)?;
+            if vertex.id != 0 {
+                self.writer.write_i32(91, vertex.id)?;
+            }
+        }
+
+        self.write_normal(polyline.normal)?;
+
+        // XDATA precedes the child records in the legacy form; LWPOLYLINE has
+        // no child records, so it goes at the end of the entity's own codes.
+        self.write_xdata(&polyline.common.extended_data)?;
         Ok(())
     }
 
@@ -3409,6 +3612,43 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(441, mtext.background_transparency)?;
             }
         }
+        // Standard DXF MTEXT column layout. Rotation is emitted above before
+        // the first column marker because code 50 is reused for column heights.
+        if mtext.column_data.column_type != 0 {
+            self.writer
+                .write_i16(75, mtext.column_data.column_type)?;
+            let manual_heights = mtext.column_data.column_type == 2
+                && !mtext.column_data.auto_height;
+            let column_count = if manual_heights {
+                mtext.column_data.heights.len().min(i16::MAX as usize) as i16
+            } else {
+                mtext
+                    .column_data
+                    .column_count
+                    .clamp(0, i16::MAX as i32) as i16
+            };
+            self.writer.write_i16(76, column_count)?;
+            self.writer.write_i16(
+                78,
+                i16::from(mtext.column_data.flow_reversed),
+            )?;
+            self.writer.write_i16(
+                79,
+                i16::from(mtext.column_data.auto_height),
+            )?;
+            self.writer.write_double(48, mtext.column_data.width)?;
+            self.writer.write_double(49, mtext.column_data.gutter)?;
+            if manual_heights {
+                for height in mtext
+                    .column_data
+                    .heights
+                    .iter()
+                    .take(column_count as usize)
+                {
+                    self.writer.write_double(50, *height)?;
+                }
+            }
+        }
         self.write_normal(mtext.normal)?;
         Ok(())
     }
@@ -3525,7 +3765,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
     }
 
-    fn write_dimension_base(&mut self, base: &DimensionBase, type_flags: i16, owner: Handle) -> Result<()> {
+    fn write_dimension_base(
+        &mut self,
+        base: &DimensionBase,
+        definition_point: Vector3,
+        type_flags: i16,
+        owner: Handle,
+    ) -> Result<()> {
         self.writer.write_handle(5, base.common.handle)?;
         self.writer.write_handle(330, owner)?;
 
@@ -3573,13 +3819,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
         }
         // Transparency (code 440) — only for AC1018+ and non-opaque
-        if self.dxf_version >= DxfVersion::AC1018 && !base.common.transparency.is_opaque() {
+        if self.dxf_version >= DxfVersion::AC1018 && !base.common.transparency.is_by_layer() {
             self.writer.write_i32(440, base.common.transparency.to_dxf_value())?;
         }
 
         self.writer.write_subclass("AcDbDimension")?;
         self.writer.write_string(2, &base.block_name)?;
-        self.writer.write_point3d(10, base.definition_point)?;
+        self.writer.write_point3d(10, definition_point)?;
         self.writer.write_point3d(11, base.text_middle_point)?;
         // Bit 0x80 marks text positioned at a user-defined location.
         let type_flags = if base.text_user_positioned {
@@ -3588,14 +3834,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             type_flags
         };
         self.writer.write_i16(70, type_flags)?;
+        self.writer.write_double(42, base.actual_measurement)?;
         // DXF angles are in degrees; internal representation is radians.
         self.writer.write_double(53, base.text_rotation.to_degrees())?;
+        if base.horizontal_direction.abs() > 1e-12 {
+            self.writer
+                .write_double(51, base.horizontal_direction.to_degrees())?;
+        }
+        self.writer
+            .write_i16(71, base.attachment_point as i16)?;
+        self.writer.write_i16(72, base.line_spacing_style)?;
         self.writer.write_string(3, &base.style_name)?;
-        if !base.text.is_empty() {
-            self.writer.write_string(1, &base.text)?;
+        if let Some(text) = base.text_override() {
+            self.writer.write_string(1, text)?;
         }
         if (base.line_spacing_factor - 1.0).abs() > 1e-10 {
-            self.writer.write_double(44, base.line_spacing_factor)?;
+            self.writer.write_double(41, base.line_spacing_factor)?;
         }
         // Normal vector (extrusion direction) — only write if not default (0,0,1)
         let n = base.normal;
@@ -3609,7 +3863,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_aligned(&mut self, dim: &DimensionAligned, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 1, owner)?; // Aligned = 1
+        self.write_dimension_base(&dim.base, dim.definition_point, 1, owner)?; // Aligned = 1
         self.writer.write_subclass("AcDbAlignedDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3622,7 +3876,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_linear(&mut self, dim: &DimensionLinear, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 0, owner)?; // Linear = 0
+        self.write_dimension_base(&dim.base, dim.definition_point, 0, owner)?; // Linear = 0
         self.writer.write_subclass("AcDbAlignedDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3638,16 +3892,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_radius(&mut self, dim: &DimensionRadius, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 4, owner)?; // Radius = 4
+        // Group 10 is the centre; group 15 is the chord point.
+        self.write_dimension_base(&dim.base, dim.angle_vertex, 4, owner)?; // Radius = 4
         self.writer.write_subclass("AcDbRadialDimension")?;
-        self.writer.write_point3d(15, dim.angle_vertex)?;
+        self.writer.write_point3d(15, dim.definition_point)?;
         self.writer.write_double(40, dim.leader_length)?;
         Ok(())
     }
 
     fn write_dimension_diameter(&mut self, dim: &DimensionDiameter, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 3, owner)?; // Diameter = 3
+        self.write_dimension_base(&dim.base, dim.definition_point, 3, owner)?; // Diameter = 3
         self.writer.write_subclass("AcDbDiametricDimension")?;
         self.writer.write_point3d(15, dim.angle_vertex)?;
         self.writer.write_double(40, dim.leader_length)?;
@@ -3656,18 +3911,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_angular_2line(&mut self, dim: &DimensionAngular2Ln, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 2, owner)?; // Angular = 2
+        self.write_dimension_base(&dim.base, dim.definition_point, 2, owner)?; // Angular = 2
         self.writer.write_subclass("AcDb2LineAngularDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
         self.writer.write_point3d(15, dim.angle_vertex)?;
-        self.writer.write_point3d(16, dim.definition_point)?;
+        self.writer.write_point3d(16, dim.dimension_arc)?;
         Ok(())
     }
 
     fn write_dimension_angular_3point(&mut self, dim: &DimensionAngular3Pt, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("DIMENSION")?;
-        self.write_dimension_base(&dim.base, 5, owner)?; // 3-point angular = 5
+        self.write_dimension_base(&dim.base, dim.definition_point, 5, owner)?; // 3-point angular = 5
         self.writer.write_subclass("AcDb3PointAngularDimension")?;
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
@@ -3680,7 +3935,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Bit 0x40 marks the X datum; clear = Y. (0x80 is reserved for the
         // text-user-positioned flag and must not be reused here.)
         let type_flags = if dim.is_ordinate_type_x { 0x40 } else { 0 };
-        self.write_dimension_base(&dim.base, 6 | type_flags, owner)?;
+        let mut base = dim.base.clone();
+        base.actual_measurement = dim.measurement();
+        self.write_dimension_base(&base, dim.definition_point, 6 | type_flags, owner)?;
         self.writer.write_subclass("AcDbOrdinateDimension")?;
         self.writer.write_point3d(13, dim.feature_location)?;
         self.writer.write_point3d(14, dim.leader_endpoint)?;
@@ -3689,7 +3946,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn write_dimension_arc(&mut self, dim: &DimensionArc, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("ARC_DIMENSION")?;
-        self.write_dimension_base(&dim.base, 8, owner)?;
+        self.write_dimension_base(&dim.base, dim.definition_point, 8, owner)?;
         self.writer.write_subclass("AcDbArcDimension")?;
         self.writer.write_point3d(13, dim.first_extension_point)?;
         self.writer.write_point3d(14, dim.second_extension_point)?;
@@ -3709,7 +3966,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         owner: Handle,
     ) -> Result<()> {
         self.writer.write_entity_type("LARGE_RADIAL_DIMENSION")?;
-        self.write_dimension_base(&dim.base, 4, owner)?;
+        self.write_dimension_base(&dim.base, dim.definition_point, 4, owner)?;
         self.writer.write_subclass("AcDbRadialDimensionLarge")?;
         self.writer.write_point3d(13, dim.jog_point)?;
         self.writer.write_point3d(14, dim.override_center)?;
@@ -4676,9 +4933,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     self.write_block_visibility_parameter(obj)?
                 }
                 ObjectType::DynamicBlock(obj) => {
+                    // The purge preventer is unrestorable (see
+                    // is_unrestorable_assoc_object) and gets audit-skipped.
+                    if is_unrestorable_assoc_object(&obj.dxf_name) {
+                        continue;
+                    }
                     self.write_dynamic_block_object_dxf(obj)?
                 }
                 ObjectType::Associative(obj) => {
+                    // Unrestorable associative-framework objects are not
+                    // written (see is_unrestorable_assoc_object); they were
+                    // already excluded from valid_handles.
+                    if is_unrestorable_assoc_object(&obj.dxf_name) {
+                        continue;
+                    }
                     self.write_associative_object_dxf(obj)?
                 }
                 ObjectType::ClassObject(obj) => self.write_class_object_dxf(obj)?,
@@ -4695,6 +4963,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     self.write_proxy_object_dxf(obj)?
                 }
                 ObjectType::Unknown { type_name, handle, owner, raw_dxf_codes, .. } => {
+                    // Unrestorable associative-framework objects are not
+                    // written (see is_unrestorable_assoc_object); they were
+                    // already excluded from valid_handles.
+                    if is_unrestorable_assoc_object(type_name) {
+                        continue;
+                    }
                     self.write_unknown_object(type_name, *handle, *owner, raw_dxf_codes.as_deref())?;
                 }
             }
@@ -6181,11 +6455,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_string(3, key)?;
             // These dictionary keys are hard-owner entries by definition even
             // when the dictionary-wide hard-owner flag is clear. AutoCAD,
-            // ODA and LibreDWG all emit code 360 for them.
-            let forced_hard_owner = dict.is_entry_hard_owner(key) || matches!(
-                key.to_ascii_uppercase().as_str(),
-                "ACAD_SORTENTS" | "ACAD_FILTER" | "SPATIAL"
-            );
+            // ODA and LibreDWG all emit code 360 for them. ACAD_LAYOUT and
+            // ACAD_PLOTSTYLENAME own their sub-dictionaries; ACAD_FIELD owns
+            // the drawing's FIELDLIST. Writing them as soft pointers (350)
+            // makes CAD applications treat the targets as erasable orphans
+            // and reject the file on save.
+            let forced_hard_owner = dict.is_entry_hard_owner(key)
+                || Dictionary::is_canonical_hard_owner_key(key);
             self.writer.write_handle(
                 if dict.hard_owner || forced_hard_owner {
                     360
@@ -7602,6 +7878,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbMaterial")?;
         self.writer.write_string(1, &obj.name)?;
+        // Built-in materials (ByLayer / ByBlock / Global) are written in the
+        // minimal form BricsCAD itself exports; their full default field set
+        // is rejected by BricsCAD's audit (issue #51).
+        if matches!(
+            obj.name.to_ascii_uppercase().as_str(),
+            "BYLAYER" | "BYBLOCK" | "GLOBAL"
+        ) {
+            self.writer
+                .write_i16(72, obj.diffuse_map.source as i16)?;
+            self.writer.write_i32(94, obj.channel_flags)?;
+            return Ok(());
+        }
         if !obj.description.is_empty() {
             self.writer.write_string(2, &obj.description)?;
         }
@@ -7714,7 +8002,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         auto_transform_code: i32,
         matrix_code: i32,
     ) -> Result<()> {
+        // Field order follows the DXF specification: blend factor, file
+        // name, source, projection, tiling, auto-transform, matrix. The
+        // file name is only written when set - BricsCAD's audit rejects
+        // materials with an empty map file name (issue #51).
         self.writer.write_double(blend_code, value.blend_factor)?;
+        if !value.file_name.is_empty() {
+            self.writer.write_string(file_code, &value.file_name)?;
+        }
+        self.writer.write_i16(source_code, value.source as i16)?;
         self.writer.write_i16(projection_code, value.projection as i16)?;
         self.writer.write_i16(tiling_code, value.tiling as i16)?;
         self.writer
@@ -7722,10 +8018,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         for item in value.transform {
             self.writer.write_double(matrix_code, item)?;
         }
-        self.writer.write_i16(source_code, value.source as i16)?;
-        if value.source == 1 {
-            self.writer.write_string(file_code, &value.file_name)?;
-        } else if value.source == 2 {
+        if value.source == 2 {
             if let Some(texture) = &value.texture {
                 self.write_material_dxf_texture(texture)?;
             } else {
@@ -8136,11 +8429,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(5, obj.handle)?;
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbColor")?;
-        if !obj.color_name.is_empty() {
-            self.writer.write_string(1, &obj.color_name)?;
+        self.writer.write_i16(62, obj.color.approximate_index())?;
+        if let Some(true_color) = obj.color.to_true_color_value() {
+            self.writer.write_i32(420, true_color)?;
         }
-        if !obj.book_name.is_empty() {
-            self.writer.write_string(2, &obj.book_name)?;
+        if let Some(name) = crate::io::dxf::join_color_book_name(
+            Some(&obj.book_name),
+            Some(&obj.color_name),
+        ) {
+            self.writer.write_string(430, &name)?;
         }
         Ok(())
     }
@@ -8151,6 +8448,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(5, obj.handle)?;
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbDictionary")?;
+        // BricsCAD's own DXF export does not write the hard-owner flag (280)
+        // for ACDBDICTIONARYWDFLT records; emitting it makes BricsCAD's
+        // audit reject the plot style references (issue #51).
         self.writer.write_i16(281, obj.duplicate_cloning)?;
         for (key, handle) in &obj.entries {
             if !objects.contains_key(handle) {
@@ -8255,6 +8555,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_stub_handle_only(&mut self, type_name: &str, handle: Handle, owner: Handle) -> Result<()> {
         self.writer.write_string(0, type_name)?;
         self.writer.write_handle(5, handle)?;
+        // Match BricsCAD's own export: the placeholder carries a reactor
+        // group pointing at its owner and no AcDbPlaceHolder subclass
+        // marker (issue #51 BricsCAD audit).
+        self.writer.write_string(102, "{ACAD_REACTORS")?;
+        self.writer.write_handle(330, owner)?;
+        self.writer.write_string(102, "}")?;
         self.writer.write_handle(330, owner)?;
         Ok(())
     }
@@ -10463,7 +10769,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_wipeout(&mut self, wipeout: &Wipeout, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("WIPEOUT")?;
         self.write_common_entity_data(&wipeout.common, owner)?;
-        self.writer.write_subclass("AcDbWipeout")?;
+        self.writer.write_subclass("AcDbRasterImage")?;
 
         // Class version
         self.writer.write_i32(90, wipeout.class_version)?;
@@ -10487,6 +10793,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(13, wipeout.size.x)?;
         self.writer.write_double(23, wipeout.size.y)?;
 
+        if let Some(handle) = wipeout.definition_handle {
+            self.writer.write_handle(340, handle)?;
+        }
+
         // Display flags
         self.writer.write_i16(70, wipeout.flags.bits())?;
 
@@ -10495,6 +10805,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_byte(281, wipeout.brightness)?;
         self.writer.write_byte(282, wipeout.contrast)?;
         self.writer.write_byte(283, wipeout.fade)?;
+
+        if let Some(handle) = wipeout.definition_reactor_handle {
+            self.writer.write_handle(360, handle)?;
+        }
+
+        if self.dxf_version >= DxfVersion::AC1024 {
+            self.writer.write_bool(
+                290,
+                wipeout.clip_mode == crate::entities::WipeoutClipMode::Inside,
+            )?;
+        }
 
         // Clip boundary type
         self.writer.write_i16(71, wipeout.clip_type as i16)?;
@@ -10923,9 +11244,5 @@ fn get_invisible_edge_bits(flags: &InvisibleEdgeFlags) -> u8 {
 
 /// Helper to extract boundary path flag bits
 fn get_boundary_path_bits(flags: &BoundaryPathFlags) -> u32 {
-    let mut bits = 0u32;
-    if flags.is_external() { bits |= 1; }
-    if flags.is_polyline() { bits |= 2; }
-    if flags.is_derived() { bits |= 4; }
-    bits
+    flags.bits()
 }
