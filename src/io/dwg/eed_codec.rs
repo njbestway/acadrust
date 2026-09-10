@@ -35,18 +35,8 @@ use crate::xdata::XDataValue;
 /// layer name to its table handle for [`XDataValue::LayerName`] items (returns
 /// `0` when the layer is unknown).
 #[cfg(test)]
-fn encode_values(
-    wide: bool,
-    values: &[XDataValue],
-    layer_handle: impl Fn(&str) -> u64,
-) -> Vec<u8> {
-    encode_values_with_encoding(
-        wide,
-        values,
-        encoding_rs::WINDOWS_1252,
-        30,
-        layer_handle,
-    )
+fn encode_values(wide: bool, values: &[XDataValue], layer_handle: impl Fn(&str) -> u64) -> Vec<u8> {
+    encode_values_with_encoding(wide, values, encoding_rs::WINDOWS_1252, 30, layer_handle)
 }
 
 pub(crate) fn encode_values_with_encoding(
@@ -66,10 +56,9 @@ pub(crate) fn encode_values_with_encoding(
                 b.extend_from_slice(&u.to_le_bytes());
             }
         } else {
-            let encoded =
-                crate::io::dxf::code_page::encode_legacy_string(s, encoding);
+            let encoded = crate::io::dxf::code_page::encode_legacy_string(s, encoding);
             b.push(encoded.len() as u8);
-            b.extend_from_slice(&code_page.to_le_bytes());
+            b.extend_from_slice(&code_page.to_be_bytes());
             b.extend_from_slice(&encoded);
         }
     };
@@ -169,7 +158,12 @@ pub(crate) fn decode_values(
                 } else {
                     let n = *bytes.get(i)? as usize;
                     i += 1;
-                    let code_page = read_u16(bytes, i)?;
+                    let raw = [*bytes.get(i)?, *bytes.get(i + 1)?];
+                    let mut code_page = u16::from_be_bytes(raw);
+                    // Accept the byte-swapped form emitted by older releases.
+                    if code_page > 44 && u16::from_le_bytes(raw) <= 44 {
+                        code_page = u16::from_le_bytes(raw);
+                    }
                     i += 2;
                     let slice = bytes.get(i..i + n)?;
                     i += n;
@@ -264,6 +258,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_eed_string_code_page_uses_native_big_endian_order() {
+        let data = encode_values_with_encoding(
+            false,
+            &[XDataValue::String("MVIEW".into())],
+            encoding_rs::WINDOWS_1254,
+            33,
+            |_| 0,
+        );
+        assert_eq!(&data[..4], &[0, 5, 0, 33]);
+        let mut old = data.clone();
+        old[2..4].copy_from_slice(&[33, 0]);
+        assert_eq!(
+            decode_values(&data, false, |_| None),
+            decode_values(&old, false, |_| None)
+        );
+    }
+
+    #[test]
     fn eed_handle_is_big_endian() {
         // The DWG stream stores EED handles as 8-byte big-endian values:
         // entity 0x6DA's EED in the civil sample reads
@@ -285,7 +297,10 @@ mod tests {
             30,
             |_| 0,
         );
-        assert_eq!(&encoded[1..9], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xDA]);
+        assert_eq!(
+            &encoded[1..9],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xDA]
+        );
         let back = decode_values(&encoded, false, |_| None).unwrap();
         match &back[0] {
             XDataValue::Handle(h) => assert_eq!(h.value(), 0x6DA),
@@ -331,10 +346,8 @@ mod tests {
     fn layer_name_resolves_through_handle() {
         let values = vec![XDataValue::LayerName("WALLS".to_string())];
         let bytes = encode_values(true, &values, |n| if n == "WALLS" { 7 } else { 0 });
-        let decoded = decode_values(&bytes, true, |h| {
-            (h == 7).then(|| "WALLS".to_string())
-        })
-        .expect("decode");
+        let decoded =
+            decode_values(&bytes, true, |h| (h == 7).then(|| "WALLS".to_string())).expect("decode");
         assert_eq!(decoded, values);
     }
 

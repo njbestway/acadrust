@@ -626,7 +626,7 @@ impl MTextParser {
         //   represented explicitly as Some(MTextColor::None) so that the
         //   consumer can distinguish "\C256;" from "no \C code at all".
         if let Some(c1) = self.parse_numeric_semicolon_value() {
-            if c1 != 0 && c1 != 256 && c1 <= 256 {
+            if (0..=256).contains(&c1) {
                 self.current_props_mut().color = Some(MTextColor::from_index(c1));
             } else if c1 == 0 || c1 == 256 {
                 // Explicitly mark "reset to ByLayer" so the downstream color
@@ -636,7 +636,7 @@ impl MTextParser {
 
             // Read color2 (ending color for gradient)
             if let Some(c2) = self.parse_numeric_semicolon_value() {
-                if c2 != 0 && c2 != 256 && c2 <= 256 {
+                if (0..=256).contains(&c2) {
                     self.current_props_mut().second_color = Some(MTextColor::from_index(c2));
                 }
             }
@@ -658,7 +658,11 @@ impl MTextParser {
         }
     }
 
-    /// Parse font with pipe flags: \f{name}|b0/b1|i0/i1|...;
+    /// Parse font with pipe flags: \f{name}|b0/b1|i0/i1|c<n>|p<n>|...;
+    ///
+    /// Flags the model knows (`b`, `i`, `c` = charset, `p` = pitch) map onto
+    /// typed fields; everything else is preserved verbatim in
+    /// [`MTextFont::extra`] so a later serialize restores the exact spec.
     fn parse_font_pipe(&mut self) {
         let spec = self.parse_semicolon_value();
         let parts: Vec<&str> = spec.split([',', '|']).collect();
@@ -669,26 +673,61 @@ impl MTextParser {
         }
 
         let mut bold = false;
+        let mut bold_explicit = false;
         let mut italic = false;
+        let mut italic_explicit = false;
+        let mut charset = None;
+        let mut pitch = None;
+        let mut extra = Vec::new();
 
         for part in parts.iter().skip(1) {
             let part = part.trim();
-            if part == "b1" {
-                bold = true;
-            } else if part == "i1" {
-                // Only single char 'i' + digit is italic
-                if part.len() == 2
-                    && part
-                        .as_bytes()
-                        .get(1)
-                        .map_or(false, |&b| b.is_ascii_digit())
-                {
+            match part {
+                "b0" => {
+                    bold = false;
+                    bold_explicit = true;
+                }
+                "b1" => {
+                    bold = true;
+                    bold_explicit = true;
+                }
+                "i0" => {
+                    italic = false;
+                    italic_explicit = true;
+                }
+                "i1" => {
                     italic = true;
+                    italic_explicit = true;
+                }
+                "" => {}
+                other => {
+                    let parsed = match (other.strip_prefix('c'), other.strip_prefix('p')) {
+                        (Some(value), _) => value.trim().parse::<u16>().ok().map(|v| {
+                            charset = Some(v);
+                        }),
+                        (_, Some(value)) => value.trim().parse::<u8>().ok().map(|v| {
+                            pitch = Some(v);
+                        }),
+                        _ => None,
+                    };
+                    if parsed.is_none() {
+                        extra.push(other.to_string());
+                    }
                 }
             }
         }
 
-        self.current_props_mut().font = Some(MTextFont::with_flags(name, bold, italic));
+        self.current_props_mut().font = Some(MTextFont {
+            name: name.to_string(),
+            bold,
+            italic,
+            bold_explicit,
+            italic_explicit,
+            charset,
+            pitch,
+            extra,
+            ..Default::default()
+        });
     }
 
     /// Parse font by SHX name: \FN{name}.shx;

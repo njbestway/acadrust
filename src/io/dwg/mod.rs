@@ -52,11 +52,12 @@ pub mod eed_codec;
 pub(crate) mod embedded_entity;
 pub mod file_headers;
 mod parallel;
+mod legacy_viewport;
 pub mod preview;
 pub mod reed_solomon;
 
-pub use dwg_reader::DwgReader;
 pub use dwg_reader::DwgReadOptions;
+pub use dwg_reader::DwgReader;
 pub use dwg_reference_type::DwgReferenceType;
 pub use dwg_version::DwgVersion;
 pub use dwg_writer::DwgWriter;

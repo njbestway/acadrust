@@ -4,7 +4,7 @@
 //! Each class maps a DXF entity/object name to its C++ class name and
 //! application that registered it.
 //!
-//! Corresponds to ACadSharp's `DxfClass` and `DxfClassCollection`.
+//! Corresponds to the classic `DxfClass` and `DxfClassCollection`.
 
 use std::collections::HashMap;
 
@@ -129,7 +129,7 @@ impl DxfClass {
 
 /// Collection of DXF class definitions, keyed by DXF name (case-insensitive).
 ///
-/// Corresponds to ACadSharp's `DxfClassCollection`.
+/// Corresponds to the classic `DxfClassCollection`.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DxfClassCollection {
@@ -147,7 +147,7 @@ impl DxfClassCollection {
     }
 
     /// Add a class. If a class with the same DXF name already exists,
-    /// only its instance count is updated (matching ACadSharp behavior).
+    /// only its instance count is updated (matching the reference behavior).
     pub fn add_or_update(&mut self, mut class: DxfClass) {
         let key = class.dxf_name.to_uppercase();
         if let Some(&idx) = self.name_index.get(&key) {
@@ -211,9 +211,66 @@ impl DxfClassCollection {
         self.name_index.clear();
     }
 
+    /// Retain the class table understood by pre-R2013 DWG writers.
+    ///
+    /// Modern proxy classes use layouts that the AC15 CLASSES stream cannot
+    /// encode. Their presence makes BricsCAD reject the complete drawing,
+    /// including otherwise valid primitive entities.
+    pub fn retain_legacy_dwg_classes(&mut self) {
+        const LEGACY: &[&str] = &[
+            "ACDBDICTIONARYWDFLT",
+            "DICTIONARYVAR",
+            "LAYOUT",
+            "ACDBPLACEHOLDER",
+            "PLOTSETTINGS",
+            "SCALE",
+            "MESH",
+            "ACAD_TABLE",
+            "WIPEOUT",
+            "IMAGE",
+            "PDFREFERENCE",
+            "DWFREFERENCE",
+            "DGNREFERENCE",
+            "MULTILEADER",
+            "OLE2FRAME",
+            "MLINE",
+            "TABLESTYLE",
+            "MATERIAL",
+            "VISUALSTYLE",
+            "MLEADERSTYLE",
+            "CELLSTYLEMAP",
+            "XRECORD",
+            "SORTENTSTABLE",
+            "WIPEOUTVARIABLES",
+            "DIMASSOC",
+            "TABLECONTENT",
+            "TABLEGEOMETRY",
+            "RASTERVARIABLES",
+            "IMAGEDEF",
+            "IMAGEDEF_REACTOR",
+            "DBCOLOR",
+            "GEODATA",
+            "PDFDEFINITION",
+            "DWFDEFINITION",
+            "DGNDEFINITION",
+            "SPATIAL_FILTER",
+            "GROUP",
+            "MLINESTYLE",
+        ];
+
+        self.entries
+            .retain(|class| LEGACY.contains(&class.dxf_name.to_ascii_uppercase().as_str()));
+        self.name_index.clear();
+        for (index, class) in self.entries.iter_mut().enumerate() {
+            class.class_number = 500 + index as i16;
+            self.name_index
+                .insert(class.dxf_name.to_ascii_uppercase(), index);
+        }
+    }
+
     /// Populate with default class definitions that AutoCAD expects.
     ///
-    /// This mirrors ACadSharp's `DxfClassCollection.UpdateDxfClasses()`.
+    /// This mirrors the reference `DxfClassCollection.UpdateDxfClasses()`.
     pub fn update_defaults(&mut self) {
         let defaults = default_classes();
         for class in defaults {
@@ -264,6 +321,7 @@ fn default_classes() -> Vec<DxfClass> {
         ("DWFUNDERLAY", "AcDbDwfReference", 1, "ObjectDBX Classes", true),
         ("DGNUNDERLAY", "AcDbDgnReference", 1, "ObjectDBX Classes", true),
         ("HELIX", "AcDbHelix", 0, "ObjectDBX Classes", true),
+        ("LIGHT", "AcDbLight", 1153, "SCENEOE", true),
         ("MULTILEADER", "AcDbMLeader", 1025, "ACDB_MLEADER_CLASS", true),
         ("OLE2FRAME", "AcDbOle2Frame", 1, "ObjectDBX Classes", true),
         ("MLINE", "AcDbMline", 1, "ObjectDBX Classes", true),
@@ -420,6 +478,9 @@ fn default_classes() -> Vec<DxfClass> {
             true,
         ),
 
+        // Native loft sheets must retain their subtype in DWG class streams.
+        ("LOFTEDSURFACE", "AcDbLoftedSurface", 0, "ObjectDBX Classes", true),
+
         // ── Object classes ──────────────────────────────────────────
         ("ACDBASSOCDEPENDENCY", "AcDbAssocDependency", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCVALUEDEPENDENCY", "AcDbAssocValueDependency", 0, "ObjectDBX Classes", false),
@@ -429,10 +490,11 @@ fn default_classes() -> Vec<DxfClass> {
         ("ACDBASSOC2DCONSTRAINTGROUP", "AcDbAssoc2dConstraintGroup", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCVARIABLE", "AcDbAssocVariable", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPERSSUBENTMANAGER", "AcDbAssocPersSubentManager", 0, "ObjectDBX Classes", false),
-        ("ACDBASSOCACTIONPARAM", "AcDbAssocActionParam", 0, "ObjectDBX Classes", false),
+        // Abstract action-parameter bases have no persistent instances.
+        // Registering them in a fresh file makes AutoCAD reject the entire
+        // database, even at zero instances. Imported tables are preserved.
         ("ACDBASSOCCOMPOUNDACTIONPARAM", "AcDbAssocCompoundActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCOSNAPPOINTREFACTIONPARAM", "AcDbAssocOsnapPointRefActionParam", 0, "ObjectDBX Classes", false),
-        ("ACDBASSOCPOINTREFACTIONPARAM", "AcDbAssocPointRefActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCOBJECTACTIONPARAM", "AcDbAssocObjectActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPATHACTIONPARAM", "AcDbAssocPathActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCEDGEACTIONPARAM", "AcDbAssocEdgeActionParam", 0, "ObjectDBX Classes", false),
@@ -651,19 +713,21 @@ fn default_classes() -> Vec<DxfClass> {
         ("MLINESTYLE", "AcDbMlineStyle", 0, "ObjectDBX Classes", false),
     ];
 
-    defs.iter().map(|&(dxf, cpp, flags, app, is_entity)| {
-        if is_entity {
-            let mut c = DxfClass::new_entity(dxf, cpp);
-            c.proxy_flags = ProxyFlags(flags);
-            c.application_name = app.to_string();
-            c
-        } else {
-            let mut c = DxfClass::new(dxf, cpp);
-            c.proxy_flags = ProxyFlags(flags);
-            c.application_name = app.to_string();
-            c
-        }
-    }).collect()
+    defs.iter()
+        .map(|&(dxf, cpp, flags, app, is_entity)| {
+            if is_entity {
+                let mut c = DxfClass::new_entity(dxf, cpp);
+                c.proxy_flags = ProxyFlags(flags);
+                c.application_name = app.to_string();
+                c
+            } else {
+                let mut c = DxfClass::new(dxf, cpp);
+                c.proxy_flags = ProxyFlags(flags);
+                c.application_name = app.to_string();
+                c
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -713,6 +777,18 @@ mod tests {
         assert!(coll.contains("MESH"));
         assert!(coll.contains("LAYOUT"));
         assert!(coll.contains("MLEADERSTYLE"));
+        assert!(!coll.contains("ACDBASSOCACTIONPARAM"));
+        assert!(!coll.contains("ACDBASSOCPOINTREFACTIONPARAM"));
+        assert!(coll.contains("ACDBASSOCCOMPOUNDACTIONPARAM"));
+        assert!(coll.contains("ACDBASSOCOSNAPPOINTREFACTIONPARAM"));
+    }
+
+    #[test]
+    fn imported_abstract_class_declarations_are_not_discarded() {
+        let mut coll = DxfClassCollection::new();
+        coll.push_preserving(DxfClass::new("ACDBASSOCACTIONPARAM", "AcDbAssocActionParam"));
+        coll.update_defaults();
+        assert!(coll.contains("ACDBASSOCACTIONPARAM"));
     }
 
     #[test]

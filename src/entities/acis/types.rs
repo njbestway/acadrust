@@ -32,15 +32,31 @@ pub struct SatVersion {
 impl SatVersion {
     /// Creates a new SAT version.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// ACIS 4.0 — legacy format.
-    pub const V4_0: Self = Self { major: 4, minor: 0, patch: 0 };
+    pub const V4_0: Self = Self {
+        major: 4,
+        minor: 0,
+        patch: 0,
+    };
     /// ACIS 7.0 — introduced explicit indices and asmheader.
-    pub const V7_0: Self = Self { major: 7, minor: 0, patch: 0 };
+    pub const V7_0: Self = Self {
+        major: 7,
+        minor: 0,
+        patch: 0,
+    };
     /// ACIS 21.0 — modern format.
-    pub const V21_0: Self = Self { major: 21, minor: 0, patch: 0 };
+    pub const V21_0: Self = Self {
+        major: 21,
+        minor: 0,
+        patch: 0,
+    };
 
     /// Returns the SAT version number used in the header line (e.g. 700).
     pub fn sat_version_number(&self) -> u32 {
@@ -103,6 +119,9 @@ pub struct SatHeader {
     pub num_bodies: usize,
     /// Whether history data is present.
     pub has_history: bool,
+    /// Original header flags. Newer modelers use more than the history bit.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_history_flags: Option<u32>,
     /// Product identifier string.
     pub product_id: String,
     /// Product version string.
@@ -118,6 +137,12 @@ pub struct SatHeader {
 }
 
 impl SatHeader {
+    pub(crate) fn history_flags(&self) -> u32 {
+        self.raw_history_flags
+            .filter(|flags| (*flags != 0) == self.has_history)
+            .unwrap_or(u32::from(self.has_history))
+    }
+
     /// Creates a default header for ACIS 7.0.
     pub fn new() -> Self {
         Self {
@@ -125,6 +150,7 @@ impl SatHeader {
             num_records: 0,
             num_bodies: 0,
             has_history: false,
+            raw_history_flags: None,
             product_id: "acadrust".to_string(),
             product_version: "ACIS 7.0".to_string(),
             date: "Thu Jan 01 00:00:00 2023".to_string(),
@@ -206,7 +232,7 @@ impl fmt::Display for SatPointer {
 /// Tokens can be entity-type identifiers, pointers, numbers, strings,
 /// or enum values.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 pub enum SatToken {
     /// An identifier/keyword (entity type, sense, etc.).
     Ident(String),
@@ -239,15 +265,94 @@ pub enum SatToken {
     },
 }
 
+/// Serde representation for [`SatToken`].
+///
+/// SAB tags retain their raw bytes in memory so a SAB writer can reproduce
+/// them exactly. JSON consumers, however, historically saw the corresponding
+/// semantic SAT token. Unsupported or malformed tags remain raw `Sab` values.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize)]
+enum SatTokenJson<'a> {
+    Ident(&'a str),
+    Pointer(SatPointer),
+    Integer(i64),
+    Float(f64),
+    String(&'a str),
+    Position(f64, f64, f64),
+    True,
+    False,
+    Terminator,
+    Enum(&'a str),
+    Sab { tag: u8, data: &'a [u8] },
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for SatToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let token = match self {
+            Self::Ident(value) => SatTokenJson::Ident(value),
+            Self::Pointer(value) => SatTokenJson::Pointer(*value),
+            Self::Integer(value) => SatTokenJson::Integer(*value),
+            Self::Float(value) => SatTokenJson::Float(*value),
+            Self::String(value) => SatTokenJson::String(value),
+            Self::Position(x, y, z) => SatTokenJson::Position(*x, *y, *z),
+            Self::True => SatTokenJson::True,
+            Self::False => SatTokenJson::False,
+            Self::Terminator => SatTokenJson::Terminator,
+            Self::Enum(value) => SatTokenJson::Enum(value),
+            Self::Sab { tag, data } => self.semantic_json_token(*tag, data),
+        };
+        serde::Serialize::serialize(&token, serializer)
+    }
+}
+
 impl SatToken {
+    #[cfg(feature = "serde")]
+    fn semantic_json_token<'a>(&'a self, tag: u8, data: &'a [u8]) -> SatTokenJson<'a> {
+        let raw = || SatTokenJson::Sab { tag, data };
+
+        match tag {
+            0x02 | 0x03 | 0x04 | 0x15 | 0x17 => self
+                .as_integer()
+                .map(SatTokenJson::Integer)
+                .unwrap_or_else(raw),
+            0x05 | 0x06 => self.as_float().map(SatTokenJson::Float).unwrap_or_else(raw),
+            0x07 | 0x08 | 0x09 | 0x12 => sab_string_bytes_exact(tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(SatTokenJson::String)
+                .unwrap_or_else(raw),
+            0x0A if data.is_empty() => SatTokenJson::False,
+            0x0B if data.is_empty() => SatTokenJson::True,
+            0x0C if data.len() == 4 => SatTokenJson::Pointer(SatPointer::new(i32::from_le_bytes(
+                data.try_into().expect("checked pointer length"),
+            ))),
+            0x0D | 0x0E => sab_string_bytes_exact(tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(SatTokenJson::Ident)
+                .unwrap_or_else(raw),
+            0x0F if data.is_empty() => SatTokenJson::Ident("{"),
+            0x10 if data.is_empty() => SatTokenJson::Ident("}"),
+            0x11 if data.is_empty() => SatTokenJson::Terminator,
+            0x13 | 0x14 => match self.coordinate_components() {
+                Some(([x, y, z], 3)) => SatTokenJson::Position(x, y, z),
+                _ => raw(),
+            },
+            _ => raw(),
+        }
+    }
+
     /// Returns the token as a string if it is an identifier.
     pub fn as_ident(&self) -> Option<&str> {
         match self {
             SatToken::Ident(s) | SatToken::Enum(s) => Some(s),
             SatToken::Sab { tag: 0x0F, .. } => Some("{"),
             SatToken::Sab { tag: 0x10, .. } => Some("}"),
-            SatToken::Sab { tag, data } => sab_string_bytes(*tag, data)
-                .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+            SatToken::Sab { tag, data } => {
+                sab_string_bytes(*tag, data).and_then(|bytes| std::str::from_utf8(bytes).ok())
+            }
             _ => None,
         }
     }
@@ -271,22 +376,21 @@ impl SatToken {
             SatToken::Sab { tag: 0x03, data } if data.len() == 2 => {
                 Some(i16::from_le_bytes([data[0], data[1]]) as i64)
             }
-            SatToken::Sab { tag: 0x04 | 0x15, data } if data.len() == 4 => {
+            SatToken::Sab {
+                tag: 0x04 | 0x15,
+                data,
+            } if data.len() == 4 => {
                 Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64)
             }
-            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => {
-                Some(i64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
-                ]))
-            }
+            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => Some(i64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ])),
             SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
                 exact_integer(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
             }
             SatToken::Sab { tag: 0x06, data } if data.len() == 8 => {
                 exact_integer(f64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                 ]))
             }
             _ => None,
@@ -298,15 +402,27 @@ impl SatToken {
         match self {
             SatToken::Float(v) => Some(*v),
             SatToken::Integer(v) => Some(*v as f64),
+            SatToken::Sab { tag: 0x02, data } if data.len() == 1 => {
+                Some(i8::from_le_bytes([data[0]]) as f64)
+            }
+            SatToken::Sab { tag: 0x03, data } if data.len() == 2 => {
+                Some(i16::from_le_bytes([data[0], data[1]]) as f64)
+            }
+            SatToken::Sab {
+                tag: 0x04 | 0x15,
+                data,
+            } if data.len() == 4 => {
+                Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            }
             SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
                 Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
             }
-            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => {
-                Some(f64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
-                ]))
-            }
+            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => Some(f64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ])),
+            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => Some(i64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ]) as f64),
             _ => None,
         }
     }
@@ -315,8 +431,9 @@ impl SatToken {
     pub fn as_string(&self) -> Option<&str> {
         match self {
             SatToken::String(s) => Some(s),
-            SatToken::Sab { tag, data } => sab_string_bytes(*tag, data)
-                .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+            SatToken::Sab { tag, data } => {
+                sab_string_bytes(*tag, data).and_then(|bytes| std::str::from_utf8(bytes).ok())
+            }
             _ => None,
         }
     }
@@ -328,20 +445,25 @@ impl SatToken {
     pub fn coordinate_components(&self) -> Option<([f64; 3], usize)> {
         match self {
             SatToken::Position(x, y, z) => Some(([*x, *y, *z], 3)),
-            SatToken::Sab { tag: 0x13 | 0x14, data } if data.len() == 24 => {
-                Some(([
+            SatToken::Sab {
+                tag: 0x13 | 0x14,
+                data,
+            } if data.len() == 24 => Some((
+                [
                     f64::from_le_bytes(data[0..8].try_into().ok()?),
                     f64::from_le_bytes(data[8..16].try_into().ok()?),
                     f64::from_le_bytes(data[16..24].try_into().ok()?),
-                ], 3))
-            }
-            SatToken::Sab { tag: 0x16, data } if data.len() == 16 => {
-                Some(([
+                ],
+                3,
+            )),
+            SatToken::Sab { tag: 0x16, data } if data.len() == 16 => Some((
+                [
                     f64::from_le_bytes(data[0..8].try_into().ok()?),
                     f64::from_le_bytes(data[8..16].try_into().ok()?),
                     0.0,
-                ], 2))
-            }
+                ],
+                2,
+            )),
             _ => None,
         }
     }
@@ -363,6 +485,28 @@ fn sab_string_bytes(tag: u8, data: &[u8]) -> Option<&[u8]> {
         _ => return None,
     };
     (data.len() >= prefix).then_some(&data[prefix..])
+}
+
+#[cfg(feature = "serde")]
+fn sab_string_bytes_exact(tag: u8, data: &[u8]) -> Option<&[u8]> {
+    let prefix = match tag {
+        0x07 | 0x0D | 0x0E => 1,
+        0x08 => 2,
+        0x09 | 0x12 => 4,
+        _ => return None,
+    };
+    if data.len() < prefix {
+        return None;
+    }
+
+    let declared_length = match prefix {
+        1 => data[0] as usize,
+        2 => u16::from_le_bytes(data[..2].try_into().ok()?) as usize,
+        4 => u32::from_le_bytes(data[..4].try_into().ok()?) as usize,
+        _ => unreachable!(),
+    };
+    let bytes = &data[prefix..];
+    (bytes.len() == declared_length).then_some(bytes)
 }
 
 impl fmt::Display for SatToken {
@@ -397,8 +541,8 @@ impl fmt::Display for SatToken {
                     write!(f, "{}", value)
                 } else if let Some(value) = self.as_float() {
                     write!(f, "{}", value)
-                } else if let Some(value) = sab_string_bytes(*tag, data)
-                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                } else if let Some(value) =
+                    sab_string_bytes(*tag, data).and_then(|bytes| std::str::from_utf8(bytes).ok())
                 {
                     if matches!(*tag, 0x0D | 0x0E) {
                         write!(f, "{}", value)
@@ -524,10 +668,7 @@ impl SatRecord {
     /// vertex's tolerance int between its edge and point — where ordinal
     /// indexing stays correct for both ACIS and ASM.
     pub fn nth_pointer(&self, index: usize) -> Option<SatPointer> {
-        self.tokens
-            .iter()
-            .filter_map(|t| t.as_pointer())
-            .nth(index)
+        self.tokens.iter().filter_map(|t| t.as_pointer()).nth(index)
     }
 
     /// Returns the string value at the given token position.
@@ -551,7 +692,10 @@ impl SatRecord {
                     Sense::Forward
                 }
             }
-            _ => self.token_string(index).map(Sense::from_str).unwrap_or_default(),
+            _ => self
+                .token_string(index)
+                .map(Sense::from_str)
+                .unwrap_or_default(),
         }
     }
 }
@@ -586,8 +730,8 @@ impl Sense {
         match s {
             // Keyword form (ACIS 4.0+) and the numeric form pre-4.0 SAT uses
             // (0 = forward, 1 = reversed).
-            "reversed" | "REVERSED" | "reversed_v" | "REVERSED_V" | "reverse_v"
-            | "REVERSE_V" | "1" => Self::Reversed,
+            "reversed" | "REVERSED" | "reversed_v" | "REVERSED_V" | "reverse_v" | "REVERSE_V"
+            | "1" => Self::Reversed,
             _ => Self::Forward,
         }
     }
@@ -1268,8 +1412,10 @@ pub type SatBs3Curve<'a> = SatIntCurve<'a>;
 impl<'a> SatIntCurve<'a> {
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
         let entity_type = record.entity_type.as_str();
-        if matches!(entity_type, "intcurve-curve" | "bs3-curve" | "exactcur-curve")
-            || entity_type.ends_with("-intcurve-curve")
+        if matches!(
+            entity_type,
+            "intcurve-curve" | "bs3-curve" | "exactcur-curve"
+        ) || entity_type.ends_with("-intcurve-curve")
             || entity_type.ends_with("-bs3-curve")
             || entity_type.ends_with("-exactcur-curve")
         {
@@ -1349,60 +1495,60 @@ impl<'a> SatIntCurve<'a> {
 }
 
 fn decode_bspline_curve(t: &[SatToken]) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
-        let ni = t
-            .iter()
-            .position(|x| matches!(x.as_ident(), Some("nubs" | "nurbs")))?;
-        let rational = t.get(ni)?.as_ident() == Some("nurbs");
-        let degree = t.get(ni + 1)?.as_integer()? as usize;
-        // t[ni + 2] is the curve form/closure flag.
-        let n_knots = t.get(ni + 3)?.as_integer()? as usize;
-        let mut knots: Vec<f64> = Vec::new();
-        let mut i = ni + 4;
-        for _ in 0..n_knots {
-            let k = t.get(i)?.as_float()?;
-            let mult = t.get(i + 1)?.as_integer()?.max(0) as usize;
-            for _ in 0..mult {
-                knots.push(k);
-            }
-            i += 2;
+    let ni = t
+        .iter()
+        .position(|x| matches!(x.as_ident(), Some("nubs" | "nurbs")))?;
+    let rational = t.get(ni)?.as_ident() == Some("nurbs");
+    let degree = t.get(ni + 1)?.as_integer()? as usize;
+    // t[ni + 2] is the curve form/closure flag.
+    let n_knots = t.get(ni + 3)?.as_integer()? as usize;
+    let mut knots: Vec<f64> = Vec::new();
+    let mut i = ni + 4;
+    for _ in 0..n_knots {
+        let k = t.get(i)?.as_float()?;
+        let mult = t.get(i + 1)?.as_integer()?.max(0) as usize;
+        for _ in 0..mult {
+            knots.push(k);
         }
-        if knots.len() < 2 {
-            return None;
-        }
-        let stride = if rational { 4 } else { 3 };
-        let available = t[i..]
-            .iter()
-            .take_while(|token| token.as_float().is_some())
-            .count()
-            / stride;
-        let base_ctrl = knots.len().checked_sub(degree + 1)?;
-        let n_ctrl = if available >= base_ctrl + 2 {
-            let first = *knots.first()?;
-            let last = *knots.last()?;
-            knots.insert(0, first);
-            knots.push(last);
-            base_ctrl + 2
+        i += 2;
+    }
+    if knots.len() < 2 {
+        return None;
+    }
+    let stride = if rational { 4 } else { 3 };
+    let available = t[i..]
+        .iter()
+        .take_while(|token| token.as_float().is_some())
+        .count()
+        / stride;
+    let base_ctrl = knots.len().checked_sub(degree + 1)?;
+    let n_ctrl = if available >= base_ctrl + 2 {
+        let first = *knots.first()?;
+        let last = *knots.last()?;
+        knots.insert(0, first);
+        knots.push(last);
+        base_ctrl + 2
+    } else {
+        base_ctrl
+    };
+    if n_ctrl <= degree {
+        return None;
+    }
+    let mut ctrl: Vec<[f64; 4]> = Vec::with_capacity(n_ctrl);
+    for _ in 0..n_ctrl {
+        let x = t.get(i)?.as_float()?;
+        let y = t.get(i + 1)?.as_float()?;
+        let z = t.get(i + 2)?.as_float()?;
+        if rational {
+            let w = t.get(i + 3)?.as_float()?;
+            ctrl.push([x * w, y * w, z * w, w]);
+            i += 4;
         } else {
-            base_ctrl
-        };
-        if n_ctrl <= degree {
-            return None;
+            ctrl.push([x, y, z, 1.0]);
+            i += 3;
         }
-        let mut ctrl: Vec<[f64; 4]> = Vec::with_capacity(n_ctrl);
-        for _ in 0..n_ctrl {
-            let x = t.get(i)?.as_float()?;
-            let y = t.get(i + 1)?.as_float()?;
-            let z = t.get(i + 2)?.as_float()?;
-            if rational {
-                let w = t.get(i + 3)?.as_float()?;
-                ctrl.push([x * w, y * w, z * w, w]);
-                i += 4;
-            } else {
-                ctrl.push([x, y, z, 1.0]);
-                i += 3;
-            }
-        }
-        Some((degree, knots, ctrl))
+    }
+    Some((degree, knots, ctrl))
 }
 
 /// Accessor for a `pcurve` entity: a 2-D B-spline in surface UV space.
@@ -1420,10 +1566,7 @@ impl<'a> SatPCurve<'a> {
         }
     }
 
-    fn bspline_at(
-        tokens: &[SatToken],
-        start: usize,
-    ) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
+    fn bspline_at(tokens: &[SatToken], start: usize) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
         let rational = tokens.get(start)?.as_ident() == Some("nurbs");
         let degree = tokens.get(start + 1)?.as_integer()?.max(0) as usize;
         let knot_count = tokens.get(start + 3)?.as_integer()?.max(0) as usize;
@@ -1697,21 +1840,16 @@ impl<'a> SatSplineSurface<'a> {
     /// Wraps any supported B-spline surface family.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
         let entity_type = record.entity_type.as_str();
-        let kind = if entity_type == "meshsurf-surface"
-            || entity_type.ends_with("-meshsurf-surface")
-        {
-            SatSplineSurfaceKind::Mesh
-        } else if entity_type == "bs3-surface"
-            || entity_type.ends_with("-bs3-surface")
-        {
-            SatSplineSurfaceKind::Bs3
-        } else if entity_type == "spline-surface"
-            || entity_type.ends_with("-spline-surface")
-        {
-            SatSplineSurfaceKind::Spline
-        } else {
-            return None;
-        };
+        let kind =
+            if entity_type == "meshsurf-surface" || entity_type.ends_with("-meshsurf-surface") {
+                SatSplineSurfaceKind::Mesh
+            } else if entity_type == "bs3-surface" || entity_type.ends_with("-bs3-surface") {
+                SatSplineSurfaceKind::Bs3
+            } else if entity_type == "spline-surface" || entity_type.ends_with("-spline-surface") {
+                SatSplineSurfaceKind::Spline
+            } else {
+                return None;
+            };
         Some(Self { record, kind })
     }
 
@@ -1779,16 +1917,14 @@ fn decode_bspline_surface(tokens: &[SatToken]) -> Option<SatBSplineSurface> {
     let mut u_knots = Vec::new();
     for _ in 0..u_knot_count {
         let value = tokens.get(position)?.as_float()?;
-        let multiplicity =
-            usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
+        let multiplicity = usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
         u_knots.extend(std::iter::repeat(value).take(multiplicity));
         position += 2;
     }
     let mut v_knots = Vec::new();
     for _ in 0..v_knot_count {
         let value = tokens.get(position)?.as_float()?;
-        let multiplicity =
-            usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
+        let multiplicity = usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
         v_knots.extend(std::iter::repeat(value).take(multiplicity));
         position += 2;
     }
@@ -1885,12 +2021,7 @@ fn decode_bspline_surface(tokens: &[SatToken]) -> Option<SatBSplineSurface> {
 }
 
 /// Evaluate a homogeneous B-spline curve at parameter `t` via De Boor.
-fn de_boor_homogeneous(
-    degree: usize,
-    knots: &[f64],
-    ctrl: &[[f64; 4]],
-    t: f64,
-) -> [f64; 4] {
+fn de_boor_homogeneous(degree: usize, knots: &[f64], ctrl: &[[f64; 4]], t: f64) -> [f64; 4] {
     // Knot span k: knots[k] <= t < knots[k+1], clamped into the valid interval.
     let n = ctrl.len();
     let mut k = degree;
@@ -2243,6 +2374,19 @@ pub struct SatDocument {
     pub records: Vec<SatRecord>,
 }
 
+pub(super) fn transform_flags(matrix: [[f64; 3]; 3], scale: f64) -> [&'static str; 3] {
+    let m = crate::types::Matrix3::from_rows(matrix[0], matrix[1], matrix[2]);
+    let rotated = (0..3).any(|i| (0..3).any(|j| i != j && matrix[i][j].abs() > 1e-10));
+    let reflected = m.determinant() * scale < 0.0;
+    let rows = matrix.map(|row| crate::types::Vector3::new(row[0], row[1], row[2]));
+    let sheared = (0..3).any(|i| (i + 1..3).any(|j| rows[i].dot(&rows[j]).abs() > 1e-10));
+    [
+        if rotated { "rotate" } else { "no_rotate" },
+        if reflected { "reflect" } else { "no_reflect" },
+        if sheared { "shear" } else { "no_shear" },
+    ]
+}
+
 impl SatDocument {
     /// Creates a new empty SAT document with ACIS 7.0 header.
     pub fn new() -> Self {
@@ -2277,8 +2421,11 @@ impl SatDocument {
     /// book-keeping pointer and trailing rotate/reflect/shear flags are
     /// skipped by reading float-valued tokens only.
     pub fn placement(&self) -> ([[f64; 3]; 3], [f64; 3], f64) {
-        const IDENTITY: ([[f64; 3]; 3], [f64; 3], f64) =
-            ([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [0.0; 3], 1.0);
+        const IDENTITY: ([[f64; 3]; 3], [f64; 3], f64) = (
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [0.0; 3],
+            1.0,
+        );
         let Some(rec) = self.records.iter().find(|r| r.entity_type == "transform") else {
             return IDENTITY;
         };
@@ -2335,13 +2482,13 @@ impl SatDocument {
             tokens.push(SatToken::Float(x));
         }
         tokens.push(SatToken::Float(scale));
-        // rotate / reflect / shear — a composed matrix may be non-orthogonal,
-        // so flag it as a general (shear) placement.
-        tokens.push(SatToken::Integer(0));
-        tokens.push(SatToken::Integer(0));
-        tokens.push(SatToken::Integer(1));
+        tokens.extend(transform_flags(matrix, scale).map(|flag| SatToken::Ident(flag.into())));
 
-        if let Some(rec) = self.records.iter_mut().find(|r| r.entity_type == "transform") {
+        if let Some(rec) = self
+            .records
+            .iter_mut()
+            .find(|r| r.entity_type == "transform")
+        {
             rec.tokens = tokens;
             return;
         }
@@ -2575,6 +2722,49 @@ impl SatDocument {
         errors
     }
 
+    /// Fill missing vertex-edge and edge-coedge links for ACIS serialization.
+    /// Preserve existing non-null links.
+    pub fn complete_brep_links(&mut self) {
+        use std::collections::HashMap;
+
+        let mut vertex_edges = HashMap::<i32, i32>::new();
+        let mut edge_coedges = HashMap::<i32, i32>::new();
+
+        for record in &self.records {
+            if record.is_a("edge") {
+                for token in [1, 3] {
+                    if let Some(vertex) =
+                        record.token_pointer(token).filter(|value| !value.is_null())
+                    {
+                        vertex_edges.entry(vertex.0).or_insert(record.index);
+                    }
+                }
+            } else if record.is_a("coedge") {
+                if let Some(edge) = record.token_pointer(4).filter(|value| !value.is_null()) {
+                    edge_coedges.entry(edge.0).or_insert(record.index);
+                }
+            }
+        }
+
+        for record in &mut self.records {
+            if record.is_a("vertex") {
+                let missing_edge = record.token_pointer(1).is_none_or(|value| value.is_null());
+                if missing_edge {
+                    if let Some(&edge) = vertex_edges.get(&record.index) {
+                        record.tokens[1] = SatToken::Pointer(SatPointer::new(edge));
+                    }
+                }
+            } else if record.is_a("edge") {
+                let missing_coedge = record.token_pointer(5).is_none_or(|value| value.is_null());
+                if missing_coedge {
+                    if let Some(&coedge) = edge_coedges.get(&record.index) {
+                        record.tokens[5] = SatToken::Pointer(SatPointer::new(coedge));
+                    }
+                }
+            }
+        }
+    }
+
     /// Strip non-geometry entities for SAB binary encoding.
     ///
     /// AutoCAD/IntelliCAD's ACIS SAB format only includes core geometric
@@ -2705,15 +2895,9 @@ pub enum SatParseError {
     /// Failed to parse the tolerance line.
     InvalidTolerances(String),
     /// Failed to parse an entity record.
-    InvalidRecord {
-        line: usize,
-        message: String,
-    },
+    InvalidRecord { line: usize, message: String },
     /// Unexpected token.
-    UnexpectedToken {
-        line: usize,
-        token: String,
-    },
+    UnexpectedToken { line: usize, token: String },
 }
 
 impl fmt::Display for SatParseError {
@@ -2787,10 +2971,10 @@ pub enum SatEntityCategory {
 pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
     match entity_type {
         "asmheader" => SatEntityCategory::Header,
-        "body" | "lump" | "shell" | "subshell" | "face" | "loop" | "coedge" | "edge"
-        | "vertex" | "wire" => SatEntityCategory::Topology,
-        "point" | "straight-curve" | "ellipse-curve" | "intcurve-curve" | "bs3-curve" | "pcurve"
-        | "plane-surface" | "cone-surface" | "sphere-surface" | "torus-surface"
+        "body" | "lump" | "shell" | "subshell" | "face" | "loop" | "coedge" | "edge" | "vertex"
+        | "wire" => SatEntityCategory::Topology,
+        "point" | "straight-curve" | "ellipse-curve" | "intcurve-curve" | "bs3-curve"
+        | "pcurve" | "plane-surface" | "cone-surface" | "sphere-surface" | "torus-surface"
         | "spline-surface" | "meshsurf-surface" | "bs3-surface" => SatEntityCategory::Geometry,
         "transform" => SatEntityCategory::Transform,
         _ if matches!(
@@ -2805,11 +2989,17 @@ pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
                 | "edge"
                 | "vertex"
                 | "wire"
-        ) => SatEntityCategory::Topology,
+        ) =>
+        {
+            SatEntityCategory::Topology
+        }
         _ if matches!(
             base_entity_type(entity_type),
             "point" | "curve" | "surface" | "pcurve"
-        ) => SatEntityCategory::Geometry,
+        ) =>
+        {
+            SatEntityCategory::Geometry
+        }
         _ if entity_type.ends_with("-attrib") || entity_type.starts_with("attrib") => {
             SatEntityCategory::Attribute
         }
@@ -2822,4 +3012,161 @@ pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
 /// For example, `tcoedge-coedge` derives from `coedge`.
 pub fn base_entity_type(entity_type: &str) -> &str {
     entity_type.rsplit('-').next().unwrap_or(entity_type)
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    fn raw(tag: u8, data: Vec<u8>) -> SatToken {
+        SatToken::Sab { tag, data }
+    }
+
+    fn counted_string(prefix_size: usize, value: &str) -> Vec<u8> {
+        let mut data = match prefix_size {
+            1 => vec![value.len() as u8],
+            2 => (value.len() as u16).to_le_bytes().to_vec(),
+            4 => (value.len() as u32).to_le_bytes().to_vec(),
+            _ => unreachable!(),
+        };
+        data.extend_from_slice(value.as_bytes());
+        data
+    }
+
+    fn assert_semantic_json(token: SatToken, expected_json: serde_json::Value, expected: SatToken) {
+        let actual = serde_json::to_value(&token).unwrap();
+        assert_eq!(actual, expected_json);
+        assert_eq!(
+            serde_json::from_value::<SatToken>(actual).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn sab_coordinate_tokens_use_the_legacy_position_json_shape() {
+        let values = [8.863414495014042e-14, -1.0, 0.0];
+        let data = values
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let token = SatToken::Sab { tag: 0x14, data };
+
+        assert_eq!(
+            serde_json::to_value(&token).unwrap(),
+            serde_json::json!({ "Position": values })
+        );
+        assert_eq!(
+            serde_json::from_value::<SatToken>(serde_json::json!({ "Position": values })).unwrap(),
+            SatToken::Position(values[0], values[1], values[2])
+        );
+    }
+
+    #[test]
+    fn sab_numeric_tokens_use_their_legacy_json_shapes() {
+        assert_semantic_json(
+            raw(0x02, (-7i8).to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": -7 }),
+            SatToken::Integer(-7),
+        );
+        assert_semantic_json(
+            raw(0x03, (-300i16).to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": -300 }),
+            SatToken::Integer(-300),
+        );
+        assert_semantic_json(
+            raw(0x04, 42i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": 42 }),
+            SatToken::Integer(42),
+        );
+        assert_semantic_json(
+            raw(0x15, 2i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": 2 }),
+            SatToken::Integer(2),
+        );
+        assert_semantic_json(
+            raw(0x17, i64::MAX.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": i64::MAX }),
+            SatToken::Integer(i64::MAX),
+        );
+        assert_semantic_json(
+            raw(0x05, 1.5f32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Float": 1.5 }),
+            SatToken::Float(1.5),
+        );
+        assert_semantic_json(
+            raw(0x06, 1.0f64.to_le_bytes().to_vec()),
+            serde_json::json!({ "Float": 1.0 }),
+            SatToken::Float(1.0),
+        );
+    }
+
+    #[test]
+    fn sab_text_and_control_tokens_use_their_legacy_json_shapes() {
+        for (tag, prefix_size) in [(0x07, 1), (0x08, 2), (0x09, 4), (0x12, 4)] {
+            assert_semantic_json(
+                raw(tag, counted_string(prefix_size, "unknown")),
+                serde_json::json!({ "String": "unknown" }),
+                SatToken::String("unknown".to_string()),
+            );
+        }
+        for tag in [0x0D, 0x0E] {
+            assert_semantic_json(
+                raw(tag, counted_string(1, "curve")),
+                serde_json::json!({ "Ident": "curve" }),
+                SatToken::Ident("curve".to_string()),
+            );
+        }
+        assert_semantic_json(
+            raw(0x0A, Vec::new()),
+            serde_json::json!("False"),
+            SatToken::False,
+        );
+        assert_semantic_json(
+            raw(0x0B, Vec::new()),
+            serde_json::json!("True"),
+            SatToken::True,
+        );
+        assert_semantic_json(
+            raw(0x0C, 123i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Pointer": 123 }),
+            SatToken::Pointer(SatPointer::new(123)),
+        );
+        assert_semantic_json(
+            raw(0x0F, Vec::new()),
+            serde_json::json!({ "Ident": "{" }),
+            SatToken::Ident("{".to_string()),
+        );
+        assert_semantic_json(
+            raw(0x10, Vec::new()),
+            serde_json::json!({ "Ident": "}" }),
+            SatToken::Ident("}".to_string()),
+        );
+        assert_semantic_json(
+            raw(0x11, Vec::new()),
+            serde_json::json!("Terminator"),
+            SatToken::Terminator,
+        );
+    }
+
+    #[test]
+    fn unsupported_and_malformed_sab_tokens_keep_the_raw_json_shape() {
+        let tokens = [
+            raw(0x06, vec![0; 7]),
+            raw(0x07, vec![2, b'a']),
+            raw(0x07, vec![1, 0xFF]),
+            raw(0x0F, vec![0]),
+            raw(0x16, vec![0; 16]),
+            raw(0xFF, vec![1, 2, 3]),
+        ];
+
+        for token in tokens {
+            let expected = token.clone();
+            let json = serde_json::to_value(&token).unwrap();
+            assert!(
+                json.get("Sab").is_some(),
+                "unexpected semantic JSON: {json}"
+            );
+            assert_eq!(serde_json::from_value::<SatToken>(json).unwrap(), expected);
+        }
+    }
 }

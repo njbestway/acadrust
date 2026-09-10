@@ -41,7 +41,6 @@ pub struct ObjectContextData {
 
     /// Type-specific placement payload.
     pub kind: ObjectContextKind,
-
 }
 
 /// The type-specific placement payload of an annotative context leaf. Field
@@ -137,8 +136,16 @@ pub struct HatchScaleContext {
     pub pattern_lines: Vec<crate::entities::HatchPatternLine>,
     pub pattern_scale: f64,
     pub pattern_base: Vector3,
-    pub loop_types: Vec<i32>,
+    pub loops: Vec<HatchLoopContext>,
+}
+
+/// Per-boundary-loop data in an annotative hatch context.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HatchLoopContext {
+    pub loop_type: i32,
     pub supports_context: bool,
+    pub boundary: Option<crate::entities::BoundaryPath>,
 }
 
 /// `AcDbHatchViewContextData` payload.
@@ -268,13 +275,22 @@ pub enum DimSubtype {
     /// `ACDB_ANGDIMOBJECTCONTEXTDATA_CLASS`: `3BD arc_pt(11)`.
     Angular { arc_pt: Vector3 },
     /// `ACDB_DMDIMOBJECTCONTEXTDATA_CLASS`: `3BD first_arc_pt(11)`, `3BD def_pt(12)`.
-    Diametric { first_arc_pt: Vector3, def_pt: Vector3 },
+    Diametric {
+        first_arc_pt: Vector3,
+        def_pt: Vector3,
+    },
     /// `ACDB_RADIMOBJECTCONTEXTDATA_CLASS`: `3BD first_arc_pt(11)`.
     Radial { first_arc_pt: Vector3 },
     /// `ACDB_RADIMLGOBJECTCONTEXTDATA_CLASS`: `3BD ovr_center(12)`, `3BD jog_point(13)`.
-    RadialLarge { ovr_center: Vector3, jog_point: Vector3 },
+    RadialLarge {
+        ovr_center: Vector3,
+        jog_point: Vector3,
+    },
     /// `ACDB_ORDDIMOBJECTCONTEXTDATA_CLASS`: `3BD feature_location_pt(11)`, `3BD leader_endpt(12)`.
-    Ordinate { feature_location_pt: Vector3, leader_endpt: Vector3 },
+    Ordinate {
+        feature_location_pt: Vector3,
+        leader_endpt: Vector3,
+    },
 }
 
 impl DimSubtype {
@@ -332,9 +348,7 @@ impl ObjectContextData {
             ObjectContextKind::MText(_) => "ACDB_MTEXTOBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::Dim(d) => d.subtype.class_name(),
             ObjectContextKind::MLeader(_) => "ACDB_MLEADEROBJECTCONTEXTDATA_CLASS",
-            ObjectContextKind::MTextAttribute(_) => {
-                "ACDB_MTEXTATTRIBUTEOBJECTCONTEXTDATA_CLASS"
-            }
+            ObjectContextKind::MTextAttribute(_) => "ACDB_MTEXTATTRIBUTEOBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::Leader(_) => "ACDB_LEADEROBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::Fcf { .. } => "ACDB_FCFOBJECTCONTEXTDATA_CLASS",
             ObjectContextKind::HatchScale(_) => "ACDB_HATCHSCALECONTEXTDATA_CLASS",

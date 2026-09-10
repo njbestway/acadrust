@@ -877,6 +877,14 @@ fn resolve_mtext_span_color(
                 let b = (v & 0xFF) as u8;
                 return format!("{},{},{}", r, g, b);
             }
+            MTextColor::ByLayer => {
+                // \C256 = ByLayer: resolve to layer color
+                return layer_color.to_string();
+            }
+            MTextColor::ByBlock => {
+                // \C256 = ByBlock: resolve to layer color
+                return layer_color.to_string();
+            }
             MTextColor::None => {
                 // \C0 or \C256 = ByLayer: resolve to layer color
                 return layer_color.to_string();

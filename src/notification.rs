@@ -1,6 +1,6 @@
 //! Parse notification / diagnostic system.
 //!
-//! Mirrors ACadSharp's `NotificationEventHandler` pattern.  Non-fatal issues
+//! Mirrors the classic `NotificationEventHandler` pattern.  Non-fatal issues
 //! encountered during reading (or writing) are collected as `Notification`
 //! items rather than being silently dropped or causing hard errors.
 //!
@@ -104,7 +104,8 @@ impl NotificationCollection {
         } else {
             message
         };
-        self.items.push(Notification::new(notification_type, message));
+        self.items
+            .push(Notification::new(notification_type, message));
     }
 
     /// Check if there are any notifications.
@@ -138,7 +139,10 @@ impl NotificationCollection {
 
     /// Get all notifications of a specific type.
     pub fn of_type(&self, nt: NotificationType) -> Vec<&Notification> {
-        self.items.iter().filter(|n| n.notification_type == nt).collect()
+        self.items
+            .iter()
+            .filter(|n| n.notification_type == nt)
+            .collect()
     }
 
     /// Check whether any notification of the given type exists.

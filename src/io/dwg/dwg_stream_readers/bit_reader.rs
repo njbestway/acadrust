@@ -4,14 +4,13 @@
 //! This reader tracks the current bit position and handles all the
 //! DWG-specific variable-length decodings.
 //!
-//! Based on ACadSharp's `DwgStreamReaderBase` and version-specific subclasses
+//! Based on the reference `DwgStreamReaderBase` and version-specific subclasses
 //! (AC12, AC15, AC18, AC21, AC24).
 
-use crate::types::{Color, DxfVersion, Transparency, Vector2, Vector3};
-use crate::io::dwg::dwg_version::DwgVersion;
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
+use crate::io::dwg::dwg_version::DwgVersion;
+use crate::types::{Color, DxfVersion, Transparency, Vector2, Vector3};
 use std::sync::Arc;
-
 
 /// Bit-level reader for the DWG binary format.
 ///
@@ -56,11 +55,7 @@ impl DwgBitReader {
     /// Create a reader sharing immutable bytes with sibling stream readers.
     /// Object records have main/text/handle cursors over identical storage;
     /// sharing avoids three full record copies per cursor set.
-    pub fn from_shared(
-        data: Arc<[u8]>,
-        version: DwgVersion,
-        dxf_version: DxfVersion,
-    ) -> Self {
+    pub fn from_shared(data: Arc<[u8]>, version: DwgVersion, dxf_version: DxfVersion) -> Self {
         Self {
             data,
             position: 0,
@@ -240,7 +235,11 @@ impl DwgBitReader {
 
     /// Read a single bit and return as i16 (0 or 1).
     pub fn read_bit_as_short(&mut self) -> i16 {
-        if self.read_bit() { 1 } else { 0 }
+        if self.read_bit() {
+            1
+        } else {
+            0
+        }
     }
 
     /// Read a 2-bit value (BB type).
@@ -267,11 +266,17 @@ impl DwgBitReader {
     /// Read a 3-bit value (3B type, used for BLL size prefix).
     fn read_3bits(&mut self) -> u8 {
         let mut b = 0u8;
-        if self.read_bit() { b = 1; }
+        if self.read_bit() {
+            b = 1;
+        }
         b <<= 1;
-        if self.read_bit() { b |= 1; }
+        if self.read_bit() {
+            b |= 1;
+        }
         b <<= 1;
-        if self.read_bit() { b |= 1; }
+        if self.read_bit() {
+            b |= 1;
+        }
         b
     }
 
@@ -421,7 +426,7 @@ impl DwgBitReader {
         b0 | (b1 << 8)
     }
 
-    /// Read a raw long (RL type) — 4 bytes, little-endian, returns as i64 (matching ACadSharp's ReadRawLong → long).
+    /// Read a raw long (RL type) — 4 bytes, little-endian, returns as i64 (matching the reference ReadRawLong → long).
     pub fn read_raw_long(&mut self) -> i64 {
         let b0 = self.read_byte() as u32;
         let b1 = self.read_byte() as u32;
@@ -430,7 +435,7 @@ impl DwgBitReader {
         (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32 as i64
     }
 
-    /// Read a raw unsigned long (RD is actually 4 bytes in ACadSharp's ReadRawULong).
+    /// Read a raw unsigned long (RD is actually 4 bytes in the reference ReadRawULong).
     pub fn read_raw_ulong(&mut self) -> u64 {
         let b0 = self.read_byte() as u64;
         let b1 = self.read_byte() as u64;
@@ -525,7 +530,11 @@ impl DwgBitReader {
     pub fn read_bit_thickness(&mut self) -> f64 {
         if self.dxf_version >= DxfVersion::AC1015 {
             // R2000+: optimized
-            if self.read_bit() { 0.0 } else { self.read_bit_double() }
+            if self.read_bit() {
+                0.0
+            } else {
+                self.read_bit_double()
+            }
         } else {
             // R13/R14: always BD
             self.read_bit_double()
@@ -565,7 +574,11 @@ impl DwgBitReader {
         if (first_byte & 0x80) == 0 {
             // Single byte: bits 0–5 = value, bit 6 = sign
             let value = (first_byte & 0x3F) as i64;
-            if (first_byte & 0x40) != 0 { -value } else { value }
+            if (first_byte & 0x40) != 0 {
+                -value
+            } else {
+                value
+            }
         } else {
             // Multi-byte
             let mut total_shift = 0;
@@ -697,11 +710,11 @@ impl DwgBitReader {
             let byte_count = (char_count as usize) * 2;
             let bytes = self.read_bytes(byte_count);
             // Decode UTF-16LE
-            let utf16: Vec<u16> = bytes.chunks_exact(2)
+            let utf16: Vec<u16> = bytes
+                .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
-            String::from_utf16_lossy(&utf16)
-                .replace('\0', "")
+            String::from_utf16_lossy(&utf16).replace('\0', "")
         } else {
             // Pre-R2007: RS length + RC encoding + bytes
             let text_length = self.read_raw_short();
@@ -737,11 +750,11 @@ impl DwgBitReader {
                 } else {
                     let byte_count = (char_count as usize) * 2;
                     let bytes = self.read_bytes(byte_count);
-                    let utf16: Vec<u16> = bytes.chunks_exact(2)
+                    let utf16: Vec<u16> = bytes
+                        .chunks_exact(2)
                         .map(|c| u16::from_le_bytes([c[0], c[1]]))
                         .collect();
-                    String::from_utf16_lossy(&utf16)
-                        .replace('\0', "")
+                    String::from_utf16_lossy(&utf16).replace('\0', "")
                 };
                 // Save updated text stream position
                 self.text_stream_pos = self.position_in_bits();
@@ -756,11 +769,11 @@ impl DwgBitReader {
                 }
                 let byte_count = (char_count as usize) * 2;
                 let bytes = self.read_bytes(byte_count);
-                let utf16: Vec<u16> = bytes.chunks_exact(2)
+                let utf16: Vec<u16> = bytes
+                    .chunks_exact(2)
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect();
-                String::from_utf16_lossy(&utf16)
-                    .replace('\0', "")
+                String::from_utf16_lossy(&utf16).replace('\0', "")
             }
         } else {
             // Pre-R2007: BS length + encoded bytes
@@ -885,7 +898,11 @@ impl DwgBitReader {
         } else {
             // Pre-R2004
             let color_number = self.read_bit_short();
-            (Color::from_index(color_number), Transparency::BY_LAYER, false)
+            (
+                Color::from_index(color_number),
+                Transparency::BY_LAYER,
+                false,
+            )
         }
     }
 

@@ -18,7 +18,7 @@
 //!
 //! The section data is then wrapped with sentinels and CRC-16.
 //!
-//! Based on ACadSharp's `DwgHeaderWriter`.
+//! Based on the reference `DwgHeaderWriter`.
 
 use crate::document::HeaderVariables;
 use crate::io::dwg::crc::{crc16, CRC16_SEED};
@@ -36,7 +36,7 @@ use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
 /// Internal writer that uses DwgBitWriter for pre-R2007 and DwgMergedWriter
 /// (three-stream merge) for R2007+ (AC1021+). This ensures that for R2007+,
 /// text goes to the text sub-stream and handle references go to the handle
-/// sub-stream, matching the C# ACadSharp `DwgHeaderWriter` behavior.
+/// sub-stream, matching the reference `DwgHeaderWriter` behavior.
 enum SectionWriterInner {
     /// Pre-R2007: single stream, everything inline
     BitWriter(DwgBitWriter),
@@ -49,10 +49,7 @@ struct SectionWriter {
 }
 
 impl SectionWriter {
-    fn with_encoding(
-        version: DxfVersion,
-        encoding: &'static encoding_rs::Encoding,
-    ) -> Self {
+    fn with_encoding(version: DxfVersion, encoding: &'static encoding_rs::Encoding) -> Self {
         let dwg = DwgVersion::from_dxf_version(version).unwrap_or(DwgVersion::AC15);
 
         let inner = if version >= DxfVersion::AC1021 {
@@ -209,7 +206,11 @@ impl SectionWriter {
 ///
 /// # Returns
 /// Complete section bytes including sentinels and CRC.
-pub fn write_header(version: DxfVersion, header: &HeaderVariables, maintenance_version: u8) -> Vec<u8> {
+pub fn write_header(
+    version: DxfVersion,
+    header: &HeaderVariables,
+    maintenance_version: u8,
+) -> Vec<u8> {
     write_header_with_encoding(
         version,
         header,
@@ -234,7 +235,11 @@ pub fn write_header_with_encoding(
 //  Sentinel + CRC wrapper (same pattern as classes_writer)
 // ════════════════════════════════════════════════════════════════════════════
 
-fn wrap_with_sentinels_and_crc(version: DxfVersion, maintenance_version: u8, section_data: &[u8]) -> Vec<u8> {
+fn wrap_with_sentinels_and_crc(
+    version: DxfVersion,
+    maintenance_version: u8,
+    section_data: &[u8],
+) -> Vec<u8> {
     let mut output = Vec::with_capacity(16 + 4 + section_data.len() + 2 + 16 + 8);
 
     output.extend_from_slice(&start_sentinels::HEADER);
@@ -520,7 +525,10 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     }
 
     w.write_handle_ref(DwgReferenceType::HardPointer, h.current_dimstyle_handle);
-    w.write_handle_ref(DwgReferenceType::HardPointer, h.current_multiline_style_handle);
+    w.write_handle_ref(
+        DwgReferenceType::HardPointer,
+        h.current_multiline_style_handle,
+    );
 
     if r2000_plus(v) {
         w.write_bit_double(h.viewport_scale_factor);
@@ -786,8 +794,14 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
         w.write_variable_text(&h.stylesheet);
 
         w.write_handle_ref(DwgReferenceType::HardPointer, h.acad_layout_dict_handle);
-        w.write_handle_ref(DwgReferenceType::HardPointer, h.acad_plotsettings_dict_handle);
-        w.write_handle_ref(DwgReferenceType::HardPointer, h.acad_plotstylename_dict_handle);
+        w.write_handle_ref(
+            DwgReferenceType::HardPointer,
+            h.acad_plotsettings_dict_handle,
+        );
+        w.write_handle_ref(
+            DwgReferenceType::HardPointer,
+            h.acad_plotstylename_dict_handle,
+        );
     }
 
     // R2004+ dictionaries
@@ -798,7 +812,10 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
 
     // R2007+ dictionaries
     if r2007_plus(v) {
-        w.write_handle_ref(DwgReferenceType::HardPointer, h.acad_visualstyle_dict_handle);
+        w.write_handle_ref(
+            DwgReferenceType::HardPointer,
+            h.acad_visualstyle_dict_handle,
+        );
         if r2013_plus(v) {
             w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // unknown
         }

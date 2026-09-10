@@ -19,16 +19,16 @@
 
 use crate::classes::DxfClassCollection;
 use crate::entities::{EntityCommon, EntityType};
-use std::sync::{Arc, Mutex};
 use crate::objects::{
-    DataObjectData, DynamicBlockData, DynamicBlockObject, ObjectType,
-    SolidHistory, SolidHistoryOperation,
+    DataObjectData, DynamicBlockData, DynamicBlockObject, ObjectType, SolidHistory,
+    SolidHistoryOperation,
 };
 use crate::tables::*;
-use crate::types::{DxfVersion, Color, Handle, Vector2, Vector3};
+use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
 use crate::xdata::XDataValue;
 use crate::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "serde")]
 fn default_sketch_tolerance() -> f64 {
@@ -95,7 +95,7 @@ pub struct HeaderVariables {
     // ==================== Version-specific Flags ====================
     /// REQUIREDVERSIONS (R2013+) - Bit coded required versions
     pub required_versions: i64,
-    
+
     // ==================== Drawing Mode Flags ====================
     /// DIMASO - Associates dimensions with geometry
     pub associate_dimensions: bool,
@@ -150,7 +150,7 @@ pub struct HeaderVariables {
     pub attribute_request: bool,
     /// ATTDIA - Attribute dialog mode
     pub attribute_dialog: bool,
-    
+
     // ==================== Unit Settings ====================
     /// LUNITS - Linear units format (0=Scientific, 1=Decimal, 2=Engineering, 3=Architectural, 4=Fractional)
     pub linear_unit_format: i16,
@@ -228,7 +228,7 @@ pub struct HeaderVariables {
     pub dimension_associativity: i16,
     /// PROJECTNAME - Project name
     pub project_name: String,
-    
+
     // ==================== Scale/Size Defaults ====================
     /// LTSCALE - Global linetype scale
     pub linetype_scale: f64,
@@ -319,7 +319,7 @@ pub struct HeaderVariables {
     pub camera_height: f64,
     /// CAMERADISPLAY - Camera display mode
     pub camera_display: bool,
-    
+
     // ==================== Current Entity Settings ====================
     /// CECOLOR - Current entity color
     pub current_entity_color: Color,
@@ -341,7 +341,7 @@ pub struct HeaderVariables {
     pub plotstyle_mode: bool,
     /// OLESTARTUP - OLE startup
     pub ole_startup: bool,
-    
+
     // ==================== Dimension Variables ====================
     /// DIMSCALE - Overall dimension scale factor
     pub dim_scale: f64,
@@ -465,7 +465,7 @@ pub struct HeaderVariables {
     pub dim_arrow_block2: String,
     /// DIMLDRBLK - Leader arrow block name
     pub dim_leader_arrow_block: String,
-    
+
     // ==================== Extents and Limits ====================
     /// INSBASE - Model space insertion base point
     pub model_space_insertion_base: Vector3,
@@ -477,7 +477,7 @@ pub struct HeaderVariables {
     pub model_space_limits_min: Vector2,
     /// LIMMAX - Model space limits max
     pub model_space_limits_max: Vector2,
-    
+
     /// Paper space insertion base point
     pub paper_space_insertion_base: Vector3,
     /// Paper space extents min
@@ -488,7 +488,7 @@ pub struct HeaderVariables {
     pub paper_space_limits_min: Vector2,
     /// Paper space limits max
     pub paper_space_limits_max: Vector2,
-    
+
     // ==================== UCS Settings ====================
     /// UCSBASE - UCS base name
     pub ucs_base: String,
@@ -516,7 +516,7 @@ pub struct HeaderVariables {
     pub paper_ucs_ortho_ref: Handle,
     /// PUCSORTHOVIEW - Paper space UCS orthographic view type
     pub paper_ucs_ortho_view: i16,
-    
+
     // ==================== Handles/References ====================
     /// HANDSEED - Next available handle
     pub handle_seed: u64,
@@ -574,7 +574,7 @@ pub struct HeaderVariables {
     pub vpent_hdr_control_handle: Handle,
     /// Current legacy viewport-entity table record (R13-R2000)
     pub current_vx_handle: Handle,
-    
+
     // ==================== Dictionary Handles ====================
     /// Named objects dictionary
     pub named_objects_dict_handle: Handle,
@@ -594,7 +594,7 @@ pub struct HeaderVariables {
     pub acad_color_dict_handle: Handle,
     /// ACAD_VISUALSTYLE dictionary (R2007+)
     pub acad_visualstyle_dict_handle: Handle,
-    
+
     // ==================== Block Record Handles ====================
     /// *MODEL_SPACE block record
     pub model_space_block_handle: Handle,
@@ -606,7 +606,7 @@ pub struct HeaderVariables {
     pub byblock_linetype_handle: Handle,
     /// CONTINUOUS linetype
     pub continuous_linetype_handle: Handle,
-    
+
     // ==================== Date/Time ====================
     /// Document creation time (Julian date)
     pub create_date_julian: f64,
@@ -616,7 +616,7 @@ pub struct HeaderVariables {
     pub total_editing_time: f64,
     /// User elapsed time in days
     pub user_elapsed_time: f64,
-    
+
     // ==================== Metadata ====================
     /// Fingerprint GUID
     pub fingerprint_guid: String,
@@ -632,7 +632,7 @@ pub struct HeaderVariables {
     pub hyperlink_base: String,
     /// STYLESHEET
     pub stylesheet: String,
-    
+
     // ==================== Misc ====================
     /// MEASUREMENT - Drawing units (0=English, 1=Metric)
     pub measurement: i16,
@@ -661,7 +661,7 @@ impl Default for HeaderVariables {
         Self {
             // Version-specific flags
             required_versions: 0,
-            
+
             // Drawing mode flags
             associate_dimensions: true,
             update_dimensions_while_dragging: true,
@@ -688,16 +688,20 @@ impl Default for HeaderVariables {
             blip_mode: false,
             attribute_request: true,
             attribute_dialog: true,
-            
+
             // Unit settings
-            linear_unit_format: 2,  // Decimal
+            linear_unit_format: 2, // Decimal
             linear_unit_precision: 4,
             angular_unit_format: 0, // Decimal degrees
             angular_unit_precision: 0,
-            insertion_units: 0,     // Unitless
+            insertion_units: 0, // Unitless
             attribute_visibility: 1,
             point_display_mode: 0,
-            user_int1: 0, user_int2: 0, user_int3: 0, user_int4: 0, user_int5: 0,
+            user_int1: 0,
+            user_int2: 0,
+            user_int3: 0,
+            user_int4: 0,
+            user_int5: 0,
             coords_mode: 2,
             object_snap_mode: 0,
             pick_style: 1,
@@ -729,7 +733,7 @@ impl Default for HeaderVariables {
             intersection_color: 257,
             dimension_associativity: 2,
             project_name: String::new(),
-            
+
             // Scale/size defaults
             linetype_scale: 1.0,
             text_height: 2.5,
@@ -752,7 +756,11 @@ impl Default for HeaderVariables {
             paper_elevation: 0.0,
             facet_resolution: 0.5,
             multiline_scale: 1.0,
-            user_real1: 0.0, user_real2: 0.0, user_real3: 0.0, user_real4: 0.0, user_real5: 0.0,
+            user_real1: 0.0,
+            user_real2: 0.0,
+            user_real3: 0.0,
+            user_real4: 0.0,
+            user_real5: 0.0,
             viewport_scale_factor: 0.0,
             current_annotation_scale: "1:1".to_string(),
             annotation_scale_value: 1.0,
@@ -772,7 +780,7 @@ impl Default for HeaderVariables {
             lens_length: 50.0,
             camera_height: 0.0,
             camera_display: false,
-            
+
             // Current entity settings
             current_entity_color: Color::ByLayer,
             current_line_weight: -1, // ByLayer
@@ -784,7 +792,7 @@ impl Default for HeaderVariables {
             extended_names: true,
             plotstyle_mode: true,
             ole_startup: false,
-            
+
             // Dimension variables
             dim_scale: 1.0,
             dim_arrow_size: 0.18,
@@ -847,21 +855,21 @@ impl Default for HeaderVariables {
             dim_arrow_block1: String::new(),
             dim_arrow_block2: String::new(),
             dim_leader_arrow_block: String::new(),
-            
+
             // Extents and limits - Model space
             model_space_insertion_base: Vector3::ZERO,
             model_space_extents_min: Vector3::new(1e20, 1e20, 1e20),
             model_space_extents_max: Vector3::new(-1e20, -1e20, -1e20),
             model_space_limits_min: Vector2::new(0.0, 0.0),
             model_space_limits_max: Vector2::new(0.0, 0.0),
-            
+
             // Extents and limits - Paper space
             paper_space_insertion_base: Vector3::ZERO,
             paper_space_extents_min: Vector3::new(1e20, 1e20, 1e20),
             paper_space_extents_max: Vector3::new(-1e20, -1e20, -1e20),
             paper_space_limits_min: Vector2::new(0.0, 0.0),
             paper_space_limits_max: Vector2::new(0.0, 0.0),
-            
+
             // UCS settings
             ucs_base: String::new(),
             model_space_ucs_name: String::new(),
@@ -876,7 +884,7 @@ impl Default for HeaderVariables {
             ucs_ortho_view: 0,
             paper_ucs_ortho_ref: Handle::NULL,
             paper_ucs_ortho_view: 0,
-            
+
             // Handles
             handle_seed: 1,
             current_layer_handle: Handle::NULL,
@@ -892,9 +900,9 @@ impl Default for HeaderVariables {
             dim_arrow_block_handle: Handle::NULL,
             dim_arrow_block1_handle: Handle::NULL,
             dim_arrow_block2_handle: Handle::NULL,
-            dim_line_weight: -2,      // ByBlock
-            dim_ext_line_weight: -2,  // ByBlock
-            
+            dim_line_weight: -2,     // ByBlock
+            dim_ext_line_weight: -2, // ByBlock
+
             // Table control handles
             block_control_handle: Handle::NULL,
             layer_control_handle: Handle::NULL,
@@ -907,7 +915,7 @@ impl Default for HeaderVariables {
             dimstyle_control_handle: Handle::NULL,
             vpent_hdr_control_handle: Handle::NULL,
             current_vx_handle: Handle::NULL,
-            
+
             // Dictionary handles
             named_objects_dict_handle: Handle::NULL,
             acad_group_dict_handle: Handle::NULL,
@@ -918,20 +926,20 @@ impl Default for HeaderVariables {
             acad_material_dict_handle: Handle::NULL,
             acad_color_dict_handle: Handle::NULL,
             acad_visualstyle_dict_handle: Handle::NULL,
-            
+
             // Block record handles
             model_space_block_handle: Handle::NULL,
             paper_space_block_handle: Handle::NULL,
             bylayer_linetype_handle: Handle::NULL,
             byblock_linetype_handle: Handle::NULL,
             continuous_linetype_handle: Handle::NULL,
-            
+
             // Date/time
             create_date_julian: 0.0,
             update_date_julian: 0.0,
             total_editing_time: 0.0,
             user_elapsed_time: 0.0,
-            
+
             // Metadata
             fingerprint_guid: String::new(),
             version_guid: String::new(),
@@ -940,7 +948,7 @@ impl Default for HeaderVariables {
             last_saved_by: String::new(),
             hyperlink_base: String::new(),
             stylesheet: String::new(),
-            
+
             // Misc
             measurement: 0,
             proxy_graphics: 1,
@@ -1029,41 +1037,41 @@ pub struct SummaryInfo {
 pub struct CadDocument {
     /// Document version
     pub version: DxfVersion,
-    
+
     /// AutoCAD maintenance release version (from file header byte 0x0B).
     ///
     /// Used to determine encoding variations within a major DWG version.
     /// For AC1024 (R2010), maintenance > 3 triggers an extra 4-byte RL field
     /// in the Classes and Header sections.  Preserved during roundtrip.
     pub maintenance_version: u8,
-    
+
     /// Header variables containing drawing settings
     pub header: HeaderVariables,
-    
+
     /// Layer table
     pub layers: Table<Layer>,
-    
+
     /// Line type table
     pub line_types: Table<LineType>,
-    
+
     /// Text style table
     pub text_styles: Table<TextStyle>,
-    
+
     /// Block record table
     pub block_records: Table<BlockRecord>,
-    
+
     /// Dimension style table
     pub dim_styles: Table<DimStyle>,
-    
+
     /// Application ID table
     pub app_ids: Table<AppId>,
-    
+
     /// View table
     pub views: Table<View>,
-    
+
     /// Viewport table
     pub vports: Table<VPort>,
-    
+
     /// UCS table
     pub ucss: Table<Ucs>,
 
@@ -1073,7 +1081,7 @@ pub struct CadDocument {
     /// Ordered soft-owner references stored by VX_CONTROL. This preserves
     /// dangling records and source ordering as well as the decoded records.
     pub vx_control_entries: Vec<Handle>,
-    
+
     /// DXF class definitions (CLASSES section)
     pub classes: DxfClassCollection,
 
@@ -1190,6 +1198,11 @@ pub struct CadDocument {
     /// captured. Used to reject stale section passthrough after geometry edits.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) raw_acds_fingerprint: Vec<(u64, usize, u64)>,
+
+    /// Non-entity objects whose source record points into the AcDs data store.
+    /// Retained for same-version saves together with the original section.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) dwg_data_store_handles: HashSet<Handle>,
 
     /// Section-view style (`AcDbSectionViewStyle`) display fields, decoded from
     /// the DWG for rendering section marks (arrow size, label height, …). A file
@@ -1363,6 +1376,7 @@ impl CadDocument {
             acis_sab_handles: Vec::new(),
             raw_acds_data: None,
             raw_acds_fingerprint: Vec::new(),
+            dwg_data_store_handles: HashSet::new(),
             section_view_style: None,
             view_rep_refs: std::collections::HashMap::new(),
             section_view_reps: Vec::new(),
@@ -1370,7 +1384,7 @@ impl CadDocument {
             // Table handles are well-known fixed values used by AutoCAD
             next_handle: 0x10,
         };
-        
+
         // Initialize with standard entries
         doc.initialize_defaults();
         doc
@@ -1458,7 +1472,9 @@ impl CadDocument {
                         }
                     }
                     if changed {
-                        if let Some(handle) = app_handles.get(&normalize_name(&record.application_name)) {
+                        if let Some(handle) =
+                            app_handles.get(&normalize_name(&record.application_name))
+                        {
                             changed_apps.push(*handle);
                         }
                     }
@@ -1497,7 +1513,13 @@ impl CadDocument {
         }
         // Unsupported non-graphical objects preserved as raw bytes.
         let raw_objects = self.objects.values().any(|o| {
-            matches!(o, crate::objects::ObjectType::Unknown { raw_dwg_data: Some(_), .. })
+            matches!(
+                o,
+                crate::objects::ObjectType::Unknown {
+                    raw_dwg_data: Some(_),
+                    ..
+                }
+            )
         });
         if raw_objects {
             return true;
@@ -1533,15 +1555,19 @@ impl CadDocument {
         // Without this, Table<T>.handle() returns Handle::NULL and every
         // table control is written with handle 0, not registered in the
         // handle map, and unreachable by readers → "invalid data" for all objects.
-        self.block_records.set_handle(self.header.block_control_handle);
+        self.block_records
+            .set_handle(self.header.block_control_handle);
         self.layers.set_handle(self.header.layer_control_handle);
-        self.text_styles.set_handle(self.header.style_control_handle);
-        self.line_types.set_handle(self.header.linetype_control_handle);
+        self.text_styles
+            .set_handle(self.header.style_control_handle);
+        self.line_types
+            .set_handle(self.header.linetype_control_handle);
         self.views.set_handle(self.header.view_control_handle);
         self.ucss.set_handle(self.header.ucs_control_handle);
         self.vports.set_handle(self.header.vport_control_handle);
         self.app_ids.set_handle(self.header.appid_control_handle);
-        self.dim_styles.set_handle(self.header.dimstyle_control_handle);
+        self.dim_styles
+            .set_handle(self.header.dimstyle_control_handle);
         self.vx_table
             .set_handle(self.header.vpent_hdr_control_handle);
 
@@ -1623,7 +1649,7 @@ impl CadDocument {
         let mut active_vport = VPort::active();
         active_vport.set_handle(self.allocate_handle());
         self.vports.add(active_vport).ok();
-        
+
         // ── Standard dictionary objects (required for DWG format) ────
         // Allocate handles for core dictionaries
         self.header.acad_group_dict_handle = self.allocate_handle();
@@ -1665,33 +1691,47 @@ impl CadDocument {
         root_dict.add_entry("ACAD_GROUP", self.header.acad_group_dict_handle);
         root_dict.add_entry("ACAD_MLINESTYLE", self.header.acad_mlinestyle_dict_handle);
         root_dict.add_entry("ACAD_LAYOUT", self.header.acad_layout_dict_handle);
-        root_dict.add_entry("ACAD_PLOTSETTINGS", self.header.acad_plotsettings_dict_handle);
-        root_dict.add_entry("ACAD_PLOTSTYLENAME", self.header.acad_plotstylename_dict_handle);
+        root_dict.add_entry(
+            "ACAD_PLOTSETTINGS",
+            self.header.acad_plotsettings_dict_handle,
+        );
+        root_dict.add_entry(
+            "ACAD_PLOTSTYLENAME",
+            self.header.acad_plotstylename_dict_handle,
+        );
         root_dict.add_entry("ACAD_MATERIAL", self.header.acad_material_dict_handle);
         root_dict.add_entry("ACAD_COLOR", self.header.acad_color_dict_handle);
         root_dict.add_entry("ACAD_VISUALSTYLE", self.header.acad_visualstyle_dict_handle);
         root_dict.add_entry("ACAD_MLEADERSTYLE", mleaderstyle_dict_handle);
         root_dict.add_entry("ACAD_TABLESTYLE", tablestyle_dict_handle);
-        self.objects.insert(root_dict_handle, ObjectType::Dictionary(root_dict));
+        self.objects
+            .insert(root_dict_handle, ObjectType::Dictionary(root_dict));
 
         // -- ACAD_GROUP dictionary (empty) --
         let mut group_dict = crate::objects::Dictionary::new();
         group_dict.handle = self.header.acad_group_dict_handle;
         group_dict.owner = root_dict_handle;
-        self.objects.insert(group_dict.handle, ObjectType::Dictionary(group_dict));
+        self.objects
+            .insert(group_dict.handle, ObjectType::Dictionary(group_dict));
 
         // -- ACAD_MLINESTYLE dictionary (contains "Standard") --
         let mut mlinestyle_dict = crate::objects::Dictionary::new();
         mlinestyle_dict.handle = self.header.acad_mlinestyle_dict_handle;
         mlinestyle_dict.owner = root_dict_handle;
         mlinestyle_dict.add_entry("Standard", mlinestyle_std_handle);
-        self.objects.insert(mlinestyle_dict.handle, ObjectType::Dictionary(mlinestyle_dict));
+        self.objects.insert(
+            mlinestyle_dict.handle,
+            ObjectType::Dictionary(mlinestyle_dict),
+        );
 
         // -- MLineStyle Standard object --
         let mut mlinestyle_std = crate::objects::MLineStyle::standard();
         mlinestyle_std.handle = mlinestyle_std_handle;
         mlinestyle_std.owner = self.header.acad_mlinestyle_dict_handle;
-        self.objects.insert(mlinestyle_std_handle, ObjectType::MLineStyle(mlinestyle_std));
+        self.objects.insert(
+            mlinestyle_std_handle,
+            ObjectType::MLineStyle(mlinestyle_std),
+        );
 
         // -- ACAD_MLEADERSTYLE dictionary (contains "Standard") --
         let mut mleaderstyle_dict = crate::objects::Dictionary::new();
@@ -1727,10 +1767,7 @@ impl CadDocument {
         let mut tablestyle_std = crate::objects::TableStyle::standard();
         tablestyle_std.handle = tablestyle_std_handle;
         tablestyle_std.owner_handle = tablestyle_dict_handle;
-        tablestyle_std.set_all_text_styles(
-            "Standard",
-            Some(self.header.current_text_style_handle),
-        );
+        tablestyle_std.set_all_text_styles("Standard", Some(self.header.current_text_style_handle));
         self.objects.insert(
             tablestyle_std_handle,
             ObjectType::TableStyle(tablestyle_std),
@@ -1742,7 +1779,8 @@ impl CadDocument {
         layout_dict.owner = root_dict_handle;
         layout_dict.add_entry("Model", model_layout_handle);
         layout_dict.add_entry("Layout1", paper_layout_handle);
-        self.objects.insert(layout_dict.handle, ObjectType::Dictionary(layout_dict));
+        self.objects
+            .insert(layout_dict.handle, ObjectType::Dictionary(layout_dict));
 
         // -- Layout: Model --
         let mut model_layout = crate::objects::Layout::new("Model");
@@ -1751,7 +1789,8 @@ impl CadDocument {
         model_layout.tab_order = 0;
         model_layout.flags = 1; // model space
         model_layout.block_record = self.header.model_space_block_handle;
-        self.objects.insert(model_layout_handle, ObjectType::Layout(model_layout));
+        self.objects
+            .insert(model_layout_handle, ObjectType::Layout(model_layout));
 
         // -- Layout: Layout1 (paper space) --
         let mut paper_layout = crate::objects::Layout::new("Layout1");
@@ -1760,45 +1799,62 @@ impl CadDocument {
         paper_layout.tab_order = 1;
         paper_layout.block_record = self.header.paper_space_block_handle;
 
-        self.objects.insert(paper_layout_handle, ObjectType::Layout(paper_layout));
+        self.objects
+            .insert(paper_layout_handle, ObjectType::Layout(paper_layout));
 
         // -- ACAD_PLOTSETTINGS dictionary (empty) --
         let mut plotsettings_dict = crate::objects::Dictionary::new();
         plotsettings_dict.handle = self.header.acad_plotsettings_dict_handle;
         plotsettings_dict.owner = root_dict_handle;
-        self.objects.insert(plotsettings_dict.handle, ObjectType::Dictionary(plotsettings_dict));
+        self.objects.insert(
+            plotsettings_dict.handle,
+            ObjectType::Dictionary(plotsettings_dict),
+        );
 
         // -- ACAD_MATERIAL dictionary (empty, required R2004+) --
         let mut material_dict = crate::objects::Dictionary::new();
         material_dict.handle = self.header.acad_material_dict_handle;
         material_dict.owner = root_dict_handle;
-        self.objects.insert(material_dict.handle, ObjectType::Dictionary(material_dict));
+        self.objects
+            .insert(material_dict.handle, ObjectType::Dictionary(material_dict));
 
         // -- ACAD_COLOR dictionary (empty, required R2004+) --
         let mut color_dict = crate::objects::Dictionary::new();
         color_dict.handle = self.header.acad_color_dict_handle;
         color_dict.owner = root_dict_handle;
-        self.objects.insert(color_dict.handle, ObjectType::Dictionary(color_dict));
+        self.objects
+            .insert(color_dict.handle, ObjectType::Dictionary(color_dict));
 
         // -- ACAD_VISUALSTYLE dictionary (empty, required R2007+) --
         let mut visualstyle_dict = crate::objects::Dictionary::new();
         visualstyle_dict.handle = self.header.acad_visualstyle_dict_handle;
         visualstyle_dict.owner = root_dict_handle;
-        self.objects.insert(visualstyle_dict.handle, ObjectType::Dictionary(visualstyle_dict));
+        self.objects.insert(
+            visualstyle_dict.handle,
+            ObjectType::Dictionary(visualstyle_dict),
+        );
 
         // -- ACAD_PLOTSTYLENAME dictionary (DictionaryWithDefault with PlaceHolder) --
         let mut plotstyle_dict = crate::objects::DictionaryWithDefault::new();
         plotstyle_dict.handle = self.header.acad_plotstylename_dict_handle;
         plotstyle_dict.owner = root_dict_handle;
         plotstyle_dict.default_handle = plotstylename_placeholder_handle;
-        plotstyle_dict.entries.push(("Normal".to_string(), plotstylename_placeholder_handle));
-        self.objects.insert(plotstyle_dict.handle, ObjectType::DictionaryWithDefault(plotstyle_dict));
+        plotstyle_dict
+            .entries
+            .push(("Normal".to_string(), plotstylename_placeholder_handle));
+        self.objects.insert(
+            plotstyle_dict.handle,
+            ObjectType::DictionaryWithDefault(plotstyle_dict),
+        );
 
         // -- PlaceHolder for ACAD_PLOTSTYLENAME "Normal" --
         let mut placeholder = crate::objects::PlaceHolder::new();
         placeholder.handle = plotstylename_placeholder_handle;
         placeholder.owner = self.header.acad_plotstylename_dict_handle;
-        self.objects.insert(plotstylename_placeholder_handle, ObjectType::PlaceHolder(placeholder));
+        self.objects.insert(
+            plotstylename_placeholder_handle,
+            ObjectType::PlaceHolder(placeholder),
+        );
 
         // Register standard DXF classes required by the DWG format.
         // For pre-R2004, "unlisted" object types (LAYOUT, PLOTSETTINGS, etc.)
@@ -1978,6 +2034,56 @@ impl CadDocument {
         handle
     }
 
+    /// Advance the allocator above every stored record identity.
+    ///
+    /// File readers populate tables and objects through several paths, not all
+    /// of which call `allocate_handle()`. Synchronizing before a repair pass
+    /// prevents freshly assigned handles from colliding with parsed records.
+    pub(crate) fn synchronize_handle_allocator(&mut self) {
+        let mut next_handle = self.next_handle;
+        macro_rules! include_handle {
+            ($handle:expr) => {{
+                next_handle = next_handle.max($handle.value().saturating_add(1));
+            }};
+        }
+        macro_rules! include_table {
+            ($table:expr) => {{
+                include_handle!($table.handle());
+                for entry in $table.iter() {
+                    include_handle!(entry.handle());
+                }
+            }};
+        }
+
+        include_table!(self.layers);
+        include_table!(self.line_types);
+        include_table!(self.text_styles);
+        include_table!(self.dim_styles);
+        include_table!(self.app_ids);
+        include_table!(self.views);
+        include_table!(self.vports);
+        include_table!(self.ucss);
+        include_table!(self.vx_table);
+        include_table!(self.block_records);
+
+        for record in self.block_records.iter() {
+            include_handle!(record.block_entity_handle);
+            include_handle!(record.block_end_handle);
+            for handle in &record.entity_handles {
+                include_handle!(*handle);
+            }
+        }
+        for entity in &self.entities {
+            include_handle!(entity.common().handle);
+        }
+        for handle in self.objects.keys() {
+            include_handle!(*handle);
+        }
+
+        self.next_handle = next_handle;
+        self.header.handle_seed = self.header.handle_seed.max(next_handle);
+    }
+
     /// Get the next handle value (without allocating)
     pub fn next_handle(&self) -> u64 {
         self.next_handle
@@ -1994,11 +2100,7 @@ impl CadDocument {
         .filter(|value| value.is_valid())
     }
 
-    fn set_entity_history_handle(
-        &mut self,
-        handle: Handle,
-        history: Option<Handle>,
-    ) -> bool {
+    fn set_entity_history_handle(&mut self, handle: Handle, history: Option<Handle>) -> bool {
         match self.get_entity_mut(handle) {
             Some(EntityType::Solid3D(value)) => value.history_handle = history,
             Some(EntityType::Region(value)) => value.history_handle = history,
@@ -2033,9 +2135,10 @@ impl CadDocument {
         nodes.sort_by_key(|handle| {
             let step = match self.objects.get(handle) {
                 Some(ObjectType::DynamicBlock(value)) => match &value.data {
-                    DynamicBlockData::SolidHistoryNode(operation) => {
-                        operation.base().map(|base| base.step_id).unwrap_or(i32::MAX)
-                    }
+                    DynamicBlockData::SolidHistoryNode(operation) => operation
+                        .base()
+                        .map(|base| base.step_id)
+                        .unwrap_or(i32::MAX),
                     _ => i32::MAX,
                 },
                 _ => i32::MAX,
@@ -2045,10 +2148,7 @@ impl CadDocument {
         Some(SolidHistoryGraph { root, nodes })
     }
 
-    pub fn solid_history_operation(
-        &self,
-        entity: Handle,
-    ) -> Option<&SolidHistoryOperation> {
+    pub fn solid_history_operation(&self, entity: Handle) -> Option<&SolidHistoryOperation> {
         let graph = self.solid_history_graph(entity)?;
         let history_node_id = match self.objects.get(&graph.root)? {
             ObjectType::DynamicBlock(value) => match &value.data {
@@ -2068,19 +2168,101 @@ impl CadDocument {
                 _ => None,
             })
             .find(|operation| {
-                operation
-                    .base()
-                    .is_some_and(|base| base.step_id == history_node_id)
-            })
-            .or_else(|| {
-                graph.nodes.last().and_then(|handle| match self.objects.get(handle) {
-                    Some(ObjectType::DynamicBlock(value)) => match &value.data {
-                        DynamicBlockData::SolidHistoryNode(operation) => Some(operation),
-                        _ => None,
-                    },
-                    _ => None,
+                operation.base().is_some_and(|base| {
+                    if base.eval.node_id > 0 {
+                        base.eval.node_id == history_node_id
+                    } else {
+                        base.step_id == history_node_id
+                    }
                 })
             })
+            .or_else(|| {
+                graph
+                    .nodes
+                    .last()
+                    .and_then(|handle| match self.objects.get(handle) {
+                        Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                            DynamicBlockData::SolidHistoryNode(operation) => Some(operation),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+            })
+    }
+
+    /// Return the active solid-history chain in root-to-active order.
+    ///
+    /// Parent evaluation ids, rather than step ordering, determine the chain.
+    /// Missing, cyclic, or ambiguous links make the graph unusable.
+    pub fn solid_history_operations(&self, entity: Handle) -> Option<Vec<SolidHistoryOperation>> {
+        let graph = self.solid_history_graph(entity)?;
+        let active_step = match self.objects.get(&graph.root)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistory(history) => history.history_node_id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let operations = graph
+            .nodes
+            .iter()
+            .filter_map(|handle| match self.objects.get(handle) {
+                Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                    DynamicBlockData::SolidHistoryNode(operation) => Some(operation),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut active_matches = operations.iter().copied().filter(|operation| {
+            operation.base().is_some_and(|base| {
+                if base.eval.node_id > 0 {
+                    base.eval.node_id == active_step
+                } else {
+                    base.step_id == active_step
+                }
+            })
+        });
+        let mut current = active_matches.next()?;
+        if active_matches.next().is_some() {
+            return None;
+        }
+
+        let mut reversed = Vec::new();
+        let mut visited = Vec::new();
+        loop {
+            let base = current.base()?;
+            let node_id = if base.eval.node_id > 0 {
+                base.eval.node_id
+            } else {
+                base.step_id
+            };
+            let parent_id = base.eval.parent_id;
+            if node_id <= 0 || visited.contains(&node_id) {
+                return None;
+            }
+            visited.push(node_id);
+            reversed.push((*current).clone());
+            if parent_id == 0 {
+                break;
+            }
+            let mut parent_matches = operations.iter().copied().filter(|operation| {
+                operation.base().is_some_and(|candidate| {
+                    let node_id = if candidate.eval.node_id > 0 {
+                        candidate.eval.node_id
+                    } else {
+                        candidate.step_id
+                    };
+                    node_id == parent_id
+                })
+            });
+            current = parent_matches.next()?;
+            if parent_matches.next().is_some() {
+                return None;
+            }
+        }
+        reversed.reverse();
+        Some(reversed)
     }
 
     pub fn create_solid_history(
@@ -2110,14 +2292,11 @@ impl CadDocument {
             ));
         }
         if !self.classes.contains(dxf_name) {
-            self.classes.add_or_update(crate::classes::DxfClass::new(
-                dxf_name,
-                cpp_class_name,
-            ));
+            self.classes
+                .add_or_update(crate::classes::DxfClass::new(dxf_name, cpp_class_name));
         }
 
-        let mut root_object =
-            DynamicBlockObject::new("ACSH_HISTORY_CLASS", "AcDbShHistory");
+        let mut root_object = DynamicBlockObject::new("ACSH_HISTORY_CLASS", "AcDbShHistory");
         root_object.handle = root;
         root_object.owner = entity;
         root_object.data = DynamicBlockData::SolidHistory(SolidHistory {
@@ -2132,8 +2311,10 @@ impl CadDocument {
         node_object.handle = node;
         node_object.owner = root;
         node_object.data = DynamicBlockData::SolidHistoryNode(operation);
-        self.objects.insert(root, ObjectType::DynamicBlock(root_object));
-        self.objects.insert(node, ObjectType::DynamicBlock(node_object));
+        self.objects
+            .insert(root, ObjectType::DynamicBlock(root_object));
+        self.objects
+            .insert(node, ObjectType::DynamicBlock(node_object));
         if !self.set_entity_history_handle(entity, Some(root)) {
             self.objects.remove(&root);
             self.objects.remove(&node);
@@ -2143,6 +2324,87 @@ impl CadDocument {
             root,
             nodes: vec![node],
         })
+    }
+
+    /// Append a new operation to an entity's existing solid-history graph.
+    ///
+    /// The existing root and nodes remain intact. The appended operation is
+    /// assigned a new step/evaluation id, linked to the active node, and made
+    /// the graph's active operation.
+    pub fn append_solid_history(
+        &mut self,
+        entity: Handle,
+        mut operation: SolidHistoryOperation,
+    ) -> Option<SolidHistoryGraph> {
+        let (dxf_name, cpp_class_name) = operation.class_names()?;
+        self.solid_history_operations(entity)?;
+        let mut graph = self.solid_history_graph(entity)?;
+        let active_step = match self.objects.get(&graph.root)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistory(history) => history.history_node_id,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let bases = graph
+            .nodes
+            .iter()
+            .filter_map(|handle| match self.objects.get(handle) {
+                Some(ObjectType::DynamicBlock(value)) => match &value.data {
+                    DynamicBlockData::SolidHistoryNode(operation) => operation.base(),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut parent_matches = bases.iter().copied().filter(|base| {
+            if base.eval.node_id > 0 {
+                base.eval.node_id == active_step
+            } else {
+                base.step_id == active_step
+            }
+        });
+        let parent = parent_matches.next()?;
+        if parent_matches.next().is_some() {
+            return None;
+        }
+        let parent_node_id = if parent.eval.node_id > 0 {
+            parent.eval.node_id
+        } else {
+            parent.step_id
+        };
+        if parent_node_id <= 0 {
+            return None;
+        }
+        let step_id = bases
+            .iter()
+            .flat_map(|base| [base.step_id.max(0), base.eval.node_id.max(0)])
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)?;
+        let base = operation.base_mut()?;
+        base.step_id = step_id;
+        base.eval.node_id = step_id;
+        base.eval.parent_id = parent_node_id;
+
+        if !self.classes.contains(dxf_name) {
+            self.classes
+                .add_or_update(crate::classes::DxfClass::new(dxf_name, cpp_class_name));
+        }
+        let node = self.allocate_handle();
+        let mut node_object = DynamicBlockObject::new(dxf_name, cpp_class_name);
+        node_object.handle = node;
+        node_object.owner = graph.root;
+        node_object.data = DynamicBlockData::SolidHistoryNode(operation);
+        self.objects
+            .insert(node, ObjectType::DynamicBlock(node_object));
+        if let Some(ObjectType::DynamicBlock(value)) = self.objects.get_mut(&graph.root) {
+            if let DynamicBlockData::SolidHistory(history) = &mut value.data {
+                history.history_node_id = step_id;
+            }
+        }
+        graph.nodes.push(node);
+        Some(graph)
     }
 
     pub fn update_solid_history(
@@ -2165,9 +2427,15 @@ impl CadDocument {
             .copied()
             .find(|handle| match self.objects.get(handle) {
                 Some(ObjectType::DynamicBlock(value)) => match &value.data {
-                    DynamicBlockData::SolidHistoryNode(current) => current
-                        .base()
-                        .is_some_and(|base| base.step_id == current_id),
+                    DynamicBlockData::SolidHistoryNode(current) => {
+                        current.base().is_some_and(|base| {
+                            if base.eval.node_id > 0 {
+                                base.eval.node_id == current_id
+                            } else {
+                                base.step_id == current_id
+                            }
+                        })
+                    }
                     _ => false,
                 },
                 _ => false,
@@ -2191,15 +2459,97 @@ impl CadDocument {
         let step_id = base.step_id;
 
         if !self.classes.contains(dxf_name) {
-            self.classes.add_or_update(crate::classes::DxfClass::new(
-                dxf_name,
-                cpp_class_name,
-            ));
+            self.classes
+                .add_or_update(crate::classes::DxfClass::new(dxf_name, cpp_class_name));
         }
         if let Some(ObjectType::DynamicBlock(value)) = self.objects.get_mut(&graph.root) {
             if let DynamicBlockData::SolidHistory(history) = &mut value.data {
                 history.history_node_id = step_id;
             }
+        }
+        let ObjectType::DynamicBlock(value) = self.objects.get_mut(&node)? else {
+            return None;
+        };
+        value.dxf_name = dxf_name.to_string();
+        value.cpp_class_name = cpp_class_name.to_string();
+        let DynamicBlockData::SolidHistoryNode(current) = &mut value.data else {
+            return None;
+        };
+        Some(std::mem::replace(current, operation))
+    }
+
+    /// Replace one existing operation in the active history chain without
+    /// changing which node is active.
+    ///
+    /// The operation's evaluation node id identifies the node to replace. Its
+    /// step id is used for older histories that do not carry evaluation ids.
+    pub fn update_solid_history_step(
+        &mut self,
+        entity: Handle,
+        mut operation: SolidHistoryOperation,
+    ) -> Option<SolidHistoryOperation> {
+        let (dxf_name, cpp_class_name) = operation.class_names()?;
+        let chain = self.solid_history_operations(entity)?;
+        let graph = self.solid_history_graph(entity)?;
+        let replacement_base = operation.base()?;
+        let replacement_id = if replacement_base.eval.node_id > 0 {
+            replacement_base.eval.node_id
+        } else {
+            replacement_base.step_id
+        };
+        if replacement_id <= 0 {
+            return None;
+        }
+        let mut chain_matches = chain.iter().filter(|current| {
+            current.base().is_some_and(|base| {
+                let node_id = if base.eval.node_id > 0 {
+                    base.eval.node_id
+                } else {
+                    base.step_id
+                };
+                node_id == replacement_id
+            })
+        });
+        chain_matches.next()?;
+        if chain_matches.next().is_some() {
+            return None;
+        }
+        let mut node_matches = graph.nodes.iter().copied().filter(|handle| {
+            let Some(ObjectType::DynamicBlock(value)) = self.objects.get(handle) else {
+                return false;
+            };
+            let DynamicBlockData::SolidHistoryNode(current) = &value.data else {
+                return false;
+            };
+            current.base().is_some_and(|base| {
+                let node_id = if base.eval.node_id > 0 {
+                    base.eval.node_id
+                } else {
+                    base.step_id
+                };
+                node_id == replacement_id
+            })
+        });
+        let node = node_matches.next()?;
+        if node_matches.next().is_some() {
+            return None;
+        }
+
+        let current_base = match self.objects.get(&node)? {
+            ObjectType::DynamicBlock(value) => match &value.data {
+                DynamicBlockData::SolidHistoryNode(current) => current.base()?.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let replacement_base = operation.base_mut()?;
+        replacement_base.step_id = current_base.step_id;
+        replacement_base.eval.node_id = current_base.eval.node_id;
+        replacement_base.eval.parent_id = current_base.eval.parent_id;
+
+        if !self.classes.contains(dxf_name) {
+            self.classes
+                .add_or_update(crate::classes::DxfClass::new(dxf_name, cpp_class_name));
         }
         let ObjectType::DynamicBlock(value) = self.objects.get_mut(&node)? else {
             return None;
@@ -2276,10 +2626,7 @@ impl CadDocument {
         })
     }
 
-    pub fn delete_solid_history(
-        &mut self,
-        entity: Handle,
-    ) -> Vec<(Handle, ObjectType)> {
+    pub fn delete_solid_history(&mut self, entity: Handle) -> Vec<(Handle, ObjectType)> {
         let Some(root) = self.entity_history_handle(entity) else {
             return Vec::new();
         };
@@ -2315,7 +2662,7 @@ impl CadDocument {
             // collide with it.
             if h.value() >= self.next_handle {
                 self.next_handle = h.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
         };
@@ -2341,7 +2688,10 @@ impl CadDocument {
         // AttributeEntity is a sub-entity owned by INSERT, not a direct
         // block-record child.  Never add it to entity_handles.
         // Block/BlockEnd are structural markers with separate handle fields.
-        let is_excluded = matches!(&entity, EntityType::AttributeEntity(_) | EntityType::Block(_) | EntityType::BlockEnd(_));
+        let is_excluded = matches!(
+            &entity,
+            EntityType::AttributeEntity(_) | EntityType::Block(_) | EntityType::BlockEnd(_)
+        );
 
         // Route entity handle to the correct block record based on owner handle.
         let owner = entity.common().owner_handle;
@@ -2389,7 +2739,7 @@ impl CadDocument {
             let handle = entity.common().handle;
             if handle.value() >= self.next_handle {
                 self.next_handle = handle.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             handle
         };
@@ -2399,10 +2749,7 @@ impl CadDocument {
         handle
     }
 
-    pub(crate) fn add_loaded_entity_batch(
-        &mut self,
-        entities: &mut Vec<Arc<EntityType>>,
-    ) {
+    pub(crate) fn add_loaded_entity_batch(&mut self, entities: &mut Vec<Arc<EntityType>>) {
         if entities.is_empty() {
             return;
         }
@@ -2486,7 +2833,7 @@ impl CadDocument {
         self.record_entity_before(handle, None);
         if handle.value() >= self.next_handle {
             self.next_handle = handle.value() + 1;
-            self.header.handle_seed = self.next_handle;
+            self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
         }
         let idx = self.entities.len();
         self.entities.push(entity);
@@ -2566,10 +2913,7 @@ impl CadDocument {
                 _ => None,
             })
             .ok_or_else(|| {
-                crate::error::DxfError::Custom(format!(
-                    "Layout '{}' not found",
-                    layout_name
-                ))
+                crate::error::DxfError::Custom(format!("Layout '{}' not found", layout_name))
             })?;
 
         // Find the block record name for this handle
@@ -2588,15 +2932,13 @@ impl CadDocument {
         let is_viewport = matches!(&entity, EntityType::Viewport(_));
         let handle = self.add_entity_to_block(entity, &block_name)?;
         if is_viewport {
-            if let Some(ObjectType::Layout(layout)) =
-                self.objects.values_mut().find(|object| {
-                    matches!(
-                        object,
-                        ObjectType::Layout(layout)
-                            if layout.name == layout_name
-                    )
-                })
-            {
+            if let Some(ObjectType::Layout(layout)) = self.objects.values_mut().find(|object| {
+                matches!(
+                    object,
+                    ObjectType::Layout(layout)
+                        if layout.name == layout_name
+                )
+            }) {
                 if !layout.viewports.contains(&handle) {
                     layout.viewports.push(handle);
                 }
@@ -2614,11 +2956,7 @@ impl CadDocument {
     /// record.  Used internally by [`add_entity`](Self::add_entity),
     /// [`add_paper_space_entity`](Self::add_paper_space_entity), and
     /// [`add_entity_to_layout`](Self::add_entity_to_layout).
-    fn add_entity_to_block(
-        &mut self,
-        mut entity: EntityType,
-        block_name: &str,
-    ) -> Result<Handle> {
+    fn add_entity_to_block(&mut self, mut entity: EntityType, block_name: &str) -> Result<Handle> {
         // Allocate a handle if the entity doesn't have one
         let handle = if entity.common().handle.is_null() {
             let h = self.allocate_handle();
@@ -2628,7 +2966,7 @@ impl CadDocument {
             let h = entity.common().handle;
             if h.value() >= self.next_handle {
                 self.next_handle = h.value() + 1;
-                self.header.handle_seed = self.next_handle;
+                self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
         };
@@ -2704,9 +3042,10 @@ impl CadDocument {
     /// ```
     pub fn add_layout(&mut self, name: &str) -> Result<Handle> {
         // Check for duplicate layout name
-        let already_exists = self.objects.values().any(|obj| {
-            matches!(obj, ObjectType::Layout(l) if l.name == name)
-        });
+        let already_exists = self
+            .objects
+            .values()
+            .any(|obj| matches!(obj, ObjectType::Layout(l) if l.name == name));
         if already_exists {
             return Err(crate::error::DxfError::Custom(format!(
                 "Layout '{}' already exists",
@@ -2744,9 +3083,9 @@ impl CadDocument {
 
         // Link block record → layout
         block_record.layout = layout_handle;
-        self.block_records.add(block_record).map_err(|e| {
-            crate::error::DxfError::Custom(e)
-        })?;
+        self.block_records
+            .add(block_record)
+            .map_err(|e| crate::error::DxfError::Custom(e))?;
 
         // Create the overall paper space viewport (ID=1) for this layout.
         // Every paper space layout requires this entity.
@@ -2764,7 +3103,8 @@ impl CadDocument {
         }
         self.record_entity_before(overall_vp_handle, None);
         let idx = self.entities.len();
-        self.entities.push(Arc::new(EntityType::Viewport(overall_vp)));
+        self.entities
+            .push(Arc::new(EntityType::Viewport(overall_vp)));
         self.entity_index.insert(overall_vp_handle, idx);
 
         // Register in ACAD_LAYOUT dictionary
@@ -2775,7 +3115,8 @@ impl CadDocument {
         }
 
         // Store the Layout object
-        self.objects.insert(layout_handle, ObjectType::Layout(layout));
+        self.objects
+            .insert(layout_handle, ObjectType::Layout(layout));
 
         Ok(layout_handle)
     }
@@ -2794,6 +3135,13 @@ impl CadDocument {
     /// DWG reader records them so block base points etc. survive a round-trip)
     /// but are hidden here: they are block delimiters, not drawing entities, so
     /// a freshly-built document and a round-tripped one report the same set.
+    ///
+    /// Note that this covers *every* entity in the document, including geometry
+    /// stored inside block definitions (the BLOCKS section). CAD applications
+    /// only draw model-space (and paper-space) entities plus inserted block
+    /// references, so use [`model_space_entities`](Self::model_space_entities)
+    /// or [`entities_in_block`](Self::entities_in_block) to iterate the drawable
+    /// set (issue #52).
     pub fn entities(&self) -> impl Iterator<Item = &EntityType> {
         self.entities
             .iter()
@@ -2812,6 +3160,30 @@ impl CadDocument {
             }
         }
         self.entities.iter_mut().map(Arc::make_mut)
+    }
+
+    /// Iterate over the entities belonging to a named block record.
+    ///
+    /// This is the set of entities a CAD application associates with that
+    /// block — for `*Model_Space` (and the `*Paper_Space*` layout records)
+    /// this is what gets drawn; for regular block names it is the geometry of
+    /// the block *definition*, which is only rendered when the block is
+    /// INSERTed (issue #52).
+    pub fn entities_in_block(&self, block_name: &str) -> impl Iterator<Item = &EntityType> + '_ {
+        self.block_records
+            .get(block_name)
+            .into_iter()
+            .flat_map(|br| br.entity_handles.iter())
+            .filter_map(|handle| self.get_entity(*handle))
+    }
+
+    /// Iterate over the model-space entities — the primary drawable set.
+    ///
+    /// Equivalent to [`entities_in_block`](Self::entities_in_block) for
+    /// `*Model_Space`. Block-definition geometry and paper-space entities are
+    /// excluded, matching what CAD applications render by default (issue #52).
+    pub fn model_space_entities(&self) -> impl Iterator<Item = &EntityType> + '_ {
+        self.entities_in_block("*Model_Space")
     }
 
     /// Owner handle of a database object, for ownership-chain walks.
@@ -2893,14 +3265,16 @@ impl CadDocument {
         if matches!(self.objects.get(&owner), Some(ObjectType::Dictionary(_))) {
             return None;
         }
-        self.objects.iter().find_map(|(handle, object)| match object {
-            ObjectType::Dictionary(dictionary)
-                if dictionary.owner == owner && !handle.is_null() =>
-            {
-                Some(*handle)
-            }
-            _ => None,
-        })
+        self.objects
+            .iter()
+            .find_map(|(handle, object)| match object {
+                ObjectType::Dictionary(dictionary)
+                    if dictionary.owner == owner && !handle.is_null() =>
+                {
+                    Some(*handle)
+                }
+                _ => None,
+            })
     }
 
     /// Resolve a named XRecord in `owner`'s extension dictionary.
@@ -2957,9 +3331,7 @@ impl CadDocument {
             }
         };
 
-        if let Some(ObjectType::Dictionary(dictionary)) =
-            self.objects.get(&dictionary_handle)
-        {
+        if let Some(ObjectType::Dictionary(dictionary)) = self.objects.get(&dictionary_handle) {
             if let Some(handle) = dictionary.get(key) {
                 if matches!(self.objects.get(&handle), Some(ObjectType::XRecord(_))) {
                     return handle;
@@ -2973,9 +3345,7 @@ impl CadDocument {
         record.owner = dictionary_handle;
         self.objects
             .insert(record_handle, ObjectType::XRecord(record));
-        if let Some(ObjectType::Dictionary(dictionary)) =
-            self.objects.get_mut(&dictionary_handle)
-        {
+        if let Some(ObjectType::Dictionary(dictionary)) = self.objects.get_mut(&dictionary_handle) {
             if let Some((_, handle)) = dictionary
                 .entries
                 .iter_mut()
@@ -3017,21 +3387,20 @@ impl CadDocument {
     /// Project typed properties whose authoritative storage is a named
     /// XRecord onto their public object models.
     pub fn resolve_xrecord_backed_properties(&mut self) {
-        let advanced_values: HashMap<
-            Handle,
-            Vec<crate::objects::XRecordEntry>,
-        > = self
+        let advanced_values: HashMap<Handle, Vec<crate::objects::XRecordEntry>> = self
             .objects
             .values()
             .filter_map(|object| match object {
-                ObjectType::Dictionary(dictionary) => dictionary
-                    .get("ADVMATERIAL")
-                    .and_then(|record| match self.objects.get(&record) {
-                        Some(ObjectType::XRecord(xrecord)) => {
-                            Some((dictionary.handle, xrecord.entries.clone()))
+                ObjectType::Dictionary(dictionary) => {
+                    dictionary.get("ADVMATERIAL").and_then(|record| {
+                        match self.objects.get(&record) {
+                            Some(ObjectType::XRecord(xrecord)) => {
+                                Some((dictionary.handle, xrecord.entries.clone()))
+                            }
+                            _ => None,
                         }
-                        _ => None,
-                    }),
+                    })
+                }
                 _ => None,
             })
             .collect();
@@ -3091,15 +3460,9 @@ impl CadDocument {
     }
 
     /// Set the annotation scale attached to a viewport.
-    pub fn set_viewport_annotation_scale(
-        &mut self,
-        viewport: Handle,
-        scale: Handle,
-    ) {
+    pub fn set_viewport_annotation_scale(&mut self, viewport: Handle, scale: Handle) {
         self.ensure_xrecord(viewport, "ASDK_XREC_ANNOTATION_SCALE_INFO");
-        if let Some(record) =
-            self.xrecord_mut(viewport, "ASDK_XREC_ANNOTATION_SCALE_INFO")
-        {
+        if let Some(record) = self.xrecord_mut(viewport, "ASDK_XREC_ANNOTATION_SCALE_INFO") {
             record.set_annotation_scale_handle(scale);
         }
     }
@@ -3112,15 +3475,9 @@ impl CadDocument {
     }
 
     /// Replace Autodesk subdivision-mesh UVW coordinates.
-    pub fn set_mesh_texture_coordinates(
-        &mut self,
-        mesh: Handle,
-        coordinates: &[Vector3],
-    ) {
+    pub fn set_mesh_texture_coordinates(&mut self, mesh: Handle, coordinates: &[Vector3]) {
         self.ensure_xrecord(mesh, "ADSK_XREC_SUBDVERTEXTEXCOORDS");
-        if let Some(record) =
-            self.xrecord_mut(mesh, "ADSK_XREC_SUBDVERTEXTEXCOORDS")
-        {
+        if let Some(record) = self.xrecord_mut(mesh, "ADSK_XREC_SUBDVERTEXTEXCOORDS") {
             record.set_mesh_texture_coordinates(coordinates);
         }
     }
@@ -3134,26 +3491,20 @@ impl CadDocument {
         value: crate::objects::XRecordValue,
     ) -> bool {
         let (key, section, value_code) = match kind {
-            crate::objects::KnownXRecordKind::LayerViewportAlphaOverride => (
-                "ADSK_XREC_LAYER_ALPHA_OVR",
-                "ADSK_LYR_ALPHA_OVERRIDE",
-                440,
-            ),
-            crate::objects::KnownXRecordKind::LayerViewportColorOverride => (
-                "ADSK_XREC_LAYER_COLOR_OVR",
-                "ADSK_LYR_COLOR_OVERRIDE",
-                420,
-            ),
+            crate::objects::KnownXRecordKind::LayerViewportAlphaOverride => {
+                ("ADSK_XREC_LAYER_ALPHA_OVR", "ADSK_LYR_ALPHA_OVERRIDE", 440)
+            }
+            crate::objects::KnownXRecordKind::LayerViewportColorOverride => {
+                ("ADSK_XREC_LAYER_COLOR_OVR", "ADSK_LYR_COLOR_OVERRIDE", 420)
+            }
             crate::objects::KnownXRecordKind::LayerViewportLinetypeOverride => (
                 "ADSK_XREC_LAYER_LINETYPE_OVR",
                 "ADSK_LYR_LINETYPE_OVERRIDE",
                 343,
             ),
-            crate::objects::KnownXRecordKind::LayerViewportLineweightOverride => (
-                "ADSK_XREC_LAYER_LINEWT_OVR",
-                "ADSK_LYR_LINEWT_OVERRIDE",
-                91,
-            ),
+            crate::objects::KnownXRecordKind::LayerViewportLineweightOverride => {
+                ("ADSK_XREC_LAYER_LINEWT_OVR", "ADSK_LYR_LINEWT_OVERRIDE", 91)
+            }
             _ => return false,
         };
         let valid_value = match value_code {
@@ -3168,12 +3519,7 @@ impl CadDocument {
         }
         self.ensure_xrecord(layer, key);
         if let Some(record) = self.xrecord_mut(layer, key) {
-            record.set_layer_viewport_override(
-                section,
-                value_code,
-                viewport,
-                value,
-            );
+            record.set_layer_viewport_override(section, value_code, viewport, value);
             true
         } else {
             false
@@ -3255,10 +3601,7 @@ impl CadDocument {
     /// `AcDbBlockRepresentationData` object. A direct reference to the
     /// definition needs no representation object and falls back to the INSERT
     /// block-record handle.
-    pub fn dynamic_definition_for_insert(
-        &self,
-        insert_handle: Handle,
-    ) -> Option<Handle> {
+    pub fn dynamic_definition_for_insert(&self, insert_handle: Handle) -> Option<Handle> {
         let EntityType::Insert(insert) = self.get_entity(insert_handle)? else {
             return None;
         };
@@ -3279,8 +3622,84 @@ impl CadDocument {
 
     /// Resolve handle references after reading a DXF file.
     ///
-    /// This performs a simplified version of ACadSharp's two-phase build:
+    /// This performs a simplified version of the two-phase build:
     ///
+    /// Whether any symbol-table entry carries a NULL handle (typical for
+    /// programmatically added entries: `Layer::new` + `layers.add` never
+    /// assigns one).
+    pub(crate) fn has_null_table_entries(&self) -> bool {
+        macro_rules! has_null {
+            ($table:expr) => {
+                $table.iter().any(|e| e.handle().is_null())
+            };
+        }
+        has_null!(self.layers)
+            || has_null!(self.line_types)
+            || has_null!(self.text_styles)
+            || has_null!(self.dim_styles)
+            || has_null!(self.app_ids)
+            || has_null!(self.views)
+            || has_null!(self.vports)
+            || has_null!(self.ucss)
+            || has_null!(self.vx_table)
+            || has_null!(self.block_records)
+    }
+
+    /// Assigns fresh handles to every symbol-table entry that still carries
+    /// a NULL handle.
+    ///
+    /// DWG table records must each carry a real handle - a record written
+    /// with handle 0 is dropped by the handle map and disappears from the
+    /// re-opened drawing. Programmatically added entries (e.g.
+    /// `Layer::new` + `layers.add`) arrive without one, so the DWG writer
+    /// calls this on a cloned document before writing (issue #51/#64
+    /// class of bug).
+    pub fn assign_table_entry_handles(&mut self) {
+        let mut missing_handles: Vec<(&'static str, String)> = Vec::new();
+        macro_rules! collect_missing {
+            ($tag:literal, $table:expr) => {
+                for entry in $table.iter() {
+                    if entry.handle().is_null() {
+                        missing_handles.push(($tag, entry.name().to_string()));
+                    }
+                }
+            };
+        }
+        collect_missing!("layers", self.layers);
+        collect_missing!("line_types", self.line_types);
+        collect_missing!("text_styles", self.text_styles);
+        collect_missing!("dim_styles", self.dim_styles);
+        collect_missing!("app_ids", self.app_ids);
+        collect_missing!("views", self.views);
+        collect_missing!("vports", self.vports);
+        collect_missing!("ucss", self.ucss);
+        collect_missing!("vx_table", self.vx_table);
+        collect_missing!("block_records", self.block_records);
+
+        for (tag, name) in missing_handles.drain(..) {
+            let new = self.allocate_handle();
+            macro_rules! apply_missing {
+                ($t:literal, $table:expr) => {
+                    if tag == $t {
+                        if let Some(entry) = $table.get_mut(&name) {
+                            entry.set_handle(new);
+                        }
+                    }
+                };
+            }
+            apply_missing!("layers", self.layers);
+            apply_missing!("line_types", self.line_types);
+            apply_missing!("text_styles", self.text_styles);
+            apply_missing!("dim_styles", self.dim_styles);
+            apply_missing!("app_ids", self.app_ids);
+            apply_missing!("views", self.views);
+            apply_missing!("vports", self.vports);
+            apply_missing!("ucss", self.ucss);
+            apply_missing!("vx_table", self.vx_table);
+            apply_missing!("block_records", self.block_records);
+        }
+    }
+
     /// 1. Assigns owner handles on model-space entities (owner = model space
     ///    block record handle) when the entity has no owner set.
     /// 2. Assigns owner handles on block-owned entities (owner = the block
@@ -3291,6 +3710,8 @@ impl CadDocument {
     ///
     /// Call this once after loading (the DXF reader calls it automatically).
     pub fn resolve_references(&mut self) {
+        self.synchronize_handle_allocator();
+
         // --- 1. Find the max handle in use across the whole document ---
         let mut max_handle: u64 = self.next_handle;
 
@@ -3330,9 +3751,11 @@ impl CadDocument {
             ($tbl:expr) => {
                 for e in $tbl.iter() {
                     let h = e.handle().value();
-                    if h >= max_handle { max_handle = h + 1; }
+                    if h >= max_handle {
+                        max_handle = h + 1;
+                    }
                 }
-            }
+            };
         }
         scan_table!(self.layers);
         scan_table!(self.line_types);
@@ -3448,17 +3871,62 @@ impl CadDocument {
         // Collect ALL handles used by entries, entities, and objects so we can
         // detect when a table control handle collides with ANY of them.
         let mut used_handles = std::collections::HashSet::new();
-        for e in self.layers.iter()       { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.line_types.iter()    { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.text_styles.iter()   { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.vports.iter()        { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.views.iter()         { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.ucss.iter()          { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.app_ids.iter()       { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.dim_styles.iter()    { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.vx_table.iter()      { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.block_records.iter() { if !e.handle().is_null() { used_handles.insert(e.handle().value()); } }
-        for e in self.entities.iter()      { let h = e.common().handle.value(); if h > 0 { used_handles.insert(h); } }
+        for e in self.layers.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.line_types.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.text_styles.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.vports.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.views.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.ucss.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.app_ids.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.dim_styles.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.vx_table.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.block_records.iter() {
+            if !e.handle().is_null() {
+                used_handles.insert(e.handle().value());
+            }
+        }
+        for e in self.entities.iter() {
+            let h = e.common().handle.value();
+            if h > 0 {
+                used_handles.insert(h);
+            }
+        }
         // Snapshot the handles used by NON-object records. Object keys are
         // unique in `self.objects`, so an object can only truly collide with a
         // record of a different kind (entity, table entry, block record). The
@@ -3467,67 +3935,112 @@ impl CadDocument {
         // just below) makes the check trivially true and remaps every object,
         // orphaning entity->object links like Underlay/RasterImage definitions.
         let non_object_used = used_handles.clone();
-        for (h, _) in &self.objects        { let v = h.value(); if v > 0 { used_handles.insert(v); } }
+        for (h, _) in &self.objects {
+            let v = h.value();
+            if v > 0 {
+                used_handles.insert(v);
+            }
+        }
 
         // Reassign any table control handle that collides with a used handle
         if used_handles.contains(&self.vports.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.vports.set_handle(h); self.header.vport_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.vports.set_handle(h);
+            self.header.vport_control_handle = h;
         }
         if used_handles.contains(&self.line_types.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.line_types.set_handle(h); self.header.linetype_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.line_types.set_handle(h);
+            self.header.linetype_control_handle = h;
         }
         if used_handles.contains(&self.layers.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.layers.set_handle(h); self.header.layer_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.layers.set_handle(h);
+            self.header.layer_control_handle = h;
         }
         if used_handles.contains(&self.text_styles.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.text_styles.set_handle(h); self.header.style_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.text_styles.set_handle(h);
+            self.header.style_control_handle = h;
         }
         if used_handles.contains(&self.views.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.views.set_handle(h); self.header.view_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.views.set_handle(h);
+            self.header.view_control_handle = h;
         }
         if used_handles.contains(&self.ucss.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.ucss.set_handle(h); self.header.ucs_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.ucss.set_handle(h);
+            self.header.ucs_control_handle = h;
         }
         if used_handles.contains(&self.app_ids.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.app_ids.set_handle(h); self.header.appid_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.app_ids.set_handle(h);
+            self.header.appid_control_handle = h;
         }
         if used_handles.contains(&self.dim_styles.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.dim_styles.set_handle(h); self.header.dimstyle_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.dim_styles.set_handle(h);
+            self.header.dimstyle_control_handle = h;
         }
         if used_handles.contains(&self.block_records.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.block_records.set_handle(h); self.header.block_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.block_records.set_handle(h);
+            self.header.block_control_handle = h;
         }
         if used_handles.contains(&self.vx_table.handle().value()) {
-            let h = Handle::new(self.next_handle); self.next_handle += 1;
-            self.vx_table.set_handle(h); self.header.vpent_hdr_control_handle = h;
+            let h = Handle::new(self.next_handle);
+            self.next_handle += 1;
+            self.vx_table.set_handle(h);
+            self.header.vpent_hdr_control_handle = h;
         }
 
-        // --- 1c. Resolve block entity/end handle collisions ---
-        // block_entity_handle and block_end_handle are pre-allocated during
-        // initialize_defaults() and may collide with entry/entity handles
-        // read from the file.
+        // --- 1c. Resolve missing or colliding BLOCK/ENDBLK handles ---
+        // Reserve table controls as well as entry/entity/object identities,
+        // then reserve each marker as it is accepted. This catches collisions
+        // between two markers, not just marker-to-record collisions.
+        for handle in [
+            self.vports.handle(),
+            self.line_types.handle(),
+            self.layers.handle(),
+            self.text_styles.handle(),
+            self.views.handle(),
+            self.ucss.handle(),
+            self.app_ids.handle(),
+            self.dim_styles.handle(),
+            self.block_records.handle(),
+            self.vx_table.handle(),
+        ] {
+            if !handle.is_null() {
+                used_handles.insert(handle.value());
+            }
+        }
         for br in self.block_records.iter_mut() {
-            if !br.block_entity_handle.is_null()
-                && used_handles.contains(&br.block_entity_handle.value())
+            if br.block_entity_handle.is_null()
+                || used_handles.contains(&br.block_entity_handle.value())
             {
-                let h = Handle::new(self.next_handle); self.next_handle += 1;
+                let h = Handle::new(self.next_handle);
+                self.next_handle += 1;
                 br.block_entity_handle = h;
             }
-            if !br.block_end_handle.is_null()
-                && used_handles.contains(&br.block_end_handle.value())
+            used_handles.insert(br.block_entity_handle.value());
+
+            if br.block_end_handle.is_null() || used_handles.contains(&br.block_end_handle.value())
             {
-                let h = Handle::new(self.next_handle); self.next_handle += 1;
+                let h = Handle::new(self.next_handle);
+                self.next_handle += 1;
                 br.block_end_handle = h;
             }
+            used_handles.insert(br.block_end_handle.value());
         }
 
         // --- 1d. Resolve object handle collisions ---
@@ -3538,7 +4051,8 @@ impl CadDocument {
         obj_handles.sort_by_key(|handle| handle.value());
         for old_h in obj_handles {
             if non_object_used.contains(&old_h.value()) {
-                let new_h = Handle::new(self.next_handle); self.next_handle += 1;
+                let new_h = Handle::new(self.next_handle);
+                self.next_handle += 1;
                 remap.push((old_h, new_h));
             }
         }
@@ -3553,9 +4067,7 @@ impl CadDocument {
             let remap_map: std::collections::HashMap<u64, Handle> =
                 remap.iter().map(|(o, n)| (o.value(), *n)).collect();
             let mut remap_object_handle = |handle: &mut Handle| {
-                if let Some(new_handle) =
-                    remap_map.get(&handle.value())
-                {
+                if let Some(new_handle) = remap_map.get(&handle.value()) {
                     *handle = *new_handle;
                 }
             };
@@ -3578,36 +4090,24 @@ impl CadDocument {
                             x.owner = *new_owner;
                         }
                         for reactor in &mut x.reactors {
-                            if let Some(new_handle) =
-                                remap_map.get(&reactor.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reactor.value()) {
                                 *reactor = *new_handle;
                             }
                         }
-                        if let Some(xdictionary) =
-                            x.xdictionary_handle.as_mut()
-                        {
-                            if let Some(new_handle) =
-                                remap_map.get(&xdictionary.value())
-                            {
+                        if let Some(xdictionary) = x.xdictionary_handle.as_mut() {
+                            if let Some(new_handle) = remap_map.get(&xdictionary.value()) {
                                 *xdictionary = *new_handle;
                             }
                         }
                         for entry in &mut x.entries {
-                            if let crate::objects::XRecordValue::Handle(handle) =
-                                &mut entry.value
-                            {
-                                if let Some(new_handle) =
-                                    remap_map.get(&handle.value())
-                                {
+                            if let crate::objects::XRecordValue::Handle(handle) = &mut entry.value {
+                                if let Some(new_handle) = remap_map.get(&handle.value()) {
                                     *handle = *new_handle;
                                 }
                             }
                         }
                         for reference in &mut x.object_references {
-                            if let Some(new_handle) =
-                                remap_map.get(&reference.handle.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reference.handle.value()) {
                                 reference.handle = *new_handle;
                             }
                         }
@@ -3617,9 +4117,7 @@ impl CadDocument {
                         for reactor in &mut l.reactors {
                             remap_object_handle(reactor);
                         }
-                        if let Some(xdictionary) =
-                            l.xdictionary_handle.as_mut()
-                        {
+                        if let Some(xdictionary) = l.xdictionary_handle.as_mut() {
                             remap_object_handle(xdictionary);
                         }
                         remap_object_handle(&mut l.block_record);
@@ -3631,21 +4129,12 @@ impl CadDocument {
                         remap_object_handle(&mut l.named_ucs);
                         remap_object_handle(&mut l.plot_view_handle);
                         remap_object_handle(&mut l.visual_style_handle);
-                        if let Some(codes) =
-                            l.raw_plot_settings_codes.as_mut()
-                        {
+                        if let Some(codes) = l.raw_plot_settings_codes.as_mut() {
                             for (code, value) in codes {
                                 if *code == 333 {
-                                    if let Ok(old_handle) =
-                                        u64::from_str_radix(value, 16)
-                                    {
-                                        if let Some(new_handle) =
-                                            remap_map.get(&old_handle)
-                                        {
-                                            *value = format!(
-                                                "{:X}",
-                                                new_handle.value(),
-                                            );
+                                    if let Ok(old_handle) = u64::from_str_radix(value, 16) {
+                                        if let Some(new_handle) = remap_map.get(&old_handle) {
+                                            *value = format!("{:X}", new_handle.value(),);
                                         }
                                     }
                                 }
@@ -3657,9 +4146,7 @@ impl CadDocument {
                         for reactor in &mut p.reactors {
                             remap_object_handle(reactor);
                         }
-                        if let Some(xdictionary) =
-                            p.xdictionary_handle.as_mut()
-                        {
+                        if let Some(xdictionary) = p.xdictionary_handle.as_mut() {
                             remap_object_handle(xdictionary);
                         }
                         remap_object_handle(&mut p.plot_view_handle);
@@ -3697,24 +4184,16 @@ impl CadDocument {
                             g.owner = *new_owner;
                         }
                         for reactor in &mut g.reactors {
-                            if let Some(new_handle) =
-                                remap_map.get(&reactor.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reactor.value()) {
                                 *reactor = *new_handle;
                             }
                         }
-                        if let Some(xdictionary) =
-                            g.xdictionary_handle.as_mut()
-                        {
-                            if let Some(new_handle) =
-                                remap_map.get(&xdictionary.value())
-                            {
+                        if let Some(xdictionary) = g.xdictionary_handle.as_mut() {
+                            if let Some(new_handle) = remap_map.get(&xdictionary.value()) {
                                 *xdictionary = *new_handle;
                             }
                         }
-                        if let Some(new_host) =
-                            remap_map.get(&g.host_block.value())
-                        {
+                        if let Some(new_host) = remap_map.get(&g.host_block.value()) {
                             g.host_block = *new_host;
                         }
                     }
@@ -3726,25 +4205,19 @@ impl CadDocument {
                             d.owner = *new_owner;
                         }
                         for reactor in &mut d.reactors {
-                            if let Some(new_handle) =
-                                remap_map.get(&reactor.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reactor.value()) {
                                 *reactor = *new_handle;
                             }
                         }
-                        if let Some(xdictionary) =
-                            d.xdictionary_handle.as_mut()
-                        {
-                            if let Some(new_handle) =
-                                remap_map.get(&xdictionary.value())
-                            {
+                        if let Some(xdictionary) = d.xdictionary_handle.as_mut() {
+                            if let Some(new_handle) = remap_map.get(&xdictionary.value()) {
                                 *xdictionary = *new_handle;
                             }
                         }
                         match &mut d.data {
                             DataObjectData::BreakData(value) => {
-                                if let Some(new_handle) = remap_map
-                                    .get(&value.dimension_reference.value())
+                                if let Some(new_handle) =
+                                    remap_map.get(&value.dimension_reference.value())
                                 {
                                     value.dimension_reference = *new_handle;
                                 }
@@ -3756,9 +4229,7 @@ impl CadDocument {
                             }
                             DataObjectData::IdBuffer(value) => {
                                 for reference in &mut value.object_ids {
-                                    if let Some(new_handle) =
-                                        remap_map.get(&reference.value())
-                                    {
+                                    if let Some(new_handle) = remap_map.get(&reference.value()) {
                                         *reference = *new_handle;
                                     }
                                 }
@@ -3774,16 +4245,15 @@ impl CadDocument {
                             }
                             DataObjectData::CellStyleMap(value) => {
                                 for cell in &mut value.cells {
-                                    let format =
-                                        &mut cell.cell_style.content_format;
-                                    if let Some(new_handle) = remap_map
-                                        .get(&format.text_style.value())
+                                    let format = &mut cell.cell_style.content_format;
+                                    if let Some(new_handle) =
+                                        remap_map.get(&format.text_style.value())
                                     {
                                         format.text_style = *new_handle;
                                     }
                                     for border in &mut cell.cell_style.borders {
-                                        if let Some(new_handle) = remap_map
-                                            .get(&border.line_type.value())
+                                        if let Some(new_handle) =
+                                            remap_map.get(&border.line_type.value())
                                         {
                                             border.line_type = *new_handle;
                                         }
@@ -3792,8 +4262,8 @@ impl CadDocument {
                             }
                             DataObjectData::TableGeometry(value) => {
                                 for cell in &mut value.cells {
-                                    if let Some(new_handle) = remap_map
-                                        .get(&cell.table_geometry.value())
+                                    if let Some(new_handle) =
+                                        remap_map.get(&cell.table_geometry.value())
                                     {
                                         cell.table_geometry = *new_handle;
                                     }
@@ -3813,66 +4283,45 @@ impl CadDocument {
                         value.visit_handles_mut(&mut remap_object_handle);
                     }
                     ObjectType::RegisteredClass(value) => {
-                        if let Some(new_handle) =
-                            remap_map.get(&value.owner.value())
-                        {
+                        if let Some(new_handle) = remap_map.get(&value.owner.value()) {
                             value.owner = *new_handle;
                         }
                         for reactor in &mut value.reactors {
-                            if let Some(new_handle) =
-                                remap_map.get(&reactor.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reactor.value()) {
                                 *reactor = *new_handle;
                             }
                         }
-                        if let Some(xdictionary) =
-                            value.xdictionary_handle.as_mut()
-                        {
-                            if let Some(new_handle) =
-                                remap_map.get(&xdictionary.value())
-                            {
+                        if let Some(xdictionary) = value.xdictionary_handle.as_mut() {
+                            if let Some(new_handle) = remap_map.get(&xdictionary.value()) {
                                 *xdictionary = *new_handle;
                             }
                         }
                         for property in &mut value.properties {
-                            if let crate::objects::SemanticPropertyValue::Handle(
-                                handle,
-                            ) = &mut property.value
+                            if let crate::objects::SemanticPropertyValue::Handle(handle) =
+                                &mut property.value
                             {
-                                if let Some(new_handle) =
-                                    remap_map.get(&handle.value())
-                                {
+                                if let Some(new_handle) = remap_map.get(&handle.value()) {
                                     *handle = *new_handle;
                                 }
                             }
                         }
                         for reference in &mut value.object_ids {
-                            if let Some(new_handle) =
-                                remap_map.get(&reference.handle.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reference.handle.value()) {
                                 reference.handle = *new_handle;
                             }
                         }
                     }
                     ObjectType::DgnLineStyle(value) => {
-                        if let Some(new_handle) =
-                            remap_map.get(&value.owner.value())
-                        {
+                        if let Some(new_handle) = remap_map.get(&value.owner.value()) {
                             value.owner = *new_handle;
                         }
                         for reactor in &mut value.reactors {
-                            if let Some(new_handle) =
-                                remap_map.get(&reactor.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reactor.value()) {
                                 *reactor = *new_handle;
                             }
                         }
-                        if let Some(xdictionary) =
-                            value.xdictionary_handle.as_mut()
-                        {
-                            if let Some(new_handle) =
-                                remap_map.get(&xdictionary.value())
-                            {
+                        if let Some(xdictionary) = value.xdictionary_handle.as_mut() {
+                            if let Some(new_handle) = remap_map.get(&xdictionary.value()) {
                                 *xdictionary = *new_handle;
                             }
                         }
@@ -3882,19 +4331,14 @@ impl CadDocument {
                                 properties,
                                 ..
                             } => {
-                                if let Some(new_handle) =
-                                    remap_map.get(&root_component.value())
-                                {
+                                if let Some(new_handle) = remap_map.get(&root_component.value()) {
                                     *root_component = *new_handle;
                                 }
                                 for property in properties {
-                                    if let crate::objects::SemanticPropertyValue::Handle(
-                                        handle,
-                                    ) = &mut property.value
+                                    if let crate::objects::SemanticPropertyValue::Handle(handle) =
+                                        &mut property.value
                                     {
-                                        if let Some(new_handle) =
-                                            remap_map.get(&handle.value())
-                                        {
+                                        if let Some(new_handle) = remap_map.get(&handle.value()) {
                                             *handle = *new_handle;
                                         }
                                     }
@@ -3929,8 +4373,8 @@ impl CadDocument {
                                             value.stroke_component = *new_handle;
                                         }
                                         for symbol in &mut value.symbols {
-                                            if let Some(new_handle) = remap_map
-                                                .get(&symbol.symbol_component.value())
+                                            if let Some(new_handle) =
+                                                remap_map.get(&symbol.symbol_component.value())
                                             {
                                                 symbol.symbol_component = *new_handle;
                                             }
@@ -3940,13 +4384,10 @@ impl CadDocument {
                                     | crate::objects::DgnLsComponentData::Internal(_) => {}
                                 }
                                 for property in properties {
-                                    if let crate::objects::SemanticPropertyValue::Handle(
-                                        handle,
-                                    ) = &mut property.value
+                                    if let crate::objects::SemanticPropertyValue::Handle(handle) =
+                                        &mut property.value
                                     {
-                                        if let Some(new_handle) =
-                                            remap_map.get(&handle.value())
-                                        {
+                                        if let Some(new_handle) = remap_map.get(&handle.value()) {
                                             *handle = *new_handle;
                                         }
                                     }
@@ -3958,13 +4399,10 @@ impl CadDocument {
                                 ..
                             } => {
                                 for property in properties {
-                                    if let crate::objects::SemanticPropertyValue::Handle(
-                                        handle,
-                                    ) = &mut property.value
+                                    if let crate::objects::SemanticPropertyValue::Handle(handle) =
+                                        &mut property.value
                                     {
-                                        if let Some(new_handle) =
-                                            remap_map.get(&handle.value())
-                                        {
+                                        if let Some(new_handle) = remap_map.get(&handle.value()) {
                                             *handle = *new_handle;
                                         }
                                     }
@@ -3984,9 +4422,7 @@ impl CadDocument {
                         for reactor in &mut value.reactors {
                             remap_object_handle(reactor);
                         }
-                        if let Some(xdictionary) =
-                            value.xdictionary_handle.as_mut()
-                        {
+                        if let Some(xdictionary) = value.xdictionary_handle.as_mut() {
                             remap_object_handle(xdictionary);
                         }
                         remap_object_handle(&mut value.scale);
@@ -3997,43 +4433,27 @@ impl CadDocument {
                             crate::objects::ObjectContextKind::HatchView(hatch) => {
                                 remap_object_handle(&mut hatch.view);
                             }
-                            crate::objects::ObjectContextKind::MTextAttribute(
-                                attribute,
-                            ) => {
-                                if let Some(context) =
-                                    attribute.context.as_mut()
-                                {
+                            crate::objects::ObjectContextKind::MTextAttribute(attribute) => {
+                                if let Some(context) = attribute.context.as_mut() {
                                     remap_object_handle(&mut context.scale);
                                 }
                             }
-                            crate::objects::ObjectContextKind::MLeader(
-                                context,
-                            ) => {
-                                if let Some(handle) =
-                                    context.text_style_handle.as_mut()
-                                {
+                            crate::objects::ObjectContextKind::MLeader(context) => {
+                                if let Some(handle) = context.text_style_handle.as_mut() {
                                     remap_object_handle(handle);
                                 }
-                                if let Some(handle) =
-                                    context.block_content_handle.as_mut()
-                                {
+                                if let Some(handle) = context.block_content_handle.as_mut() {
                                     remap_object_handle(handle);
                                 }
-                                if let Some(handle) =
-                                    context.scale_handle.as_mut()
-                                {
+                                if let Some(handle) = context.scale_handle.as_mut() {
                                     remap_object_handle(handle);
                                 }
                                 for root in &mut context.leader_roots {
                                     for line in &mut root.lines {
-                                        if let Some(handle) =
-                                            line.line_type_handle.as_mut()
-                                        {
+                                        if let Some(handle) = line.line_type_handle.as_mut() {
                                             remap_object_handle(handle);
                                         }
-                                        if let Some(handle) =
-                                            line.arrowhead_handle.as_mut()
-                                        {
+                                        if let Some(handle) = line.arrowhead_handle.as_mut() {
                                             remap_object_handle(handle);
                                         }
                                     }
@@ -4042,10 +4462,11 @@ impl CadDocument {
                             _ => {}
                         }
                     }
+                    ObjectType::DictionaryVariable(value) => {
+                        remap_object_handle(&mut value.owner_handle);
+                    }
                     ObjectType::TableContent(value) => {
-                        value.visit_object_handles_mut(
-                            &mut remap_object_handle,
-                        );
+                        value.visit_object_handles_mut(&mut remap_object_handle);
                     }
                     ObjectType::BlockVisibilityParameter(value) => {
                         value.visit_handles_mut(&mut remap_object_handle);
@@ -4060,31 +4481,21 @@ impl CadDocument {
                         value.visit_handles_mut(&mut remap_object_handle);
                     }
                     ObjectType::ProxyObject(value) => {
-                        if let Some(new_handle) =
-                            remap_map.get(&value.owner.value())
-                        {
+                        if let Some(new_handle) = remap_map.get(&value.owner.value()) {
                             value.owner = *new_handle;
                         }
                         for reactor in &mut value.reactors {
-                            if let Some(new_handle) =
-                                remap_map.get(&reactor.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reactor.value()) {
                                 *reactor = *new_handle;
                             }
                         }
-                        if let Some(xdictionary) =
-                            value.xdictionary_handle.as_mut()
-                        {
-                            if let Some(new_handle) =
-                                remap_map.get(&xdictionary.value())
-                            {
+                        if let Some(xdictionary) = value.xdictionary_handle.as_mut() {
+                            if let Some(new_handle) = remap_map.get(&xdictionary.value()) {
                                 *xdictionary = *new_handle;
                             }
                         }
                         for reference in &mut value.object_ids {
-                            if let Some(new_handle) =
-                                remap_map.get(&reference.handle.value())
-                            {
+                            if let Some(new_handle) = remap_map.get(&reference.handle.value()) {
                                 reference.handle = *new_handle;
                             }
                         }
@@ -4094,9 +4505,7 @@ impl CadDocument {
             }
 
             for (old_handle, new_handle) in &remap {
-                if let Some(mut value) =
-                    self.block_visibility_params.remove(old_handle)
-                {
+                if let Some(mut value) = self.block_visibility_params.remove(old_handle) {
                     value.visit_handles_mut(&mut remap_object_handle);
                     self.block_visibility_params.insert(*new_handle, value);
                 }
@@ -4108,30 +4517,22 @@ impl CadDocument {
                     }
                     self.fields.insert(*new_handle, value);
                 }
-                if let Some(mut value) =
-                    self.context_scales.remove(old_handle)
-                {
+                if let Some(mut value) = self.context_scales.remove(old_handle) {
                     remap_object_handle(&mut value);
                     self.context_scales.insert(*new_handle, value);
                 }
-                if let Some(mut value) =
-                    self.block_representations.remove(old_handle)
-                {
+                if let Some(mut value) = self.block_representations.remove(old_handle) {
                     remap_object_handle(&mut value);
                     self.block_representations.insert(*new_handle, value);
                 }
                 if let Some(value) = self.eed_by_handle.remove(old_handle) {
                     self.eed_by_handle.insert(*new_handle, value);
                 }
-                if let Some(mut value) =
-                    self.xdic_by_handle.remove(old_handle)
-                {
+                if let Some(mut value) = self.xdic_by_handle.remove(old_handle) {
                     remap_object_handle(&mut value);
                     self.xdic_by_handle.insert(*new_handle, value);
                 }
-                if let Some(mut values) =
-                    self.reactors_by_handle.remove(old_handle)
-                {
+                if let Some(mut values) = self.reactors_by_handle.remove(old_handle) {
                     for handle in &mut values {
                         remap_object_handle(handle);
                     }
@@ -4230,66 +4631,47 @@ impl CadDocument {
                         }
                     }
                     EntityType::SectionSymbol(symbol) => {
-                        if let Some(new_handle) =
-                            remap_map.get(&symbol.style_handle.value())
-                        {
+                        if let Some(new_handle) = remap_map.get(&symbol.style_handle.value()) {
                             symbol.style_handle = *new_handle;
                         }
-                        if let Some(new_handle) =
-                            remap_map.get(&symbol.view_rep_handle.value())
-                        {
+                        if let Some(new_handle) = remap_map.get(&symbol.view_rep_handle.value()) {
                             symbol.view_rep_handle = *new_handle;
                         }
                     }
                     EntityType::ViewBorder(border) => {
-                        if let Some(new_handle) =
-                            remap_map.get(&border.active_viewport.value())
-                        {
+                        if let Some(new_handle) = remap_map.get(&border.active_viewport.value()) {
                             border.active_viewport = *new_handle;
                         }
-                        if let Some(new_handle) =
-                            remap_map.get(&border.scale_handle.value())
-                        {
+                        if let Some(new_handle) = remap_map.get(&border.scale_handle.value()) {
                             border.scale_handle = *new_handle;
                         }
                     }
-                    EntityType::Extended(entity) => {
-                        match &mut entity.data {
-                            crate::entities::ExtendedEntityData::RegisteredClass(
-                                value,
-                            ) => {
-                                for property in &mut value.properties {
-                                    if let crate::objects::SemanticPropertyValue::Handle(
-                                        handle,
-                                    ) = &mut property.value
-                                    {
-                                        if let Some(new_handle) =
-                                            remap_map.get(&handle.value())
-                                        {
-                                            *handle = *new_handle;
-                                        }
-                                    }
-                                }
-                                for reference in &mut value.object_ids {
-                                    if let Some(new_handle) =
-                                        remap_map.get(&reference.handle.value())
-                                    {
-                                        reference.handle = *new_handle;
+                    EntityType::Extended(entity) => match &mut entity.data {
+                        crate::entities::ExtendedEntityData::RegisteredClass(value) => {
+                            for property in &mut value.properties {
+                                if let crate::objects::SemanticPropertyValue::Handle(handle) =
+                                    &mut property.value
+                                {
+                                    if let Some(new_handle) = remap_map.get(&handle.value()) {
+                                        *handle = *new_handle;
                                     }
                                 }
                             }
-                            crate::entities::ExtendedEntityData::Proxy(value) => {
-                                for reference in &mut value.object_ids {
-                                    if let Some(new_handle) =
-                                        remap_map.get(&reference.handle.value())
-                                    {
-                                        reference.handle = *new_handle;
-                                    }
+                            for reference in &mut value.object_ids {
+                                if let Some(new_handle) = remap_map.get(&reference.handle.value()) {
+                                    reference.handle = *new_handle;
                                 }
                             }
-                            _ => {}
                         }
-                    }
+                        crate::entities::ExtendedEntityData::Proxy(value) => {
+                            for reference in &mut value.object_ids {
+                                if let Some(new_handle) = remap_map.get(&reference.handle.value()) {
+                                    reference.handle = *new_handle;
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -4357,15 +4739,13 @@ impl CadDocument {
                     model_handle
                 };
             }
-            common.entity_mode = Some(
-                if common.owner_handle == model_handle {
-                    2
-                } else if paper_handles.contains(&common.owner_handle) {
-                    1
-                } else {
-                    0
-                },
-            );
+            common.entity_mode = Some(if common.owner_handle == model_handle {
+                2
+            } else if paper_handles.contains(&common.owner_handle) {
+                1
+            } else {
+                0
+            });
         }
 
         // Paper-space entities — if an entity's owner is the paper space block,
@@ -4407,6 +4787,7 @@ impl CadDocument {
         self.resolve_book_colors();
         self.resolve_xrecord_names();
         self.resolve_xrecord_backed_properties();
+        self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
     }
 
     pub(crate) fn resolve_book_colors(&mut self) {
@@ -4434,8 +4815,7 @@ impl CadDocument {
                 .and_then(|handle| colors.iter().find(|entry| entry.0 == handle))
                 .or_else(|| {
                     let identity = common.color_name.as_deref()?;
-                    let (book_name, color_name) =
-                        crate::io::dxf::split_color_book_name(identity);
+                    let (book_name, color_name) = crate::io::dxf::split_color_book_name(identity);
                     let book_name = book_name.as_deref()?;
                     let color_name = color_name.as_deref()?;
                     colors.iter().find(|entry| {
@@ -4446,10 +4826,8 @@ impl CadDocument {
             if let Some((handle, color, book_name, color_name)) = resolved {
                 common.color_book_handle = Some(*handle);
                 common.color = *color;
-                common.color_name = crate::io::dxf::join_color_book_name(
-                    Some(book_name),
-                    Some(color_name),
-                );
+                common.color_name =
+                    crate::io::dxf::join_color_book_name(Some(book_name), Some(color_name));
             }
         }
     }

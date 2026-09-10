@@ -25,13 +25,16 @@ output*/*
 *.dxf
 *.dxb
 *.dwg
+*.dwl
+*.dwl2
+*.dmp
+/crash_report.txt
 output_*.json
 
 
 # Documentation
 /docs/site/
 
-/ACadSharp-master/# BricsCAD crash artifacts (moved out of repo)
 
 .qoder/
 

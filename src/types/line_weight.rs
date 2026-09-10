@@ -52,7 +52,7 @@ impl LineWeight {
     // In the DWG LAYER combined BS (R2000+), lineweight is stored as a
     // 5-bit TABLE INDEX (0-31), **not** the raw weight value.
     //
-    // Mapping (matches ACadSharp's CadUtils.ToIndex / ToValue):
+    // Mapping (matches the reference CadUtils.ToIndex / ToValue):
     //   Indices 0..23  → standard weights (0, 5, 9, 13, 15, …, 200, 211)
     //   Index   29     → ByLayer  (-1)
     //   Index   30     → ByBlock  (-2)
@@ -60,8 +60,8 @@ impl LineWeight {
 
     /// Standard lineweight values indexed by DWG table position.
     const INDEXED_VALUES: [i16; 24] = [
-        0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50,
-        53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211,
+        0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158,
+        200, 211,
     ];
 
     /// Convert this `LineWeight` to a DWG 5-bit table index (0-31).
@@ -206,5 +206,3 @@ mod tests {
         assert_eq!(LineWeight::from_dwg_index(23), LineWeight::W2_11);
     }
 }
-
-
