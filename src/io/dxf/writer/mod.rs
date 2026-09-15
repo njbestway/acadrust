@@ -84,6 +84,10 @@ impl<'a> DxfWriter<'a> {
         // entities before either writer snapshots handles, otherwise an
         // ACAD_TABLE can emit a null/nonexistent block-record pointer.
         crate::io::dwg::dwg_writer::prepare_database_references(&mut prepared);
+        // An in-place table rename leaves the entry keyed under its old name,
+        // so entity layer/linetype lookups miss and reference a name the
+        // written table no longer defines (issue #80).
+        crate::io::dwg::dwg_writer::prepare_table_keys(&mut prepared);
         self.write_prepared_dxf(writer, prepared.as_ref())
     }
 
@@ -93,7 +97,12 @@ impl<'a> DxfWriter<'a> {
         document: &CadDocument,
     ) -> Result<()> {
         let handle_start = compute_max_handle(document);
-        let extra_handles = count_extra_handles(document, document.version);
+        // Count against the version actually emitted, not the one the document
+        // was loaded as, so the handle budget matches what the writer produces.
+        let extra_handles = count_extra_handles(
+            document,
+            SectionWriter::<W>::writable_version(document.version),
+        );
         let handle_seed = handle_start + extra_handles + 1;
         let mut section_writer = SectionWriter::new(writer, handle_start, handle_seed);
         section_writer.set_version(document.version);
@@ -177,7 +186,9 @@ fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion
             }
             EntityType::Insert(insert) => {
                 if insert.has_attributes() {
-                    count += insert.attributes.iter()
+                    count += insert
+                        .attributes
+                        .iter()
                         .filter(|attribute| attribute.common.handle.is_null())
                         .count() as u64;
                     // SEQEND for attribute sequence

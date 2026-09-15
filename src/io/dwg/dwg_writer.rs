@@ -64,6 +64,7 @@ impl DwgWriter {
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
         prepare_database_references(&mut prepared);
+        prepare_table_keys(&mut prepared);
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
@@ -78,38 +79,50 @@ impl DwgWriter {
         // the controls, entries and handle map all agree (issue #51/#64
         // class of bug).
         let mut owned;
-        let document: &CadDocument =
-            if document.has_null_table_entries() || document.version < DxfVersion::AC1027 {
-                owned = document.clone();
-                if owned.has_null_table_entries() {
-                    owned.assign_table_entry_handles();
-                }
-                if owned.version < DxfVersion::AC1027 {
-                    let required: Vec<_> = owned
-                        .entities()
-                        .filter_map(|entity| {
-                            let name = match entity {
-                                crate::entities::EntityType::Surface(surface) => surface.kind.dxf_name(),
-                                crate::entities::EntityType::Extended(entity) => entity.class_name(),
-                                crate::entities::EntityType::Underlay(entity) => entity.entity_name(),
-                                _ => entity.as_entity().entity_type(),
-                            };
-                            owned.classes.get_by_name(name).cloned()
-                        })
-                        .collect();
-                    owned.classes.retain_legacy_dwg_classes();
-                    for mut class in required {
-                        if !owned.classes.contains(&class.dxf_name) {
-                            class.class_number = 0;
-                            owned.classes.add_or_update(class);
-                        }
+        let document: &CadDocument = if document.has_null_table_entries()
+            || document.version < DxfVersion::AC1027
+        {
+            owned = document.clone();
+            if owned.has_null_table_entries() {
+                owned.assign_table_entry_handles();
+            }
+            // Pruning the class table to the legacy whitelist renumbers every
+            // surviving class (500 + index). Unknown objects/entities carried
+            // verbatim from a same-version source still embed their *original*
+            // class numbers, so after pruning they point at a missing class or
+            // — worse — at a different one. Only prune when nothing is being
+            // passed through raw, i.e. the source was not this exact version.
+            let raw_passthrough = owned.dwg_source_version == Some(owned.version);
+            if owned.version < DxfVersion::AC1027 && raw_passthrough {
+                prepare_legacy_document(&mut owned);
+            } else if owned.version < DxfVersion::AC1027 {
+                let required: Vec<_> = owned
+                    .entities()
+                    .filter_map(|entity| {
+                        let name = match entity {
+                            crate::entities::EntityType::Surface(surface) => {
+                                surface.kind.dxf_name()
+                            }
+                            crate::entities::EntityType::Extended(entity) => entity.class_name(),
+                            crate::entities::EntityType::Underlay(entity) => entity.entity_name(),
+                            _ => entity.as_entity().entity_type(),
+                        };
+                        owned.classes.get_by_name(name).cloned()
+                    })
+                    .collect();
+                owned.classes.retain_legacy_dwg_classes();
+                for mut class in required {
+                    if !owned.classes.contains(&class.dxf_name) {
+                        class.class_number = 0;
+                        owned.classes.add_or_update(class);
                     }
-                    prepare_legacy_document(&mut owned);
                 }
-                &owned
-            } else {
-                document
-            };
+                prepare_legacy_document(&mut owned);
+            }
+            &owned
+        } else {
+            document
+        };
 
         let result = if uses_ac21_format(version) {
             write_ac21(&mut output, document, version)
@@ -150,6 +163,7 @@ impl DwgWriter {
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
         prepare_database_references(&mut prepared);
+        prepare_table_keys(&mut prepared);
         write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 
@@ -206,24 +220,43 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                 }
             }
             EntityType::Table(table) => {
-                if table.table_style_handle.is_none_or(|handle| handle.is_null()) {
-                    let style = document.objects.get(&document.header.named_objects_dict_handle)
+                if table
+                    .table_style_handle
+                    .is_none_or(|handle| handle.is_null())
+                {
+                    let style = document
+                        .objects
+                        .get(&document.header.named_objects_dict_handle)
                         .and_then(|object| match object {
                             ObjectType::Dictionary(root) => root.get("ACAD_TABLESTYLE"),
                             _ => None,
                         })
                         .and_then(|handle| document.objects.get(&handle))
                         .and_then(|object| match object {
-                            ObjectType::Dictionary(styles) => styles.get(&document.header.current_table_style_name)
+                            ObjectType::Dictionary(styles) => styles
+                                .get(&document.header.current_table_style_name)
                                 .or_else(|| styles.get("Standard")),
                             _ => None,
                         })
-                        .filter(|handle| matches!(document.objects.get(handle), Some(ObjectType::TableStyle(_))));
-                    if let Some(style) = style { table_style_repairs.push((table.common.handle, style)); }
+                        .filter(|handle| {
+                            matches!(
+                                document.objects.get(handle),
+                                Some(ObjectType::TableStyle(_))
+                            )
+                        });
+                    if let Some(style) = style {
+                        table_style_repairs.push((table.common.handle, style));
+                    }
                 }
-                let resolved = table.block_record_handle
+                let resolved = table
+                    .block_record_handle
                     .filter(|handle| !handle.is_null())
-                    .and_then(|handle| document.block_records.iter().find(|record| record.handle == handle))
+                    .and_then(|handle| {
+                        document
+                            .block_records
+                            .iter()
+                            .find(|record| record.handle == handle)
+                    })
                     .or_else(|| document.block_records.get(&table.block_name));
                 if resolved.is_none_or(|record| {
                     table.block_record_handle != Some(record.handle)
@@ -234,24 +267,38 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                 }) {
                     table_repairs.push((
                         table.common.handle,
-                        resolved.map(|record| record.name.clone())
+                        resolved
+                            .map(|record| record.name.clone())
                             .unwrap_or_else(|| table.block_name.clone()),
                     ));
                 }
             }
-            EntityType::MLine(mline) if mline.style_handle.is_none_or(|handle| handle.is_null()) => {
-                let style = document.objects.iter().find_map(|(handle, object)| match object {
-                    ObjectType::MLineStyle(style) if style.name.eq_ignore_ascii_case(&mline.style_name) => Some(*handle),
-                    _ => None,
-                }).unwrap_or(document.header.current_multiline_style_handle);
+            EntityType::MLine(mline)
+                if mline.style_handle.is_none_or(|handle| handle.is_null()) =>
+            {
+                let style = document
+                    .objects
+                    .iter()
+                    .find_map(|(handle, object)| match object {
+                        ObjectType::MLineStyle(style)
+                            if style.name.eq_ignore_ascii_case(&mline.style_name) =>
+                        {
+                            Some(*handle)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(document.header.current_multiline_style_handle);
                 if !style.is_null() {
                     mline_repairs.push((mline.common.handle, style));
                 }
             }
             EntityType::Underlay(underlay) => {
-                if let Some(ObjectType::UnderlayDefinition(definition)) = document.objects.get(&underlay.definition_handle) {
+                if let Some(ObjectType::UnderlayDefinition(definition)) =
+                    document.objects.get(&underlay.definition_handle)
+                {
                     if !definition.reactors.contains(&underlay.common.handle) {
-                        underlay_reactors.push((underlay.definition_handle, underlay.common.handle));
+                        underlay_reactors
+                            .push((underlay.definition_handle, underlay.common.handle));
                     }
                 }
             }
@@ -315,7 +362,9 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
         }
     }
     for (definition, reactor) in underlay_reactors {
-        if let Some(ObjectType::UnderlayDefinition(definition)) = output.objects.get_mut(&definition) {
+        if let Some(ObjectType::UnderlayDefinition(definition)) =
+            output.objects.get_mut(&definition)
+        {
             if !definition.reactors.contains(&reactor) {
                 definition.reactors.push(reactor);
             }
@@ -335,10 +384,18 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                 None
             };
             let (block_record_handle, block_name) = if let Some(mut record) = existing {
-                if record.name.starts_with("*T") { record.flags.anonymous = true; }
-                if record.handle.is_null() { record.handle = output.allocate_handle(); }
-                if record.block_entity_handle.is_null() { record.block_entity_handle = output.allocate_handle(); }
-                if record.block_end_handle.is_null() { record.block_end_handle = output.allocate_handle(); }
+                if record.name.starts_with("*T") {
+                    record.flags.anonymous = true;
+                }
+                if record.handle.is_null() {
+                    record.handle = output.allocate_handle();
+                }
+                if record.block_entity_handle.is_null() {
+                    record.block_entity_handle = output.allocate_handle();
+                }
+                if record.block_end_handle.is_null() {
+                    record.block_end_handle = output.allocate_handle();
+                }
                 let result = (record.handle, record.name.clone());
                 output.block_records.add_or_replace(record);
                 result
@@ -358,7 +415,9 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                 record.block_end_handle = output.allocate_handle();
                 record.flags.anonymous = name.starts_with('*');
                 let handle = record.handle;
-                output.block_records.add(record)
+                output
+                    .block_records
+                    .add(record)
                     .expect("new table block name is unique");
                 (handle, name)
             };
@@ -441,6 +500,25 @@ fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
             .classes
             .add_or_update(crate::classes::DxfClass::new_entity(name, cpp));
     }
+}
+
+/// Re-key symbol-table entries that were renamed in place.
+///
+/// Tables key entries by the name captured at insertion, so a caller that
+/// assigns `layer.name` through `layers.iter_mut()` leaves the entry reachable
+/// only under its old name. The entity writer resolves an entity's layer by
+/// name, so every entity on that layer would be written with a NULL layer hard
+/// pointer — a required reference — and AutoCAD asks to recover the drawing
+/// (issue #80). Repair the output copy only; the caller's document is untouched.
+///
+/// Shared with the DXF writer: the stale key desyncs the same name lookups
+/// there, leaving entities pointing at a layer name the LAYER table no longer
+/// defines.
+pub(crate) fn prepare_table_keys(document: &mut std::borrow::Cow<'_, CadDocument>) {
+    if !document.has_stale_table_keys() {
+        return;
+    }
+    document.to_mut().resync_table_keys();
 }
 
 /// Remove style dictionaries only before the versions introducing their
@@ -910,8 +988,8 @@ fn write_ac15<W: Write + Seek>(
 ) -> Result<()> {
     let mut fhw = DwgFileHeaderWriterAC15::new(version);
     // New documents do not carry source maintenance metadata. AC15 files use
-    // the established R2000-era default rather than zero, which BricsCAD
-    // rejects in the file header.
+    // the established R2000-era default rather than zero, which strict
+    // readers reject in the file header.
     fhw.set_maintenance_version(if document.maintenance_version == 0 {
         15
     } else {
@@ -971,7 +1049,7 @@ fn write_ac15<W: Write + Seek>(
     fhw.add_section(section_names::OBJ_FREE_SPACE, obj_free_space);
 
     // ── Section: Template ──
-    let template = build_template();
+    let template = build_template(&[], document.header.measurement)?;
     fhw.add_section(section_names::TEMPLATE, template);
 
     // ── Section: AuxHeader (uses corrected HANDSEED) ──
@@ -1182,7 +1260,7 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: Template ──
-    let template = build_template();
+    let template = build_template(&[], document.header.measurement)?;
     fhw.add_section(output, section_names::TEMPLATE, &template, true, PAGE_SIZE)?;
 
     // ── Section: Handles (last — needs objects data) ──
@@ -1294,7 +1372,7 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::OBJ_FREE_SPACE, &obj_free_space)?;
 
     // Template
-    let template = build_template();
+    let template = build_template(&[], document.header.measurement)?;
     fhw.add_section(output, section_names::TEMPLATE, &template)?;
 
     // Handles (needs objects data for offsets)
@@ -1381,14 +1459,22 @@ fn build_obj_free_space(
 
 /// Build Template section data.
 ///
-/// Contains template description length (0 = no template).
-/// AutoCAD reference files only write the 4-byte RL length with no
-/// MEASUREMENT field when the template description is empty.
-fn build_template() -> Vec<u8> {
-    let mut data = Vec::with_capacity(4);
-    // RL (raw long = 4 bytes): template description length (0)
-    data.extend_from_slice(&0i32.to_le_bytes());
-    data
+/// Contains a two-byte description length, the encoded description, and the
+/// two-byte MEASUREMENT value.
+fn build_template(description: &[u8], measurement: i16) -> Result<Vec<u8>> {
+    let description_len = i16::try_from(description.len())
+        .map_err(|_| DxfError::InvalidFormat("Template description is too long".into()))?;
+    if !matches!(measurement, 0 | 1) {
+        return Err(DxfError::InvalidFormat(format!(
+            "Invalid MEASUREMENT value: {measurement}"
+        )));
+    }
+
+    let mut data = Vec::with_capacity(description.len() + 4);
+    data.extend_from_slice(&description_len.to_le_bytes());
+    data.extend_from_slice(description);
+    data.extend_from_slice(&measurement.to_le_bytes());
+    Ok(data)
 }
 
 /// Build SummaryInfo section data (AC18+ only).
@@ -2140,9 +2226,18 @@ mod tests {
 
     #[test]
     fn test_build_template() {
-        let t = build_template();
+        let t = build_template(&[], 1).unwrap();
         assert_eq!(t.len(), 4);
-        assert_eq!(i32::from_le_bytes([t[0], t[1], t[2], t[3]]), 0); // desc length (RL = 4 bytes)
+        assert_eq!(t, [0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn test_build_template_with_description() {
+        let t = build_template(b"metric", 1).unwrap();
+        assert_eq!(&t[..2], &6i16.to_le_bytes());
+        assert_eq!(&t[2..8], b"metric");
+        assert_eq!(&t[8..], &1i16.to_le_bytes());
+        assert!(build_template(&[], 2).is_err());
     }
 
     #[test]
@@ -2298,7 +2393,7 @@ mod tests {
         let mut reader = crate::io::dwg::DwgReader::from_stream(std::io::Cursor::new(bytes));
         let decoded = reader.read().unwrap();
 
-        // Mirrors the compact profile in BricsCAD-valid R2000 fixtures.
+        // Mirrors the compact profile in validated R2000 fixtures.
         let mut expected = doc.classes.clone();
         expected.retain_legacy_dwg_classes();
         assert_eq!(decoded.classes.len(), expected.len());
@@ -2735,7 +2830,9 @@ mod tests {
         // Verify data integrity on each
         for e in doc2.entities() {
             match e {
-                EntityType::Solid3D(s) => assert_eq!(s.acis_data.parse().unwrap().bodies().len(), 1),
+                EntityType::Solid3D(s) => {
+                    assert_eq!(s.acis_data.parse().unwrap().bodies().len(), 1)
+                }
                 EntityType::Region(r) => assert_eq!(r.acis_data.parse().unwrap().bodies().len(), 1),
                 EntityType::Body(b) => assert_eq!(b.acis_data.parse().unwrap().bodies().len(), 1),
                 _ => {}

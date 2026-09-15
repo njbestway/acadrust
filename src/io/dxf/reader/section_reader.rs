@@ -11,6 +11,7 @@ use crate::objects::*;
 use crate::objects::{
     DetailViewStyle as ClassDetailViewStyle, SectionViewStyle as ClassSectionViewStyle,
 };
+use crate::tables::layer::LAYER_DESCRIPTION_APP;
 use crate::tables::linetype::LineTypeElement;
 use crate::tables::*;
 use crate::types::*;
@@ -51,6 +52,20 @@ fn append_hex_bytes(target: &mut Vec<u8>, value: &str) {
         }
         index += 2;
     }
+}
+
+/// The description out of an `AcAecLayerStandard` record's values.
+///
+/// Two strings are written: an empty placeholder and then the text. Readers in
+/// the wild take the second and that is what is honoured here; a record
+/// carrying only one string has only the placeholder and so no description.
+fn layer_description_from(values: &[XDataValue]) -> String {
+    let mut strings = values.iter().filter_map(|value| match value {
+        XDataValue::String(text) => Some(text),
+        _ => None,
+    });
+    strings.next();
+    strings.next().cloned().unwrap_or_default()
 }
 
 fn loft_reference_xdata(data: &ExtendedData) -> Option<(Vec<Handle>, Vec<Handle>, Option<Handle>)> {
@@ -638,19 +653,19 @@ impl ClassDxfFields {
     }
 
     fn i16(&mut self, section: &str, code: i32) -> i16 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn i32(&mut self, section: &str, code: i32) -> i32 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn i64(&mut self, section: &str, code: i32) -> i64 {
-        self.string(section, code).parse().unwrap_or(0)
+        self.string(section, code).trim().parse().unwrap_or(0)
     }
 
     fn f64(&mut self, section: &str, code: i32) -> f64 {
-        self.string(section, code).parse().unwrap_or(0.0)
+        self.string(section, code).trim().parse().unwrap_or(0.0)
     }
 
     fn bool(&mut self, section: &str, code: i32) -> bool {
@@ -1227,7 +1242,9 @@ fn dynamic_dxf_history_base(fields: &DynamicDxfFields) -> SolidHistoryNodeBase {
     let color = if fields.values(section, 420).is_empty() {
         Color::from_index(fields.i16(section, 62))
     } else {
-        Color::from_true_color_value(fields.i32(section, 420))
+        Color::from_true_color_value(
+            true_color_bits(&fields.text(section, 420)).unwrap_or_default(),
+        )
     };
     SolidHistoryNodeBase {
         eval: dynamic_dxf_eval(fields),
@@ -3123,6 +3140,7 @@ impl<'a> SectionReader<'a> {
                         if let Some(block_record) = document.block_records.get_mut(&block_name) {
                             block_record.entity_handles = entity_handles;
                             block_record.xref_path = block.xref_path.clone();
+                            block_record.base_point = block.base_point;
                             // Block-type flags come from the BLOCK entity's
                             // code 70 (the BLOCK_RECORD's code 70 is units).
                             block_record.flags.anonymous = (block_flags & 1) != 0;
@@ -7082,7 +7100,7 @@ impl<'a> SectionReader<'a> {
                     }
                     420 => {
                         pending_property = Some(VisualStylePropertyValue::Color(
-                            Color::from_true_color_value(pair.as_i32().unwrap_or_default()),
+                            Color::from_true_color_value(pair.as_i32_bits().unwrap_or_default()),
                         ));
                         continue;
                     }
@@ -7132,7 +7150,7 @@ impl<'a> SectionReader<'a> {
                     }
                     420 => {
                         pending_property = Some(VisualStylePropertyValue::Color(
-                            Color::from_true_color_value(pair.as_i32().unwrap_or_default()),
+                            Color::from_true_color_value(pair.as_i32_bits().unwrap_or_default()),
                         ));
                     }
                     _ => {}
@@ -7169,8 +7187,9 @@ impl<'a> SectionReader<'a> {
                             ..
                         }) = legacy_properties.last_mut()
                         {
-                            *value =
-                                Color::from_true_color_value(pair.as_i32().unwrap_or_default());
+                            *value = Color::from_true_color_value(
+                                pair.as_i32_bits().unwrap_or_default(),
+                            );
                         }
                         None
                     }
@@ -7393,7 +7412,7 @@ impl<'a> SectionReader<'a> {
                         if let Some(true_color) = self.reader.read_pair()? {
                             if true_color.code == 420 {
                                 color = Color::from_true_color_value(
-                                    true_color.as_i32().unwrap_or_default(),
+                                    true_color.as_i32_bits().unwrap_or_default(),
                                 );
                             } else {
                                 self.reader.push_back(true_color);
@@ -7402,7 +7421,7 @@ impl<'a> SectionReader<'a> {
                         Some(MaterialProceduralValue::Color(color))
                     }
                     420 => Some(MaterialProceduralValue::Color(
-                        Color::from_true_color_value(kind.as_i32().unwrap_or_default()),
+                        Color::from_true_color_value(kind.as_i32_bits().unwrap_or_default()),
                     )),
                     301 => Some(MaterialProceduralValue::Text(kind.value_string)),
                     300 => {
@@ -7481,13 +7500,13 @@ impl<'a> SectionReader<'a> {
                 70 => obj.ambient_color.flag = pair.as_i16().unwrap_or_default() as u8,
                 40 => obj.ambient_color.factor = pair.as_double().unwrap_or_default(),
                 90 if !ambient_rgb_seen && obj.ambient_color.flag == 1 => {
-                    obj.ambient_color.rgb = pair.as_i32();
+                    obj.ambient_color.rgb = pair.as_i32_bits();
                     ambient_rgb_seen = true;
                 }
                 90 => obj.self_illumination = pair.as_i32().unwrap_or_default() as f64,
                 71 => obj.diffuse_color.flag = pair.as_i16().unwrap_or_default() as u8,
                 41 => obj.diffuse_color.factor = pair.as_double().unwrap_or_default(),
-                91 => obj.diffuse_color.rgb = pair.as_i32(),
+                91 => obj.diffuse_color.rgb = pair.as_i32_bits(),
                 42 if advanced => {
                     obj.normal_map.blend_factor = pair.as_double().unwrap_or_default()
                 }
@@ -7532,7 +7551,7 @@ impl<'a> SectionReader<'a> {
                 }
                 76 => obj.specular_color.flag = pair.as_i16().unwrap_or_default() as u8,
                 45 => obj.specular_color.factor = pair.as_double().unwrap_or_default(),
-                92 => obj.specular_color.rgb = pair.as_i32(),
+                92 => obj.specular_color.rgb = pair.as_i32_bits(),
                 44 => obj.specular_gloss_factor = pair.as_double().unwrap_or_default(),
                 46 => obj.specular_map.blend_factor = pair.as_double().unwrap_or_default(),
                 77 => {
@@ -8237,8 +8256,9 @@ impl<'a> SectionReader<'a> {
                 420 => {
                     if let DataObjectData::CellStyleMap(value) = &mut obj.data {
                         if let Some(cell) = value.cells.last_mut() {
-                            let color =
-                                Color::from_true_color_value(pair.as_i32().unwrap_or_default());
+                            let color = Color::from_true_color_value(
+                                pair.as_i32_bits().unwrap_or_default(),
+                            );
                             match style_section.as_str() {
                                 "TABLEFORMAT_BEGIN" => {
                                     cell.cell_style.background_color = color;
@@ -8575,7 +8595,7 @@ impl<'a> SectionReader<'a> {
                 1 => obj.color_name = pair.value_string.clone(),
                 2 => obj.book_name = pair.value_string.clone(),
                 62 => indexed_color = pair.as_i16().map(Color::from_index),
-                420 => true_color = pair.as_i32().map(Color::from_true_color_value),
+                420 => true_color = pair.as_i32_bits().map(Color::from_true_color_value),
                 430 => {
                     let (book_name, color_name) =
                         crate::io::dxf::split_color_book_name(&pair.value_string);
@@ -8936,7 +8956,7 @@ impl<'a> SectionReader<'a> {
                 // this every RGB-coloured layer read back as Index(7)/white on
                 // DXF import while the DWG reader kept the RGB. (#223)
                 420 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         layer.color = Color::from_true_color_value(v);
                     }
                 }
@@ -8983,6 +9003,15 @@ impl<'a> SectionReader<'a> {
                     }) {
                         layer.transparency =
                             crate::types::Transparency::from_alpha_value(value as u32);
+                    }
+                    // The description is the *second* string under
+                    // `AcAecLayerStandard`; the first is an empty placeholder
+                    // that AutoCAD and BricsCAD both write ahead of it.
+                    if let Some(text) = xdata
+                        .get_record(LAYER_DESCRIPTION_APP)
+                        .map(|record| layer_description_from(&record.values))
+                    {
+                        layer.description = text;
                     }
                 }
                 _ => {}
@@ -10038,7 +10067,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 421 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         view.ambient_color = Color::from_true_color_value(v);
                     }
                 }
@@ -10415,7 +10444,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 421 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         vport.ambient_color = Color::from_true_color_value(v);
                     }
                 }
@@ -10688,7 +10717,7 @@ impl<'a> SectionReader<'a> {
             }
             // True color (code 420): packed 24-bit RGB overrides ACI index.
             420 => {
-                if let Some(v) = pair.as_i32() {
+                if let Some(v) = pair.as_i32_bits() {
                     common.color = Color::from_true_color_value(v);
                 }
                 Ok(true)
@@ -11849,7 +11878,7 @@ impl<'a> SectionReader<'a> {
                             }
                             50 => {
                                 if let Some(v) = vpair.as_double() {
-                                    tangent = v;
+                                    tangent = v.to_radians();
                                 }
                             }
                             62 => {
@@ -11858,7 +11887,7 @@ impl<'a> SectionReader<'a> {
                                 }
                             }
                             420 => {
-                                if let Some(tc) = vpair.as_i32() {
+                                if let Some(tc) = vpair.as_i32_bits() {
                                     vcolor = Some(Color::from_true_color_value(tc));
                                 }
                             }
@@ -12538,7 +12567,7 @@ impl<'a> SectionReader<'a> {
                 421 => {
                     // Background fill true colour (24-bit RGB); same typing
                     // caveat as 63 — parse the raw value directly.
-                    if let Ok(v) = pair.value_string.trim().parse::<i32>() {
+                    if let Some(v) = true_color_bits(&pair.value_string) {
                         mtext.background_color = Color::from_true_color_value(v);
                     }
                 }
@@ -12611,6 +12640,8 @@ impl<'a> SectionReader<'a> {
                 }
                 70 => {
                     if let Some(flags_val) = pair.as_i16() {
+                        spline.dxf_flags = flags_val;
+                        if flags_val & 32 != 0 { spline.dwg_flags1 |= 1; }
                         spline.flags.closed = (flags_val & 1) != 0;
                         spline.flags.periodic = (flags_val & 2) != 0;
                         spline.flags.rational = (flags_val & 4) != 0;
@@ -12809,6 +12840,8 @@ impl<'a> SectionReader<'a> {
                 // ── AcDbSpline geometry ──
                 70 => {
                     if let Some(f) = pair.as_i16() {
+                        helix.spline.dxf_flags = f;
+                        if f & 32 != 0 { helix.spline.dwg_flags1 |= 1; }
                         helix.spline.flags.closed = (f & 1) != 0;
                         helix.spline.flags.periodic = (f & 2) != 0;
                         helix.spline.flags.rational = (f & 4) != 0;
@@ -13448,7 +13481,7 @@ impl<'a> SectionReader<'a> {
                 77 => data.character_set = pair.as_i16().unwrap_or(0),
                 78 => data.pitch_and_family = pair.as_i16().unwrap_or(0),
                 79 => data.is_shx = pair.as_i16().unwrap_or(0) != 0,
-                90 => data.text_color = pair.as_i32().unwrap_or(0),
+                90 => data.text_color = pair.as_i32_bits().unwrap_or(0),
                 210 | 220 | 230 => {
                     normal.add_coordinate(&pair);
                 }
@@ -14837,9 +14870,9 @@ impl<'a> SectionReader<'a> {
                                 }
                             }
                             421 => {
-                                if let (Some(entry), Ok(rgb)) = (
+                                if let (Some(entry), Some(rgb)) = (
                                     hatch.gradient_color.colors.last_mut(),
-                                    gp.value_string.trim().parse::<i32>(),
+                                    true_color_bits(&gp.value_string),
                                 ) {
                                     entry.color = Color::from_true_color_value(rgb);
                                 }
@@ -16422,14 +16455,17 @@ impl<'a> SectionReader<'a> {
                         attrib.width_factor = v;
                     }
                 }
+                // DXF stores both angles in degrees; the entity holds radians
+                // (the writer converts back with to_degrees), as TEXT and
+                // ATTDEF already do on read.
                 50 => {
                     if let Some(v) = pair.as_double() {
-                        attrib.rotation = v;
+                        attrib.rotation = v.to_radians();
                     }
                 }
                 51 => {
                     if let Some(v) = pair.as_double() {
-                        attrib.oblique_angle = v;
+                        attrib.oblique_angle = v.to_radians();
                     }
                 }
                 70 => {
@@ -16722,7 +16758,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 91 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         ml.line_color = color_from_i32(v);
                     }
                 }
@@ -16798,7 +16834,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 92 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         ml.text_color = color_from_i32(v);
                     }
                 }
@@ -16813,7 +16849,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 93 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         ml.block_content_color = color_from_i32(v);
                     }
                 }
@@ -17069,7 +17105,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 90 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         ctx.text_color = color_from_i32(v);
                     }
                 }
@@ -17084,7 +17120,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 91 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         ctx.background_fill_color = color_from_i32(v);
                     }
                 }
@@ -17168,7 +17204,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 93 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         ctx.block_content_color = color_from_i32(v);
                     }
                 }
@@ -17408,7 +17444,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 92 => {
-                    if let Some(v) = pair.as_i32() {
+                    if let Some(v) = pair.as_i32_bits() {
                         line.line_color = color_from_i32(v);
                     }
                 }
@@ -18045,7 +18081,10 @@ impl<'a> SectionReader<'a> {
                 63 if !in_photometric => {
                     light.light_color = Color::from_index(pair.as_i16().unwrap_or(256))
                 }
-                421 => light.light_color = Color::from_true_color_value(pair.as_i32().unwrap_or(0)),
+                421 => {
+                    light.light_color =
+                        Color::from_true_color_value(pair.as_i32_bits().unwrap_or(0))
+                }
                 291 => light.plot_glyph = pair.as_i16().unwrap_or(0) != 0,
                 40 if !in_photometric => {
                     light.intensity = pair.as_double().unwrap_or(light.intensity)
@@ -19763,8 +19802,11 @@ impl<'a> SectionReader<'a> {
                 }
                 330 => {
                     if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
-                        if in_reactors { def.reactors.push(Handle::new(h)); }
-                        else { def.owner_handle = Handle::new(h); }
+                        if in_reactors {
+                            def.reactors.push(Handle::new(h));
+                        } else {
+                            def.owner_handle = Handle::new(h);
+                        }
                     }
                 }
                 1 => def.file_path = pair.value_string.clone(),
@@ -20234,7 +20276,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 420 | 421 => {
-                    if let (Some(row), Some(v)) = (rows.last_mut(), pair.as_i32()) {
+                    if let (Some(row), Some(v)) = (rows.last_mut(), pair.as_i32_bits()) {
                         let color = Color::from_true_color_value(v);
                         if pair.code == 420 {
                             row.text_color = color;
@@ -20244,7 +20286,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 422..=427 => {
-                    if let (Some(row), Some(v)) = (rows.last_mut(), pair.as_i32()) {
+                    if let (Some(row), Some(v)) = (rows.last_mut(), pair.as_i32_bits()) {
                         border_mut(row, (pair.code - 422) as usize).color =
                             Color::from_true_color_value(v);
                     }
@@ -20392,9 +20434,23 @@ impl<'a> SectionReader<'a> {
     }
 }
 
+/// Parse a colour group code's raw text into a 32-bit bit pattern.
+///
+/// The string counterpart of [`DxfCodePair::as_i32_bits`], for the sites that
+/// read code 420/421 straight off `value_string`. A true colour carrying
+/// The `0xC2` method byte does not fit an `i32` when written unsigned,
+/// so a plain `parse::<i32>()` drops it and the entity keeps its ACI index.
+fn true_color_bits(raw: &str) -> Option<i32> {
+    let value = raw.trim().parse::<i64>().ok()?;
+
+    i32::try_from(value)
+        .ok()
+        .or_else(|| u32::try_from(value).ok().map(|bits| bits as i32))
+}
+
 /// Decode a colour stored as a raw CMC i32 (MULTILEADER 90/91/92/93 codes).
 fn color_from_i32(v: i32) -> Color {
-    // AutoCAD-produced DXF encodes a color in the high "method" byte:
+    // Some DXF producers encode a color in the high "method" byte:
     //   0xC0 ByLayer, 0xC1 ByBlock, 0xC2 true-color RGB, 0xC3 ACI index.
     // MLEADER/MLEADERSTYLE colours use this form; check it before the
     // writer's own plain scheme (0=ByBlock, 256=ByLayer, 1..255=ACI, else RGB).
@@ -20428,6 +20484,29 @@ fn color_from_i32(v: i32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `true_color_bits` reads the raw text of a colour code, so unlike
+    /// [`DxfCodePair::as_i32_bits`] it owns the parse: it must trim, accept
+    /// both spellings of the same 32-bit word, and refuse anything wider or
+    /// non-numeric rather than fold it into a plausible colour.
+    #[test]
+    fn true_color_bits_accepts_both_spellings_and_refuses_the_rest() {
+        // 0xC2FF8800, the AcCmColor word for a plain orange, either way round.
+        assert_eq!(true_color_bits("3271526400"), Some(-1_023_440_896));
+        assert_eq!(true_color_bits("-1023440896"), Some(-1_023_440_896));
+        // The bare 24 bits, and the two ends of each half of the range.
+        assert_eq!(true_color_bits("16746496"), Some(16_746_496));
+        assert_eq!(true_color_bits("2147483647"), Some(i32::MAX));
+        assert_eq!(true_color_bits("2147483648"), Some(i32::MIN));
+        assert_eq!(true_color_bits("4294967295"), Some(-1));
+        // Surrounding whitespace is the reader's, not the file's.
+        assert_eq!(true_color_bits("  3271526400\r\n"), Some(-1_023_440_896));
+        // Wider than 32 bits on either side, and not a number at all.
+        assert_eq!(true_color_bits("4294967296"), None);
+        assert_eq!(true_color_bits("-2147483649"), None);
+        assert_eq!(true_color_bits(""), None);
+        assert_eq!(true_color_bits("ff8800"), None);
+    }
 
     /// Helper: create a document, write to DXF, read back.
     fn roundtrip(doc: CadDocument) -> CadDocument {
@@ -20542,6 +20621,93 @@ mod tests {
         } else {
             panic!("Expected Text entity");
         }
+    }
+
+    /// ATTRIB angles are degrees in DXF and radians in memory, as for TEXT:
+    /// kept as read, a tag rotated 75° came out at 75 rad (about -23°).
+    #[test]
+    fn test_dxf_read_attrib_angles_in_radians() {
+        let dxf = "\
+  0\r\nSECTION\r\n\
+  2\r\nENTITIES\r\n\
+  0\r\nATTRIB\r\n\
+  5\r\n1\r\n\
+100\r\nAcDbEntity\r\n\
+  8\r\n0\r\n\
+100\r\nAcDbText\r\n\
+ 10\r\n1.0\r\n\
+ 20\r\n2.0\r\n\
+ 30\r\n0.0\r\n\
+ 40\r\n0.5\r\n\
+  1\r\nTAG VALUE\r\n\
+ 50\r\n75.0\r\n\
+ 51\r\n15.0\r\n\
+100\r\nAcDbAttribute\r\n\
+  2\r\nLABEL\r\n\
+ 70\r\n0\r\n\
+  0\r\nENDSEC\r\n\
+  0\r\nEOF\r\n";
+
+        let cursor = std::io::Cursor::new(dxf.as_bytes());
+        let reader = crate::io::dxf::reader::DxfReader::from_reader(cursor).expect("from_reader");
+        let doc = reader.read().expect("read");
+
+        let entities: Vec<_> = doc.entities().collect();
+        assert_eq!(entities.len(), 1);
+        if let EntityType::AttributeEntity(ref a) = entities[0] {
+            assert_eq!(a.value, "TAG VALUE");
+            assert!(
+                (a.rotation - 75.0_f64.to_radians()).abs() < 1e-9,
+                "rotation should be 75 deg in radians, got {}",
+                a.rotation
+            );
+            assert!(
+                (a.oblique_angle - 15.0_f64.to_radians()).abs() < 1e-9,
+                "oblique angle should be 15 deg in radians, got {}",
+                a.oblique_angle
+            );
+        } else {
+            panic!("Expected AttributeEntity");
+        }
+    }
+
+    /// The writer stores ATTRIB angles as degrees; they must read back as the
+    /// same radians, or every save turns a tag's rotation into garbage. The
+    /// attribute rides on an INSERT, as attributes do in DXF.
+    #[test]
+    fn test_dxf_roundtrip_attrib_angles() {
+        let mut doc = CadDocument::new();
+        let mut attrib = AttributeEntity::new(String::new(), String::new());
+        attrib.tag = "LABEL".to_string();
+        attrib.value = "TAG VALUE".to_string();
+        attrib.height = 0.5;
+        attrib.rotation = 75.0_f64.to_radians();
+        attrib.oblique_angle = 15.0_f64.to_radians();
+        let mut insert = Insert::new("*Model_Space", Vector3::new(0.0, 0.0, 0.0));
+        insert.rotation = 75.0_f64.to_radians();
+        insert.attributes.push(attrib);
+        let _ = doc.add_entity(EntityType::Insert(insert));
+
+        let doc2 = roundtrip(doc);
+        let insert = doc2
+            .entities()
+            .find_map(|e| match e {
+                EntityType::Insert(i) => Some(i),
+                _ => None,
+            })
+            .expect("Expected Insert entity");
+        assert_eq!(insert.attributes.len(), 1);
+        let a = &insert.attributes[0];
+        assert!(
+            (a.rotation - 75.0_f64.to_radians()).abs() < 1e-9,
+            "rotation should survive a roundtrip, got {}",
+            a.rotation
+        );
+        assert!(
+            (a.oblique_angle - 15.0_f64.to_radians()).abs() < 1e-9,
+            "oblique angle should survive a roundtrip, got {}",
+            a.oblique_angle
+        );
     }
 
     #[test]

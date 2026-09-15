@@ -43,6 +43,29 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write a single entity record.
     pub(super) fn write_entity(&mut self, entity: &EntityType) {
+        // Verbatim passthrough: the entity still carries the exact bytes it was read
+        // from, the target is the same version, and nothing the writer would
+        // rewrite differs. Skipped for pre-R2004 (records embed prev/next entity
+        // links there) and for ACIS entities on R2013+ (their SAB bodies live in
+        // the AcDs section, which is assembled from what gets written).
+        if let Some(raw) = &entity.common().raw_record {
+            let handle = entity.common().handle;
+            let acis = matches!(entity, EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_) | EntityType::Surface(_));
+            // Compound entities own follow-up records (VERTEX…/ATTRIB…/SEQEND) that the
+            // reader folded into them; the writer emits those alongside, so they must
+            // go through the normal path.
+            let compound = matches!(entity, EntityType::Polyline(_) | EntityType::Polyline2D(_) | EntityType::Polyline3D(_)
+                | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_) | EntityType::Insert(_));
+            let ok = self.version.r2004_plus()
+                && raw.version == self.dxf_version
+                && !compound
+                && !(acis && self.version.r2013_plus(self.dxf_version))
+                && !self.owner_overrides.contains_key(&handle);
+            if ok {
+                self.register_raw_object(handle, &raw.data, raw.handle_bits);
+                return;
+            }
+        }
         match entity {
             EntityType::Point(e) => self.write_point(e),
             EntityType::Line(e) => self.write_line(e),
@@ -848,7 +871,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer
             .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
-        // ODA 20.4.46: these fields were introduced in R2000.
+        // These fields were introduced in the R2000 format.
         if self.version.r2000_plus() {
             self.writer.write_bit_short(e.line_spacing_style as i16);
             self.writer.write_bit_double(e.line_spacing_factor);
@@ -1788,12 +1811,26 @@ impl<'a> DwgObjectWriter<'a> {
 
     // â”€â”€ Hatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    fn hatch_common_for_write(&self, e: &Hatch) -> EntityCommon {
+        let mut common = e.common.clone();
+        if e.stored_pattern_origin().is_some() {
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                common
+                    .extended_data
+                    .raw_dwg_eed
+                    .retain(|(handle, _)| *handle != app.handle.value());
+            }
+        }
+        common
+    }
+
     fn write_hatch(&mut self, e: &Hatch) {
         if e.is_mpolygon {
             self.write_mpolygon(e);
             return;
         }
-        self.entity_preamble(common::OBJ_HATCH, &e.common);
+        let common = self.hatch_common_for_write(e);
+        self.entity_preamble(common::OBJ_HATCH, &common);
 
         // Gradient color data (R2004+)
         if self.version.r2004_plus() {
@@ -1890,7 +1927,8 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_mpolygon(&mut self, e: &Hatch) {
         let type_code = self.class_type_code("MPOLYGON", common::OBJ_MPOLYGON);
-        self.entity_preamble(type_code, &e.common);
+        let common = self.hatch_common_for_write(e);
+        self.entity_preamble(type_code, &common);
         self.writer.write_bit_short(e.style as i16);
 
         if self.version.r2004_plus() {
@@ -3789,8 +3827,8 @@ impl<'a> DwgObjectWriter<'a> {
             if self.version.r2013_plus(self.dxf_version) {
                 self.writer.write_bit_long(e.dwg_unknown_long2);
             } else {
-                // ODA 20.4.96.2: the R2010 bit defaults to true, unlike
-                // the R2013+ long. False makes AutoCAD reject a new table.
+                // The R2010 bit defaults to true, unlike the R2013+ long.
+                // False makes strict readers reject a new table.
                 self.writer
                     .write_bit(e.dwg_r2010_unknown_bit.unwrap_or(true));
             }
@@ -4138,7 +4176,9 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_cm_color(&e.line_color);
 
         // 341 LeaderLineTypeID (handle) - HardPointer
-        let lt = e.line_type_handle.filter(|handle| !handle.is_null())
+        let lt = e
+            .line_type_handle
+            .filter(|handle| !handle.is_null())
             .unwrap_or(self.document.header.bylayer_linetype_handle);
         self.writer
             .write_handle(DwgReferenceType::HardPointer, lt.value());
@@ -4209,7 +4249,7 @@ impl<'a> DwgObjectWriter<'a> {
         // 293 Enable Annotation Scale / Is annotative (B)
         self.writer.write_bit(e.enable_annotation_scale);
 
-        // Through R2007 (ODA 20.4.48): count and arrowhead overrides.
+        // Through R2007: count and arrowhead overrides.
         if !self.version.r2010_plus() {
             self.writer
                 .write_bit_long(e.arrowhead_overrides.len() as i32);
@@ -5019,8 +5059,10 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         if self.version.r2007_plus() && !acds {
-            self.writer.write_handle(DwgReferenceType::SoftPointer,
-                e.history_handle.unwrap_or(Handle::NULL).value());
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                e.history_handle.unwrap_or(Handle::NULL).value(),
+            );
         }
         self.register_object(e.common.handle);
     }
@@ -5319,20 +5361,25 @@ impl<'a> DwgObjectWriter<'a> {
     /// native COMMON_3DSOLID wireframe cache still remains in the entity.
     fn write_acis_empty(
         &mut self,
-        _point: Vector3,
-        _acis: &AcisData,
-        _wires: &[Wire],
-        _silhouettes: &[Silhouette],
+        point: Vector3,
+        acis: &AcisData,
+        wires: &[Wire],
+        silhouettes: &[Silhouette],
     ) {
         // R2013+ AcDs-backed records no longer carry the legacy leading
         // `acis_empty` bit.  Their first modeler-geometry bit is the
         // wireframe-presence flag.
         //
-        // Producer-specific wire/silhouette caches are optional and several
-        // valid drawings use incompatible cache tails. Geometry itself is the
-        // SAB blob in AcDs. Emit no cache here, matching ODA's canonical
-        // round-trip, instead of reconstructing a subtly malformed object.
-        self.writer.write_bit(false);
+        // A derived reference point alone is not a display cache. Only emit
+        // this section when the caller supplies actual wire/silhouette data.
+        if wires.is_empty() && silhouettes.is_empty() {
+            self.writer.write_bit(false);
+        } else if self.write_acis_wireframe(point, acis, wires, silhouettes) {
+            // COMMON_3DSOLID has an extra-modeler-data gate only when the
+            // AcDs-backed entity contains a wireframe section.
+            self.writer.write_bit(acis.extra_acis_data.is_none());
+            self.write_extra_acis_data(acis);
+        }
     }
 
     /// Write the R2013+ modeler-geometry revision block (`COMMON_3DSOLID`).
@@ -5505,7 +5552,7 @@ impl<'a> DwgObjectWriter<'a> {
                 };
                 let stripped = AcisData::strip_sat_terminator(sat_text);
                 // DWG's length-delimited SAT blocks omit the standalone-file
-                // terminator and use CRLF between records (native AutoCAD).
+                // terminator and use CRLF between records.
                 let full = stripped.replace('\n', "\r\n");
                 let plain = full.as_bytes();
 
@@ -5529,7 +5576,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         let wireframe_present = self.write_acis_wireframe(point, acis, wires, silhouettes);
         if inline || wireframe_present || !self.version.r2013_plus(self.dxf_version) {
-            // ODA 20.4.41: true terminates the modeler payload chain.
+            // True terminates the modeler payload chain.
             self.writer.write_bit(acis.extra_acis_data.is_none());
             self.write_extra_acis_data(acis);
         }
@@ -5565,7 +5612,7 @@ impl<'a> DwgObjectWriter<'a> {
             // Wireframe anchor: the entity's stored reference point (bbox
             // centre in AutoCAD-authored files), falling back to the first
             // wire vertex.
-            let anchor = if point != Vector3::ZERO {
+            let anchor = if acis.wireframe_point_present || point != Vector3::ZERO {
                 point
             } else {
                 wires
