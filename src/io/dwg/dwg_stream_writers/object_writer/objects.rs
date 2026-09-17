@@ -1724,7 +1724,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_short(layout.shade_plot_resolution);
             self.writer.write_bit_short(layout.shade_plot_dpi);
 
-            // Plot view handle (soft pointer)
+            // Plot view handle (hard pointer, including null; ODA 20.4.84).
             let plot_view_handle = if !layout.plot_view_handle.is_null() {
                 layout.plot_view_handle
             } else {
@@ -1735,7 +1735,7 @@ impl<'a> DwgObjectWriter<'a> {
                     .unwrap_or(Handle::NULL)
             };
             self.writer
-                .write_handle(DwgReferenceType::SoftPointer, plot_view_handle.value());
+                .write_handle(DwgReferenceType::HardPointer, plot_view_handle.value());
         }
 
         // R2007+: visual style handle
@@ -1825,7 +1825,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_short(ps.shade_plot_resolution as i16);
             self.writer.write_bit_short(ps.shade_plot_dpi);
 
-            // Plot view handle (soft pointer)
+            // Plot view handle (hard pointer, as in the embedded Layout settings).
             let plot_view_handle = if !ps.plot_view_handle.is_null() {
                 ps.plot_view_handle
             } else {
@@ -1836,7 +1836,7 @@ impl<'a> DwgObjectWriter<'a> {
                     .unwrap_or(Handle::NULL)
             };
             self.writer
-                .write_handle(DwgReferenceType::SoftPointer, plot_view_handle.value());
+                .write_handle(DwgReferenceType::HardPointer, plot_view_handle.value());
         }
 
         // R2007+: visual style handle
