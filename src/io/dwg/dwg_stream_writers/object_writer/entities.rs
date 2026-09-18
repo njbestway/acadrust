@@ -43,6 +43,11 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write a single entity record.
     pub(super) fn write_entity(&mut self, entity: &EntityType) {
+        // Already emitted verbatim (ACADRUST_RAW_ALL bisection aid): skip, so a
+        // compound entity does not re-allocate handles for its children.
+        if self.registered_handles.contains(&entity.common().handle.value()) {
+            return;
+        }
         // Verbatim passthrough: the entity still carries the exact bytes it was read
         // from, the target is the same version, and nothing the writer would
         // rewrite differs. Skipped for pre-R2004 (records embed prev/next entity
@@ -58,6 +63,7 @@ impl<'a> DwgObjectWriter<'a> {
                 | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_) | EntityType::Insert(_));
             let ok = self.version.r2004_plus()
                 && raw.version == self.dxf_version
+                && !self.raw_excluded_handles.contains(&handle.value())
                 && !compound
                 && !(acis && self.version.r2013_plus(self.dxf_version))
                 && !self.owner_overrides.contains_key(&handle);
@@ -126,7 +132,9 @@ impl<'a> DwgObjectWriter<'a> {
                     _ => None,
                 };
                 if let Some((raw, handle_bits, version)) = raw {
-                    if self.raw_passthrough_compatible(version) {
+                    if self.raw_passthrough_compatible(version)
+                        && !self.raw_excluded_handles.contains(&e.common.handle.value())
+                    {
                         self.register_raw_object(e.common.handle, raw, handle_bits);
                         return;
                     }
@@ -5436,6 +5444,21 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(encrypted.len() as i32);
         self.writer.write_bytes(&encrypted);
         self.writer.write_bit_long(0);
+    }
+
+    /// Raw R2013+ entity records still depend on the external AcDs section.
+    pub(super) fn queue_raw_entity_sab(&mut self, entity: &EntityType) {
+        if !self.needs_acds_section() {
+            return;
+        }
+        let acis = match entity {
+            EntityType::Solid3D(entity) => &entity.acis_data,
+            EntityType::Region(entity) => &entity.acis_data,
+            EntityType::Body(entity) => &entity.acis_data,
+            EntityType::Surface(entity) => &entity.acis_data,
+            _ => return,
+        };
+        self.queue_sab_entry(acis, entity.common().handle);
     }
 
     /// Queue SAB data for writing into the AcDsPrototype_1b section.

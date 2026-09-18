@@ -290,7 +290,7 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::Dictionary(d) => self.write_dictionary(d),
             ObjectType::Layout(l) => self.write_layout(l),
             ObjectType::XRecord(x) => {
-                if !x.entries_complete {
+                if !x.entries_complete && !self.raw_excluded_handles.contains(&x.handle.value()) {
                     if let Some(raw) = &x.raw_dwg_data {
                         if self.raw_passthrough_compatible(x.raw_dwg_version) {
                             for reference in &x.object_references {
@@ -334,7 +334,9 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::ClassObject(value) => {
                 if let ClassObjectData::CsacDocumentOptions(data) = &value.data {
                     if let Some(raw) = &data.raw_dwg_data {
-                        if self.raw_passthrough_compatible(data.raw_dwg_version) {
+                        if self.raw_passthrough_compatible(data.raw_dwg_version)
+                            && !self.raw_excluded_handles.contains(&value.handle.value())
+                        {
                             self.register_raw_object(value.handle, raw, data.raw_dwg_handle_bits);
                             return;
                         }
@@ -346,7 +348,9 @@ impl<'a> DwgObjectWriter<'a> {
             ObjectType::Field(value) => self.write_field_object(value),
             ObjectType::FieldList(value) => self.write_field_list(value),
             ObjectType::RegisteredClass(value) => {
-                if value.properties.is_empty() {
+                if value.properties.is_empty()
+                    && !self.raw_excluded_handles.contains(&value.handle.value())
+                {
                     if let Some(raw) = &value.raw_dwg_data {
                         if self.raw_passthrough_compatible(value.raw_dwg_version) {
                             self.register_raw_object(value.handle, raw, value.raw_dwg_handle_bits);

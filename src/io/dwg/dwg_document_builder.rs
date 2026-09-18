@@ -253,6 +253,8 @@ struct Pass2Chunk {
     pending: PendingPolylines,
     pending_attributes: HashMap<u64, Vec<AttributeEntity>>,
     failures: Vec<RecordFailure>,
+    /// (handle, type code, merged bytes, handle bits) — only with ACADRUST_RAW_ALL.
+    raw_records: Vec<(u64, i16, Vec<u8>, i64)>,
 }
 
 struct RecordFailure {
@@ -280,6 +282,7 @@ impl Pass2Chunk {
             pending: PendingPolylines::default(),
             pending_attributes: HashMap::new(),
             failures: Vec::new(),
+            raw_records: Vec::new(),
         }
     }
 }
@@ -660,6 +663,7 @@ impl DwgDocumentBuilder {
         }
         self.report_progress(110);
         let pass1_started = web_time::Instant::now();
+        let capture_raw_pass1 = std::env::var_os("ACADRUST_RAW_ALL").is_some();
 
         for &(handle, offset, _, type_code) in &record_catalog {
             if is_table_type(type_code) {
@@ -687,6 +691,19 @@ impl DwgDocumentBuilder {
                         continue;
                     }
                 };
+                if capture_raw_pass1 {
+                    document.raw_records.insert(
+                        handle,
+                        (
+                            type_code,
+                            std::sync::Arc::new(crate::entities::RawRecord {
+                                data: reader.raw_merged_data(),
+                                handle_bits: reader.get_handle_bits(),
+                                version: self.obj_reader.dxf_version(),
+                            }),
+                        ),
+                    );
+                }
                 // Wrap in catch_unwind to survive corrupt/misaligned records
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let non_entity = self
@@ -1162,6 +1179,7 @@ impl DwgDocumentBuilder {
                     br.flags.has_attributes = data.has_attributes;
                     br.flags.is_xref = data.is_xref;
                     br.flags.is_xref_overlay = data.is_xref_overlay;
+                    br.flags.is_xref_unloaded = data.is_loaded.unwrap_or(false);
                     br.block_entity_handle = Handle::from(data.block_entity_handle);
                     br.block_end_handle = Handle::from(data.endblk_handle);
                     br.units = data.units.unwrap_or(0);
@@ -1208,6 +1226,7 @@ impl DwgDocumentBuilder {
                     style.flags.upside_down = (data.generation & 4) != 0;
                     // Only mark xref-dependent if the xref block record handle is valid
                     style.xref_dependent = data.xref_dependent && data.xref_handle != 0;
+                    style.xref_block_record_handle = Handle::from(data.xref_handle);
                     // Use add_allow_duplicate for shape-file-only styles (empty name)
                     // so multiple empty-named styles are preserved. Named styles use
                     // add_or_replace to avoid duplicates (e.g. "Standard").
@@ -1223,6 +1242,7 @@ impl DwgDocumentBuilder {
                     lt.description = data.description.clone();
                     lt.pattern_length = data.pattern_length;
                     lt.xref_dependent = data.xref_dependent;
+                    lt.xref_block_record_handle = Handle::from(data.xref_handle);
                     lt.elements = data
                         .segments
                         .iter()
@@ -1650,6 +1670,7 @@ impl DwgDocumentBuilder {
 
         let pass2_total = pass2_records.len().max(1);
         let mut pass2_done = 0usize;
+        let capture_raw = std::env::var_os("ACADRUST_RAW_ALL").is_some();
         for batch in pass2_records.chunks(batch_size) {
             let decode_started = web_time::Instant::now();
             let chunks: Vec<Pass2Chunk> = map_chunks(batch, chunk_size, |records| {
@@ -1675,6 +1696,14 @@ impl DwgDocumentBuilder {
                             continue;
                         }
                     };
+                    if capture_raw {
+                        chunk.raw_records.push((
+                            handle,
+                            raw_type_code,
+                            reader.raw_merged_data(),
+                            reader.get_handle_bits(),
+                        ));
+                    }
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         self.process_pass2_record(
                             handle,
@@ -1708,6 +1737,41 @@ impl DwgDocumentBuilder {
 
             let commit_started = web_time::Instant::now();
             for mut chunk in chunks {
+                if capture_raw {
+                    for (&owner, vertices) in &chunk.pending.vertices {
+                        for vertex in vertices {
+                            let handle = match vertex {
+                                PendingVertex::V2D(data) => data.handle,
+                                PendingVertex::V3D(data, _) => data.handle,
+                                PendingVertex::PfaceFace(data, _) => data.handle,
+                            };
+                            document.raw_record_owners.insert(handle.value(), owner);
+                        }
+                    }
+                    for (&owner, handle) in &chunk.pending.seqends {
+                        document.raw_record_owners.insert(handle.value(), owner);
+                    }
+                    for (&owner, attributes) in &chunk.pending_attributes {
+                        for attribute in attributes {
+                            document
+                                .raw_record_owners
+                                .insert(attribute.common.handle.value(), owner);
+                        }
+                    }
+                }
+                for (handle, type_code, data, handle_bits) in chunk.raw_records.drain(..) {
+                    document.raw_records.insert(
+                        handle,
+                        (
+                            type_code,
+                            std::sync::Arc::new(crate::entities::RawRecord {
+                                data,
+                                handle_bits,
+                                version: self.obj_reader.dxf_version(),
+                            }),
+                        ),
+                    );
+                }
                 decoded_pass2 = decoded_pass2
                     .saturating_add(chunk.output.entities.len())
                     .saturating_add(chunk.output.objects.len());
