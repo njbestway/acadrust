@@ -40,3 +40,5 @@ config.toml
 tiles/
 
 front/
+
+docs/
