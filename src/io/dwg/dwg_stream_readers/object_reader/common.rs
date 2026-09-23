@@ -1,6 +1,6 @@
 //! Object type constants shared between reader and writer.
 //!
-//! These match ACadSharp's fixed type codes (ODA spec table 2.12).
+//! These match the fixed type codes (ODA spec table 2.12).
 //! Fixed types 0–82 use literal codes; non-fixed types use
 //! their DXF class number (500+).
 
@@ -90,16 +90,16 @@ pub const OBJ_LONG_TRANSACTION: i16 = 76;
 
 // ── Standard fixed entity/object types (75+) ────────────────────────
 //
-// These match ACadSharp's ObjectType enum values.  Types 77–82 are
+// These match the reference ObjectType enum values.  Types 77–82 are
 // fixed type codes in the ODA spec; class-based types (MESH, IMAGE,
 // MULTILEADER) always use class numbers ≥500 in the binary.
 
-pub const OBJ_LWPOLYLINE: i16 = 77;         // 0x4D — fixed entity
-pub const OBJ_HATCH: i16 = 78;              // 0x4E — fixed entity
-pub const OBJ_XRECORD: i16 = 79;            // 0x4F — fixed non-entity
-pub const OBJ_PLACEHOLDER: i16 = 80;        // 0x50 — fixed non-entity
-pub const OBJ_VBA_PROJECT: i16 = 81;         // 0x51 — fixed non-entity
-pub const OBJ_LAYOUT: i16 = 82;             // 0x52 — fixed non-entity
+pub const OBJ_LWPOLYLINE: i16 = 77; // 0x4D — fixed entity
+pub const OBJ_HATCH: i16 = 78; // 0x4E — fixed entity
+pub const OBJ_XRECORD: i16 = 79; // 0x4F — fixed non-entity
+pub const OBJ_PLACEHOLDER: i16 = 80; // 0x50 — fixed non-entity
+pub const OBJ_VBA_PROJECT: i16 = 81; // 0x51 — fixed non-entity
+pub const OBJ_LAYOUT: i16 = 82; // 0x52 — fixed non-entity
 
 // Class-based (UNLISTED) entity types — always use class number (500+)
 // in the binary stream.  Matched via dxf_name → type_code translation.
@@ -144,40 +144,40 @@ pub const OBJ_PROXY_ENTITY: i16 = 498;
 pub const OBJ_PROXY_OBJECT: i16 = 499;
 
 // Class-based non-entity objects — also resolved via class mapping for
-// portable type codes.  The values here match ACadSharp's ObjectType.
-pub const OBJ_DICTIONARYWDFLT: i16 = 0x78;  // 120
-pub const OBJ_DICTIONARYVAR: i16 = 0x79;    // 121
-pub const OBJ_PLOTSETTINGS: i16 = 0x7A;     // 122
-pub const OBJ_MLEADERSTYLE: i16 = 0x7B;     // 123
-pub const OBJ_IMAGEDEF: i16 = 0x7C;         // 124
-pub const OBJ_IMAGEDEFREACTOR: i16 = 0x7D;  // 125
-pub const OBJ_SCALE: i16 = 0x7E;            // 126
-pub const OBJ_SORTENTSTABLE: i16 = 0x7F;    // 127
-pub const OBJ_RASTERVARIABLES: i16 = 0x80;  // 128
-pub const OBJ_DBCOLOR: i16 = 0x81;          // 129
+// portable type codes.  The values here match the reference ObjectType.
+pub const OBJ_DICTIONARYWDFLT: i16 = 0x78; // 120
+pub const OBJ_DICTIONARYVAR: i16 = 0x79; // 121
+pub const OBJ_PLOTSETTINGS: i16 = 0x7A; // 122
+pub const OBJ_MLEADERSTYLE: i16 = 0x7B; // 123
+pub const OBJ_IMAGEDEF: i16 = 0x7C; // 124
+pub const OBJ_IMAGEDEFREACTOR: i16 = 0x7D; // 125
+pub const OBJ_SCALE: i16 = 0x7E; // 126
+pub const OBJ_SORTENTSTABLE: i16 = 0x7F; // 127
+pub const OBJ_RASTERVARIABLES: i16 = 0x80; // 128
+pub const OBJ_DBCOLOR: i16 = 0x81; // 129
 pub const OBJ_WIPEOUTVARIABLES: i16 = 0x82; // 130
-pub const OBJ_TABLECONTENT: i16 = 0x69;     // 105
-pub const OBJ_TABLESTYLE: i16 = 0x6A;       // 106
-// GEODATA has no fixed DWG type code (it is always class-based); 0x83 is a free
-// internal sentinel used by the class-number map + builder dispatch.
-pub const OBJ_GEODATA: i16 = 0x83;          // 131
-// AcDbBlockVisibilityParameter is always class-based; 0x84 is a free internal
-// sentinel for the class-number map + builder dispatch.
+pub const OBJ_TABLECONTENT: i16 = 0x69; // 105
+pub const OBJ_TABLESTYLE: i16 = 0x6A; // 106
+                                      // GEODATA has no fixed DWG type code (it is always class-based); 0x83 is a free
+                                      // internal sentinel used by the class-number map + builder dispatch.
+pub const OBJ_GEODATA: i16 = 0x83; // 131
+                                   // AcDbBlockVisibilityParameter is always class-based; 0x84 is a free internal
+                                   // sentinel for the class-number map + builder dispatch.
 pub const OBJ_BLOCKVISIBILITYPARAMETER: i16 = 0x84; // 132
-// AcDbBlockRepresentationData — links an anonymous evaluated block back to its
-// dynamic block definition. 0x85 is a free internal sentinel.
+                                                    // AcDbBlockRepresentationData — links an anonymous evaluated block back to its
+                                                    // dynamic block definition. 0x85 is a free internal sentinel.
 pub const OBJ_BLOCKREPRESENTATIONDATA: i16 = 0x85; // 133
-// AcDbSpatialFilter (XCLIP clip boundary) is always class-based; 0x86 is a free
-// internal sentinel for the class-number map + builder dispatch.
+                                                   // AcDbSpatialFilter (XCLIP clip boundary) is always class-based; 0x86 is a free
+                                                   // internal sentinel for the class-number map + builder dispatch.
 pub const OBJ_SPATIALFILTER: i16 = 0x86; // 134
-// Underlay definition objects (PDF/DWF/DGN) — always class-based; 0x87..0x89 are
-// free internal sentinels. One each so the builder recovers the underlay flavour
-// from the resolved type code (the bitstream body is identical for all three).
+                                         // Underlay definition objects (PDF/DWF/DGN) — always class-based; 0x87..0x89 are
+                                         // free internal sentinels. One each so the builder recovers the underlay flavour
+                                         // from the resolved type code (the bitstream body is identical for all three).
 pub const OBJ_PDFDEFINITION: i16 = 0x87; // 135
 pub const OBJ_DWFDEFINITION: i16 = 0x88; // 136
 pub const OBJ_DGNDEFINITION: i16 = 0x89; // 137
-// AcDbField and AcDbFieldList are always class-based; 0x8A..0x8B are free
-// internal sentinels used by the builder dispatch.
+                                         // AcDbField and AcDbFieldList are always class-based; 0x8A..0x8B are free
+                                         // internal sentinels used by the builder dispatch.
 pub const OBJ_FIELD: i16 = 0x8A; // 138
 pub const OBJ_FIELDLIST: i16 = 0x8B; // 139
 pub const OBJ_VISUALSTYLE: i16 = 0x8C; // 140
@@ -188,11 +188,11 @@ pub const OBJ_OBJECT_PTR: i16 = 0x8E; // 142
 pub fn is_entity_type(type_code: i16) -> bool {
     // Fixed entity types: 1–47, 74 (OLE2FRAME), 77 (LWPOLYLINE), 78 (HATCH)
     // EXCEPT: 42 (OBJ_DICTIONARY) is a non-graphical object, not an entity.
-    // Class-based entity sentinels: -14..-1 (underlays, surfaces, WIPEOUT,
-    // MULTILEADER, MESH, IMAGE).
+    // All negative sentinels are class-based entities, including extended
+    // entities and the two class-based dimension subtypes. 498 is a proxy.
     // Class-based entity types (≥500) are NOT included here; the builder
     // checks the class's is_an_entity flag directly.
-    matches!(type_code, -17..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78)
+    matches!(type_code, -28..=-1 | 1..=41 | 43..=47 | 74 | 77 | 78 | OBJ_PROXY_ENTITY)
 }
 
 /// Returns true if the type code is a table control or entry.

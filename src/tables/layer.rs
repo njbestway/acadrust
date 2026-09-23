@@ -44,6 +44,12 @@ impl Default for LayerFlags {
     }
 }
 
+/// The extended-data application a layer's description is stored under.
+///
+/// The application name is part of the file schema and is therefore
+/// load-bearing rather than descriptive.
+pub const LAYER_DESCRIPTION_APP: &str = "AcAecLayerStandard";
+
 /// A layer table entry
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -56,6 +62,12 @@ pub struct Layer {
     pub flags: LayerFlags,
     /// Layer color
     pub color: Color,
+    /// Named color identity
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_name: Option<String>,
+    /// Color-book identity
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub book_name: Option<String>,
     /// Line type name
     pub line_type: String,
     /// Line weight
@@ -65,8 +77,18 @@ pub struct Layer {
     /// Is this layer plottable?
     pub is_plottable: bool,
     /// Layer transparency
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default = "crate::types::transparency::opaque")
+    )]
     pub transparency: Transparency,
+    /// Layer description, empty when the layer states none.
+    ///
+    /// Stored in the layer's extended data under the `AcAecLayerStandard`
+    /// application, as two strings of which the second is the text -- the
+    /// same place, and the same mechanism, `transparency` comes from.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub description: String,
     /// Material handle
     pub material: Handle,
     /// Plot style handle (R2000+)
@@ -83,11 +105,14 @@ impl Layer {
             name: name.into(),
             flags: LayerFlags::new(),
             color: Color::WHITE,
+            color_name: None,
+            book_name: None,
             line_type: "Continuous".to_string(),
             line_weight: LineWeight::Default,
             plot_style: String::new(),
             is_plottable: true,
             transparency: Transparency::OPAQUE,
+            description: String::new(),
             material: Handle::NULL,
             plotstyle_handle: Handle::NULL,
             xref_block_record_handle: Handle::NULL,
@@ -101,11 +126,14 @@ impl Layer {
             name: "0".to_string(),
             flags: LayerFlags::standard(),
             color: Color::WHITE,
+            color_name: None,
+            book_name: None,
             line_type: "Continuous".to_string(),
             line_weight: LineWeight::Default,
             plot_style: String::new(),
             is_plottable: true,
             transparency: Transparency::OPAQUE,
+            description: String::new(),
             material: Handle::NULL,
             plotstyle_handle: Handle::NULL,
             xref_block_record_handle: Handle::NULL,

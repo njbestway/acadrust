@@ -409,9 +409,7 @@ impl AcisData {
     pub fn strip_sat_terminator(sat: &str) -> String {
         let mut result = String::with_capacity(sat.len());
         for line in sat.lines() {
-            if line.starts_with("End-of-ACIS-data")
-                || line.starts_with("End-of-ASM-data")
-            {
+            if line.starts_with("End-of-ACIS-data") || line.starts_with("End-of-ASM-data") {
                 break;
             }
             result.push_str(line);
@@ -482,7 +480,6 @@ impl AcisData {
     /// wireframe anchor — bodies baked at world coordinates would otherwise
     /// report (0,0,0).
     pub fn geometry_centre(&self) -> Option<Vector3> {
-        use crate::entities::acis::SatToken;
         let doc = self.parse()?;
         let (m, tr, s) = doc.placement();
         let mut min = [f64::MAX; 3];
@@ -492,15 +489,18 @@ impl AcisData {
             if rec.entity_type != "point" {
                 continue;
             }
-            // SAB tokenizes the coordinate as one Position; SAT text as three
-            // trailing floats (after the bookkeeping ints).
+            // SAT text stores a point as three trailing floats; SAB stores it
+            // as a coordinate tag. Both forms are exposed by SatToken's typed
+            // accessors while retaining the original SAB bytes for writing.
             let mut p: Option<[f64; 3]> = None;
             let mut floats: Vec<f64> = Vec::with_capacity(4);
             for t in &rec.tokens {
-                match t {
-                    SatToken::Position(x, y, z) => p = Some([*x, *y, *z]),
-                    SatToken::Float(f) => floats.push(*f),
-                    _ => {}
+                if let Some((components, len)) = t.coordinate_components() {
+                    if len == 3 {
+                        p = Some(components);
+                    }
+                } else if let Some(value) = t.as_float() {
+                    floats.push(value);
                 }
             }
             let Some([x, y, z]) = p.or_else(|| {
@@ -535,53 +535,27 @@ impl AcisData {
 }
 
 impl AcisData {
-    /// Apply the symmetric SAT/DXF character cipher.
-    ///
-    /// Every printable ASCII character except space is mapped to
-    /// `(159 - c)`.  Spaces, newlines, and non-ASCII bytes pass through
-    /// unchanged.  The cipher is its own inverse: `cipher(cipher(x)) == x`.
-    fn sat_cipher(text: &str) -> String {
-        text.chars()
-            .map(|c| {
-                let b = c as u32;
-                if b >= 0x21 && b <= 0x7E {
-                    // Safety: 159 - b is in 0x21..=0x7E, always valid.
-                    char::from_u32(159 - b).unwrap_or(c)
-                } else {
-                    c
-                }
-            })
-            .collect()
+    /// Encode plaintext SAT for DXF storage (Version 1 cipher).
+    /// ASCII DXF adds a protective space after each encoded `A` (caret).
+    pub fn encode_sat(text: &str) -> String {
+        Self::encode_sat_impl(text, true)
     }
 
-    /// Encode plaintext SAT for DXF storage (Version 1 cipher).
-    ///
-    /// AutoCAD DXF files (R2004 / AC1018 and later) store ACIS SAT data
-    /// using a simple symmetric character cipher: every printable ASCII
-    /// character except space is mapped to `(159 - c)`.  Spaces, newlines,
-    /// and non-ASCII bytes are passed through unchanged.
-    ///
-    /// After applying the cipher, a protective space is inserted after any
-    /// `^` (0x5E) that would otherwise be followed by a character in the
-    /// 0x40–0x5F range.  In DXF, the two-character sequence `^X` (where X
-    /// is in 0x40–0x5F) is interpreted as a control character and would
-    /// corrupt the data stream.  The plaintext letter `A` (0x41) encodes
-    /// to `^` (0x5E), so sequences like `AC` become `^\` which DXF readers
-    /// would mis-interpret as a File Separator control code.
-    pub fn encode_sat(text: &str) -> String {
-        let ciphered = Self::sat_cipher(text);
-        let bytes = ciphered.as_bytes();
-        let mut result = String::with_capacity(ciphered.len() + 16);
-        for i in 0..bytes.len() {
-            result.push(bytes[i] as char);
-            // Insert a protective space after '^' when the next character
-            // falls in the DXF control-character trigger range 0x40-0x5F.
-            if bytes[i] == 0x5E {
-                if let Some(&next) = bytes.get(i + 1) {
-                    if (0x40..=0x5F).contains(&next) {
-                        result.push(' ');
-                    }
-                }
+    pub(crate) fn encode_sat_binary(text: &str) -> String {
+        Self::encode_sat_impl(text, false)
+    }
+
+    fn encode_sat_impl(text: &str, escape_caret: bool) -> String {
+        let mut result = String::with_capacity(text.len() + 16);
+        for c in text.chars() {
+            result.push(match c {
+                ' ' | '\r' | '\n' | '\t' => c,
+                '@'..='_' => char::from(159 - c as u8),
+                c if c.is_ascii() => char::from(c as u8 ^ 0x5F),
+                _ => c,
+            });
+            if escape_caret && c == 'A' {
+                result.push(' ');
             }
         }
         result
@@ -592,22 +566,28 @@ impl AcisData {
     /// Strips protective spaces that were inserted after `^` to prevent
     /// DXF control-character interpretation, then applies the cipher.
     pub fn decode_sat(text: &str) -> String {
-        let bytes = text.as_bytes();
-        let mut cleaned = String::with_capacity(text.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            cleaned.push(bytes[i] as char);
-            // If we see '^' followed by a space and then a char in
-            // 0x40-0x5F, the space is a protective insertion – skip it.
-            if bytes[i] == 0x5E && i + 2 < bytes.len() && bytes[i + 1] == 0x20 {
-                let after = bytes[i + 2];
-                if (0x40..=0x5F).contains(&after) {
-                    i += 1; // skip the protective space
-                }
+        Self::decode_sat_impl(text, true)
+    }
+
+    pub(crate) fn decode_sat_binary(text: &str) -> String {
+        Self::decode_sat_impl(text, false)
+    }
+
+    fn decode_sat_impl(text: &str, escape_caret: bool) -> String {
+        let mut decoded = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            decoded.push(match c {
+                ' ' | '\r' | '\n' | '\t' => c,
+                '@'..='_' => char::from(159 - c as u8),
+                c if c.is_ascii() => char::from(c as u8 ^ 0x5F),
+                _ => c,
+            });
+            if escape_caret && c == '^' && chars.peek() == Some(&' ') {
+                chars.next();
             }
-            i += 1;
         }
-        Self::sat_cipher(&cleaned)
+        decoded
     }
 }
 
@@ -764,7 +744,9 @@ impl Solid3D {
 
     /// Returns silhouette for a viewport.
     pub fn silhouette_for_viewport(&self, viewport_id: i64) -> Option<&Silhouette> {
-        self.silhouettes.iter().find(|s| s.viewport_id == viewport_id)
+        self.silhouettes
+            .iter()
+            .find(|s| s.viewport_id == viewport_id)
     }
 
     /// Clears all visualization data (wires and silhouettes).
@@ -869,7 +851,7 @@ impl Entity for Solid3D {
     fn entity_type(&self) -> &'static str {
         "3DSOLID"
     }
-    
+
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_solid3d(self, transform);
     }
@@ -1034,7 +1016,7 @@ impl Entity for Region {
     fn entity_type(&self) -> &'static str {
         "REGION"
     }
-    
+
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_region(self, transform);
     }
@@ -1199,7 +1181,7 @@ impl Entity for Body {
     fn entity_type(&self) -> &'static str {
         "BODY"
     }
-    
+
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_body(self, transform);
     }
@@ -1237,6 +1219,24 @@ mod tests {
         assert!(solid.has_acis_data());
         assert!(solid.acis_data.is_binary);
         assert_eq!(solid.acis_data.sab_data, sab);
+    }
+
+    #[test]
+    fn test_geometry_centre_decodes_sab_coordinate_tokens() {
+        use crate::entities::acis::{SabReader, SabWriter, SatDocument, SatToken};
+
+        let mut doc = SatDocument::new_body();
+        doc.add_point(0.0, 0.0, 0.0);
+        doc.add_point(4.0, 8.0, 12.0);
+        let sab = SabWriter::write(&doc);
+        let parsed = SabReader::read(&sab).expect("parse SAB");
+        assert!(matches!(
+            parsed.records_of_type("point")[0].tokens[1],
+            SatToken::Sab { tag: 0x13, .. }
+        ));
+
+        let acis = AcisData::from_sab(sab);
+        assert_eq!(acis.geometry_centre(), Some(Vector3::new(2.0, 4.0, 6.0)));
     }
 
     #[test]
@@ -1282,11 +1282,8 @@ mod tests {
 
     #[test]
     fn test_silhouette_with_view() {
-        let silhouette = Silhouette::with_view(
-            1,
-            Vector3::new(0.0, 0.0, -1.0),
-            Vector3::new(0.0, 1.0, 0.0),
-        );
+        let silhouette =
+            Silhouette::with_view(1, Vector3::new(0.0, 0.0, -1.0), Vector3::new(0.0, 1.0, 0.0));
         assert_eq!(silhouette.viewport_id, 1);
         assert_eq!(silhouette.view_direction.z, -1.0);
     }
@@ -1410,10 +1407,7 @@ mod tests {
         // Check faces
         let faces = doc.faces();
         assert_eq!(faces.len(), 1);
-        assert_eq!(
-            faces[0].sense(),
-            crate::entities::acis::Sense::Forward
-        );
+        assert_eq!(faces[0].sense(), crate::entities::acis::Sense::Forward);
 
         // Check plane surface
         let planes = doc.records_of_type("plane-surface");
@@ -1426,11 +1420,7 @@ mod tests {
     #[test]
     fn test_solid3d_set_sat_document() {
         let mut doc = crate::entities::acis::SatDocument::new_body();
-        doc.add_plane_surface(
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
-        );
+        doc.add_plane_surface([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
 
         let mut solid = Solid3D::new();
         solid.set_sat_document(&doc);

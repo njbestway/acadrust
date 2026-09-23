@@ -20,12 +20,12 @@ pub mod transform;
 pub mod transparency;
 pub mod vector;
 
-pub use aci_table::{ACI_COLORS, aci_to_rgb, nearest_aci};
+pub use aci_table::{aci_to_rgb, nearest_aci, ACI_COLORS};
 pub use bounds::{BoundingBox2D, BoundingBox3D};
 pub use color::Color;
 pub use handle::Handle;
 pub use line_weight::LineWeight;
-pub use transform::{Matrix3, Matrix4, Transform, rotate_point_2d, is_zero_angle, normalize_angle};
+pub use transform::{is_zero_angle, normalize_angle, rotate_point_2d, Matrix3, Matrix4, Transform};
 pub use transparency::Transparency;
 pub use vector::{Vector2, Vector3};
 
@@ -35,6 +35,11 @@ pub use vector::{Vector2, Vector3};
 pub enum DxfVersion {
     /// Unknown version
     Unknown,
+    /// R12-era DXF (AC1009)
+    ///
+    /// DXF only. R12 predates the handle-based object model, so DWG I/O
+    /// rejects this version.
+    AC1009,
     /// AutoCAD R13 (AC1012)
     AC1012,
     /// AutoCAD R14 (AC1014)
@@ -58,6 +63,7 @@ impl DxfVersion {
     pub fn as_str(&self) -> &'static str {
         match self {
             DxfVersion::Unknown => "UNKNOWN",
+            DxfVersion::AC1009 => "AC1009",
             DxfVersion::AC1012 => "AC1012",
             DxfVersion::AC1014 => "AC1014",
             DxfVersion::AC1015 => "AC1015",
@@ -77,6 +83,7 @@ impl DxfVersion {
     /// Parse version from string (e.g., "AC1015" or "AD1015")
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "AC1009" | "AD1009" => Some(DxfVersion::AC1009),
             "AC1012" | "AD1012" => Some(DxfVersion::AC1012),
             "AC1014" | "AD1014" => Some(DxfVersion::AC1014),
             "AC1015" | "AD1015" => Some(DxfVersion::AC1015),
@@ -98,6 +105,7 @@ impl DxfVersion {
     pub fn version_code(&self) -> u16 {
         match self {
             DxfVersion::Unknown => 0,
+            DxfVersion::AC1009 => 1009,
             DxfVersion::AC1012 => 1012,
             DxfVersion::AC1014 => 1014,
             DxfVersion::AC1015 => 1015,
@@ -112,6 +120,7 @@ impl DxfVersion {
     /// Create version from numeric code
     pub fn from_version_code(code: u16) -> Self {
         match code {
+            1009 => DxfVersion::AC1009,
             1012 => DxfVersion::AC1012,
             1014 => DxfVersion::AC1014,
             1015 => DxfVersion::AC1015,
@@ -143,10 +152,7 @@ mod tests {
 
     #[test]
     fn test_version_parse() {
-        assert_eq!(
-            DxfVersion::parse("AC1018"),
-            Some(DxfVersion::AC1018)
-        );
+        assert_eq!(DxfVersion::parse("AC1018"), Some(DxfVersion::AC1018));
         assert_eq!(DxfVersion::parse("INVALID"), None);
     }
 
@@ -155,5 +161,3 @@ mod tests {
         assert_eq!(DxfVersion::AC1021.version_code(), 1021);
     }
 }
-
-

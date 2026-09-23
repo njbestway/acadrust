@@ -32,15 +32,31 @@ pub struct SatVersion {
 impl SatVersion {
     /// Creates a new SAT version.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// ACIS 4.0 — legacy format.
-    pub const V4_0: Self = Self { major: 4, minor: 0, patch: 0 };
+    pub const V4_0: Self = Self {
+        major: 4,
+        minor: 0,
+        patch: 0,
+    };
     /// ACIS 7.0 — introduced explicit indices and asmheader.
-    pub const V7_0: Self = Self { major: 7, minor: 0, patch: 0 };
+    pub const V7_0: Self = Self {
+        major: 7,
+        minor: 0,
+        patch: 0,
+    };
     /// ACIS 21.0 — modern format.
-    pub const V21_0: Self = Self { major: 21, minor: 0, patch: 0 };
+    pub const V21_0: Self = Self {
+        major: 21,
+        minor: 0,
+        patch: 0,
+    };
 
     /// Returns the SAT version number used in the header line (e.g. 700).
     pub fn sat_version_number(&self) -> u32 {
@@ -206,7 +222,7 @@ impl fmt::Display for SatPointer {
 /// Tokens can be entity-type identifiers, pointers, numbers, strings,
 /// or enum values.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 pub enum SatToken {
     /// An identifier/keyword (entity type, sense, etc.).
     Ident(String),
@@ -239,15 +255,94 @@ pub enum SatToken {
     },
 }
 
+/// Serde representation for [`SatToken`].
+///
+/// SAB tags retain their raw bytes in memory so a SAB writer can reproduce
+/// them exactly. JSON consumers, however, historically saw the corresponding
+/// semantic SAT token. Unsupported or malformed tags remain raw `Sab` values.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize)]
+enum SatTokenJson<'a> {
+    Ident(&'a str),
+    Pointer(SatPointer),
+    Integer(i64),
+    Float(f64),
+    String(&'a str),
+    Position(f64, f64, f64),
+    True,
+    False,
+    Terminator,
+    Enum(&'a str),
+    Sab { tag: u8, data: &'a [u8] },
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for SatToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let token = match self {
+            Self::Ident(value) => SatTokenJson::Ident(value),
+            Self::Pointer(value) => SatTokenJson::Pointer(*value),
+            Self::Integer(value) => SatTokenJson::Integer(*value),
+            Self::Float(value) => SatTokenJson::Float(*value),
+            Self::String(value) => SatTokenJson::String(value),
+            Self::Position(x, y, z) => SatTokenJson::Position(*x, *y, *z),
+            Self::True => SatTokenJson::True,
+            Self::False => SatTokenJson::False,
+            Self::Terminator => SatTokenJson::Terminator,
+            Self::Enum(value) => SatTokenJson::Enum(value),
+            Self::Sab { tag, data } => self.semantic_json_token(*tag, data),
+        };
+        serde::Serialize::serialize(&token, serializer)
+    }
+}
+
 impl SatToken {
+    #[cfg(feature = "serde")]
+    fn semantic_json_token<'a>(&'a self, tag: u8, data: &'a [u8]) -> SatTokenJson<'a> {
+        let raw = || SatTokenJson::Sab { tag, data };
+
+        match tag {
+            0x02 | 0x03 | 0x04 | 0x15 | 0x17 => self
+                .as_integer()
+                .map(SatTokenJson::Integer)
+                .unwrap_or_else(raw),
+            0x05 | 0x06 => self.as_float().map(SatTokenJson::Float).unwrap_or_else(raw),
+            0x07 | 0x08 | 0x09 | 0x12 => sab_string_bytes_exact(tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(SatTokenJson::String)
+                .unwrap_or_else(raw),
+            0x0A if data.is_empty() => SatTokenJson::False,
+            0x0B if data.is_empty() => SatTokenJson::True,
+            0x0C if data.len() == 4 => SatTokenJson::Pointer(SatPointer::new(i32::from_le_bytes(
+                data.try_into().expect("checked pointer length"),
+            ))),
+            0x0D | 0x0E => sab_string_bytes_exact(tag, data)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .map(SatTokenJson::Ident)
+                .unwrap_or_else(raw),
+            0x0F if data.is_empty() => SatTokenJson::Ident("{"),
+            0x10 if data.is_empty() => SatTokenJson::Ident("}"),
+            0x11 if data.is_empty() => SatTokenJson::Terminator,
+            0x13 | 0x14 => match self.coordinate_components() {
+                Some(([x, y, z], 3)) => SatTokenJson::Position(x, y, z),
+                _ => raw(),
+            },
+            _ => raw(),
+        }
+    }
+
     /// Returns the token as a string if it is an identifier.
     pub fn as_ident(&self) -> Option<&str> {
         match self {
             SatToken::Ident(s) | SatToken::Enum(s) => Some(s),
             SatToken::Sab { tag: 0x0F, .. } => Some("{"),
             SatToken::Sab { tag: 0x10, .. } => Some("}"),
-            SatToken::Sab { tag, data } => sab_string_bytes(*tag, data)
-                .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+            SatToken::Sab { tag, data } => {
+                sab_string_bytes(*tag, data).and_then(|bytes| std::str::from_utf8(bytes).ok())
+            }
             _ => None,
         }
     }
@@ -264,19 +359,28 @@ impl SatToken {
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             SatToken::Integer(v) => Some(*v),
+            SatToken::Float(v) => exact_integer(*v),
             SatToken::Sab { tag: 0x02, data } if data.len() == 1 => {
                 Some(i8::from_le_bytes([data[0]]) as i64)
             }
             SatToken::Sab { tag: 0x03, data } if data.len() == 2 => {
                 Some(i16::from_le_bytes([data[0], data[1]]) as i64)
             }
-            SatToken::Sab { tag: 0x04 | 0x15, data } if data.len() == 4 => {
+            SatToken::Sab {
+                tag: 0x04 | 0x15,
+                data,
+            } if data.len() == 4 => {
                 Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64)
             }
-            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => {
-                Some(i64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
+            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => Some(i64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ])),
+            SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
+                exact_integer(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            }
+            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => {
+                exact_integer(f64::from_le_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                 ]))
             }
             _ => None,
@@ -288,15 +392,27 @@ impl SatToken {
         match self {
             SatToken::Float(v) => Some(*v),
             SatToken::Integer(v) => Some(*v as f64),
+            SatToken::Sab { tag: 0x02, data } if data.len() == 1 => {
+                Some(i8::from_le_bytes([data[0]]) as f64)
+            }
+            SatToken::Sab { tag: 0x03, data } if data.len() == 2 => {
+                Some(i16::from_le_bytes([data[0], data[1]]) as f64)
+            }
+            SatToken::Sab {
+                tag: 0x04 | 0x15,
+                data,
+            } if data.len() == 4 => {
+                Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            }
             SatToken::Sab { tag: 0x05, data } if data.len() == 4 => {
                 Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
             }
-            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => {
-                Some(f64::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                    data[4], data[5], data[6], data[7],
-                ]))
-            }
+            SatToken::Sab { tag: 0x06, data } if data.len() == 8 => Some(f64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ])),
+            SatToken::Sab { tag: 0x17, data } if data.len() == 8 => Some(i64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ]) as f64),
             _ => None,
         }
     }
@@ -305,8 +421,9 @@ impl SatToken {
     pub fn as_string(&self) -> Option<&str> {
         match self {
             SatToken::String(s) => Some(s),
-            SatToken::Sab { tag, data } => sab_string_bytes(*tag, data)
-                .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+            SatToken::Sab { tag, data } => {
+                sab_string_bytes(*tag, data).and_then(|bytes| std::str::from_utf8(bytes).ok())
+            }
             _ => None,
         }
     }
@@ -318,23 +435,36 @@ impl SatToken {
     pub fn coordinate_components(&self) -> Option<([f64; 3], usize)> {
         match self {
             SatToken::Position(x, y, z) => Some(([*x, *y, *z], 3)),
-            SatToken::Sab { tag: 0x13 | 0x14, data } if data.len() == 24 => {
-                Some(([
+            SatToken::Sab {
+                tag: 0x13 | 0x14,
+                data,
+            } if data.len() == 24 => Some((
+                [
                     f64::from_le_bytes(data[0..8].try_into().ok()?),
                     f64::from_le_bytes(data[8..16].try_into().ok()?),
                     f64::from_le_bytes(data[16..24].try_into().ok()?),
-                ], 3))
-            }
-            SatToken::Sab { tag: 0x16, data } if data.len() == 16 => {
-                Some(([
+                ],
+                3,
+            )),
+            SatToken::Sab { tag: 0x16, data } if data.len() == 16 => Some((
+                [
                     f64::from_le_bytes(data[0..8].try_into().ok()?),
                     f64::from_le_bytes(data[8..16].try_into().ok()?),
                     0.0,
-                ], 2))
-            }
+                ],
+                2,
+            )),
             _ => None,
         }
     }
+}
+
+fn exact_integer(value: f64) -> Option<i64> {
+    (value.is_finite()
+        && value.fract() == 0.0
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64)
+        .then_some(value as i64)
 }
 
 fn sab_string_bytes(tag: u8, data: &[u8]) -> Option<&[u8]> {
@@ -345,6 +475,28 @@ fn sab_string_bytes(tag: u8, data: &[u8]) -> Option<&[u8]> {
         _ => return None,
     };
     (data.len() >= prefix).then_some(&data[prefix..])
+}
+
+#[cfg(feature = "serde")]
+fn sab_string_bytes_exact(tag: u8, data: &[u8]) -> Option<&[u8]> {
+    let prefix = match tag {
+        0x07 | 0x0D | 0x0E => 1,
+        0x08 => 2,
+        0x09 | 0x12 => 4,
+        _ => return None,
+    };
+    if data.len() < prefix {
+        return None;
+    }
+
+    let declared_length = match prefix {
+        1 => data[0] as usize,
+        2 => u16::from_le_bytes(data[..2].try_into().ok()?) as usize,
+        4 => u32::from_le_bytes(data[..4].try_into().ok()?) as usize,
+        _ => unreachable!(),
+    };
+    let bytes = &data[prefix..];
+    (bytes.len() == declared_length).then_some(bytes)
 }
 
 impl fmt::Display for SatToken {
@@ -379,8 +531,8 @@ impl fmt::Display for SatToken {
                     write!(f, "{}", value)
                 } else if let Some(value) = self.as_float() {
                     write!(f, "{}", value)
-                } else if let Some(value) = sab_string_bytes(*tag, data)
-                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                } else if let Some(value) =
+                    sab_string_bytes(*tag, data).and_then(|bytes| std::str::from_utf8(bytes).ok())
                 {
                     if matches!(*tag, 0x0D | 0x0E) {
                         write!(f, "{}", value)
@@ -506,10 +658,7 @@ impl SatRecord {
     /// vertex's tolerance int between its edge and point — where ordinal
     /// indexing stays correct for both ACIS and ASM.
     pub fn nth_pointer(&self, index: usize) -> Option<SatPointer> {
-        self.tokens
-            .iter()
-            .filter_map(|t| t.as_pointer())
-            .nth(index)
+        self.tokens.iter().filter_map(|t| t.as_pointer()).nth(index)
     }
 
     /// Returns the string value at the given token position.
@@ -533,7 +682,10 @@ impl SatRecord {
                     Sense::Forward
                 }
             }
-            _ => self.token_string(index).map(Sense::from_str).unwrap_or_default(),
+            _ => self
+                .token_string(index)
+                .map(Sense::from_str)
+                .unwrap_or_default(),
         }
     }
 }
@@ -568,8 +720,8 @@ impl Sense {
         match s {
             // Keyword form (ACIS 4.0+) and the numeric form pre-4.0 SAT uses
             // (0 = forward, 1 = reversed).
-            "reversed" | "REVERSED" | "reversed_v" | "REVERSED_V" | "reverse_v"
-            | "REVERSE_V" | "1" => Self::Reversed,
+            "reversed" | "REVERSED" | "reversed_v" | "REVERSED_V" | "reverse_v" | "REVERSE_V"
+            | "1" => Self::Reversed,
             _ => Self::Forward,
         }
     }
@@ -1250,8 +1402,10 @@ pub type SatBs3Curve<'a> = SatIntCurve<'a>;
 impl<'a> SatIntCurve<'a> {
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
         let entity_type = record.entity_type.as_str();
-        if matches!(entity_type, "intcurve-curve" | "bs3-curve" | "exactcur-curve")
-            || entity_type.ends_with("-intcurve-curve")
+        if matches!(
+            entity_type,
+            "intcurve-curve" | "bs3-curve" | "exactcur-curve"
+        ) || entity_type.ends_with("-intcurve-curve")
             || entity_type.ends_with("-bs3-curve")
             || entity_type.ends_with("-exactcur-curve")
         {
@@ -1331,60 +1485,60 @@ impl<'a> SatIntCurve<'a> {
 }
 
 fn decode_bspline_curve(t: &[SatToken]) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
-        let ni = t
-            .iter()
-            .position(|x| matches!(x.as_ident(), Some("nubs" | "nurbs")))?;
-        let rational = t.get(ni)?.as_ident() == Some("nurbs");
-        let degree = t.get(ni + 1)?.as_integer()? as usize;
-        // t[ni + 2] is the curve form/closure flag.
-        let n_knots = t.get(ni + 3)?.as_integer()? as usize;
-        let mut knots: Vec<f64> = Vec::new();
-        let mut i = ni + 4;
-        for _ in 0..n_knots {
-            let k = t.get(i)?.as_float()?;
-            let mult = t.get(i + 1)?.as_integer()?.max(0) as usize;
-            for _ in 0..mult {
-                knots.push(k);
-            }
-            i += 2;
+    let ni = t
+        .iter()
+        .position(|x| matches!(x.as_ident(), Some("nubs" | "nurbs")))?;
+    let rational = t.get(ni)?.as_ident() == Some("nurbs");
+    let degree = t.get(ni + 1)?.as_integer()? as usize;
+    // t[ni + 2] is the curve form/closure flag.
+    let n_knots = t.get(ni + 3)?.as_integer()? as usize;
+    let mut knots: Vec<f64> = Vec::new();
+    let mut i = ni + 4;
+    for _ in 0..n_knots {
+        let k = t.get(i)?.as_float()?;
+        let mult = t.get(i + 1)?.as_integer()?.max(0) as usize;
+        for _ in 0..mult {
+            knots.push(k);
         }
-        if knots.len() < 2 {
-            return None;
-        }
-        let stride = if rational { 4 } else { 3 };
-        let available = t[i..]
-            .iter()
-            .take_while(|token| token.as_float().is_some())
-            .count()
-            / stride;
-        let base_ctrl = knots.len().checked_sub(degree + 1)?;
-        let n_ctrl = if available >= base_ctrl + 2 {
-            let first = *knots.first()?;
-            let last = *knots.last()?;
-            knots.insert(0, first);
-            knots.push(last);
-            base_ctrl + 2
+        i += 2;
+    }
+    if knots.len() < 2 {
+        return None;
+    }
+    let stride = if rational { 4 } else { 3 };
+    let available = t[i..]
+        .iter()
+        .take_while(|token| token.as_float().is_some())
+        .count()
+        / stride;
+    let base_ctrl = knots.len().checked_sub(degree + 1)?;
+    let n_ctrl = if available >= base_ctrl + 2 {
+        let first = *knots.first()?;
+        let last = *knots.last()?;
+        knots.insert(0, first);
+        knots.push(last);
+        base_ctrl + 2
+    } else {
+        base_ctrl
+    };
+    if n_ctrl <= degree {
+        return None;
+    }
+    let mut ctrl: Vec<[f64; 4]> = Vec::with_capacity(n_ctrl);
+    for _ in 0..n_ctrl {
+        let x = t.get(i)?.as_float()?;
+        let y = t.get(i + 1)?.as_float()?;
+        let z = t.get(i + 2)?.as_float()?;
+        if rational {
+            let w = t.get(i + 3)?.as_float()?;
+            ctrl.push([x * w, y * w, z * w, w]);
+            i += 4;
         } else {
-            base_ctrl
-        };
-        if n_ctrl <= degree {
-            return None;
+            ctrl.push([x, y, z, 1.0]);
+            i += 3;
         }
-        let mut ctrl: Vec<[f64; 4]> = Vec::with_capacity(n_ctrl);
-        for _ in 0..n_ctrl {
-            let x = t.get(i)?.as_float()?;
-            let y = t.get(i + 1)?.as_float()?;
-            let z = t.get(i + 2)?.as_float()?;
-            if rational {
-                let w = t.get(i + 3)?.as_float()?;
-                ctrl.push([x * w, y * w, z * w, w]);
-                i += 4;
-            } else {
-                ctrl.push([x, y, z, 1.0]);
-                i += 3;
-            }
-        }
-        Some((degree, knots, ctrl))
+    }
+    Some((degree, knots, ctrl))
 }
 
 /// Accessor for a `pcurve` entity: a 2-D B-spline in surface UV space.
@@ -1402,10 +1556,16 @@ impl<'a> SatPCurve<'a> {
         }
     }
 
-    fn bspline_at(
-        tokens: &[SatToken],
-        start: usize,
-    ) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
+    /// Direction of an explicit pcurve relative to its underlying UV spline.
+    pub fn sense(&self) -> Sense {
+        match self.record.tokens.get(2) {
+            Some(SatToken::False | SatToken::Sab { tag: 0x0A, .. }) => Sense::Reversed,
+            Some(SatToken::True | SatToken::Sab { tag: 0x0B, .. }) => Sense::Forward,
+            _ => self.record.token_sense(2),
+        }
+    }
+
+    fn bspline_at(tokens: &[SatToken], start: usize) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
         let rational = tokens.get(start)?.as_ident() == Some("nurbs");
         let degree = tokens.get(start + 1)?.as_integer()?.max(0) as usize;
         let knot_count = tokens.get(start + 3)?.as_integer()?.max(0) as usize;
@@ -1504,43 +1664,57 @@ impl<'a> SatPCurve<'a> {
         (offsets.len() == 2).then_some((offsets[1], offsets[0]))
     }
 
+    fn referenced_bspline(
+        &self,
+        document: &SatDocument,
+    ) -> Option<((usize, Vec<f64>, Vec<[f64; 4]>), bool)> {
+        let selector = self
+            .record
+            .tokens
+            .iter()
+            .find_map(SatToken::as_integer)
+            .unwrap_or(1);
+        let target = self
+            .record
+            .nth_pointer(1)
+            .and_then(|pointer| document.resolve(pointer))?;
+        let mut tokens = target.tokens.as_slice();
+        if !tokens
+            .iter()
+            .any(|token| token.as_ident() == Some("par_int_cur"))
+        {
+            if let Some(reference) = subtype_reference(tokens) {
+                tokens = document.subtype_tokens(reference)?;
+            }
+        }
+        let parametric = tokens
+            .iter()
+            .any(|token| token.as_ident() == Some("par_int_cur"));
+        let blocks: Vec<usize> = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| {
+                matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
+            })
+            .collect();
+        let support = selector.unsigned_abs().max(1) as usize;
+        let block = support.checked_sub(usize::from(parametric))?;
+        let spline = Self::bspline_at(tokens, *blocks.get(block)?)?;
+        let reversed = (selector < 0) ^ (target.token_sense(1) == Sense::Reversed);
+        Some((spline, reversed))
+    }
+
     /// Decode this UV curve into homogeneous `[uw, vw, w]` controls.
     pub fn bspline_in(&self, document: &SatDocument) -> Option<(usize, Vec<f64>, Vec<[f64; 3]>)> {
-        let mut reversed = false;
         let direct = self
             .record
             .tokens
             .iter()
             .position(|token| matches!(token.as_ident(), Some("nubs" | "nurbs")))
             .and_then(|start| Self::bspline_at(&self.record.tokens, start));
-        let spline = match direct {
-            Some(spline) => spline,
-            None => {
-                let selector = self
-                    .record
-                    .tokens
-                    .iter()
-                    .find_map(SatToken::as_integer)
-                    .unwrap_or(1);
-                reversed = selector < 0;
-                let target = self
-                    .record
-                    .nth_pointer(1)
-                    .and_then(|pointer| document.resolve(pointer))?;
-                let mut tokens = target.tokens.as_slice();
-                if let Some(reference) = subtype_reference(tokens) {
-                    tokens = document.subtype_tokens(reference)?;
-                }
-                let blocks: Vec<usize> = tokens
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, token)| {
-                        matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
-                    })
-                    .collect();
-                let support = selector.unsigned_abs().max(1) as usize;
-                Self::bspline_at(tokens, *blocks.get(support)?)?
-            }
+        let (spline, reversed) = match direct {
+            Some(spline) => (spline, false),
+            None => self.referenced_bspline(document)?,
         };
         let (degree, mut knots, controls) = spline;
         let (u_offset, v_offset) = self.offsets().unwrap_or((0.0, 0.0));
@@ -1556,7 +1730,7 @@ impl<'a> SatPCurve<'a> {
             .collect();
         if reversed {
             controls.reverse();
-            let sum = knots.first()? + knots.last()?;
+            let sum = knots.get(degree)? + knots.get(controls.len())?;
             knots = knots.into_iter().rev().map(|knot| sum - knot).collect();
         }
         Some((degree, knots, controls))
@@ -1592,45 +1766,11 @@ impl<'a> SatPCurve<'a> {
             return direct;
         }
 
-        let selector = self
-            .record
-            .tokens
-            .iter()
-            .find_map(SatToken::as_integer)
-            .unwrap_or(1);
-        let target = self
-            .record
-            .nth_pointer(1)
-            .and_then(|pointer| document.resolve(pointer));
-        let Some(target) = target else {
-            return Vec::new();
-        };
-        let mut target_tokens = target.tokens.as_slice();
-        if let Some(reference) = subtype_reference(target_tokens) {
-            let Some(tokens) = document.subtype_tokens(reference) else {
-                return Vec::new();
-            };
-            target_tokens = tokens;
-        }
-
-        // The first spline block is the 3-D intersection curve. Following
-        // blocks are its UV curves on the supporting surfaces.
-        let blocks: Vec<usize> = target_tokens
-            .iter()
-            .enumerate()
-            .filter_map(|(index, token)| {
-                matches!(token.as_ident(), Some("nubs" | "nurbs")).then_some(index)
-            })
-            .collect();
-        let support_index = selector.unsigned_abs().max(1) as usize;
-        let Some(&start) = blocks.get(support_index) else {
-            return Vec::new();
-        };
-        let Some(spline) = Self::bspline_at(target_tokens, start) else {
+        let Some((spline, reversed)) = self.referenced_bspline(document) else {
             return Vec::new();
         };
         let mut points = Self::sample_bspline(spline, segments);
-        if selector < 0 {
+        if reversed {
             points.reverse();
         }
         self.apply_offsets(&mut points);
@@ -1699,21 +1839,16 @@ impl<'a> SatSplineSurface<'a> {
     /// Wraps any supported B-spline surface family.
     pub fn from_record(record: &'a SatRecord) -> Option<Self> {
         let entity_type = record.entity_type.as_str();
-        let kind = if entity_type == "meshsurf-surface"
-            || entity_type.ends_with("-meshsurf-surface")
-        {
-            SatSplineSurfaceKind::Mesh
-        } else if entity_type == "bs3-surface"
-            || entity_type.ends_with("-bs3-surface")
-        {
-            SatSplineSurfaceKind::Bs3
-        } else if entity_type == "spline-surface"
-            || entity_type.ends_with("-spline-surface")
-        {
-            SatSplineSurfaceKind::Spline
-        } else {
-            return None;
-        };
+        let kind =
+            if entity_type == "meshsurf-surface" || entity_type.ends_with("-meshsurf-surface") {
+                SatSplineSurfaceKind::Mesh
+            } else if entity_type == "bs3-surface" || entity_type.ends_with("-bs3-surface") {
+                SatSplineSurfaceKind::Bs3
+            } else if entity_type == "spline-surface" || entity_type.ends_with("-spline-surface") {
+                SatSplineSurfaceKind::Spline
+            } else {
+                return None;
+            };
         Some(Self { record, kind })
     }
 
@@ -1743,8 +1878,66 @@ impl<'a> SatSplineSurface<'a> {
 
     /// Decode the final `nubs`/`nurbs` block into a complete control net.
     pub fn bspline(&self, document: &SatDocument) -> Option<SatBSplineSurface> {
-        decode_bspline_surface(self.definition_tokens(document)?)
+        let tokens = self.definition_tokens(document)?;
+        if tokens.iter().any(|token| token.as_ident() == Some("sum_spl_sur")) {
+            return decode_linear_sum_surface(tokens);
+        }
+        decode_bspline_surface(tokens)
     }
+}
+
+/// A spline plus a straight curve is an exact tensor-product ruled surface.
+/// ACIS defines S(u,v) = C(u) + line(v) - origin; no fitting is required.
+fn decode_linear_sum_surface(source: &[SatToken]) -> Option<SatBSplineSurface> {
+    let tokens: Vec<SatToken> = source.iter().flat_map(|token| {
+        if let Some((values, len)) = token.coordinate_components() {
+            values[..len].iter().copied().map(SatToken::Float).collect()
+        } else { vec![token.clone()] }
+    }).collect();
+    let sum = tokens.iter().position(|t| t.as_ident() == Some("sum_spl_sur"))?;
+    let start = (sum + 1..tokens.len()).find(|&i| tokens[i].as_ident() == Some("intcurve"))?;
+    let open = (start + 1..tokens.len()).find(|&i| tokens[i].as_ident() == Some("{"))?;
+    let mut depth = 1usize;
+    let mut close = open + 1;
+    while close < tokens.len() {
+        match tokens[close].as_ident() {
+            Some("{") => depth += 1,
+            Some("}") => { depth -= 1; if depth == 0 { break; } }
+            _ => {}
+        }
+        close += 1;
+    }
+    if depth != 0 { return None; }
+    let (degree_u, u_knots, controls) = decode_bspline_curve(&tokens[open + 1..close])?;
+    let straight = (close + 1..tokens.len()).find(|&i| tokens[i].as_ident() == Some("straight"))?;
+    let read3 = |i: usize| -> Option<[f64; 3]> { Some([tokens.get(i)?.as_float()?,tokens.get(i+1)?.as_float()?,tokens.get(i+2)?.as_float()?]) };
+    let root = read3(straight + 1)?;
+    let direction = read3(straight + 4)?;
+    // Two unbounded line-interval markers precede the sum's reference origin.
+    if tokens.get(straight + 7)?.as_float().is_some() || tokens.get(straight + 8)?.as_float().is_some() { return None; }
+    let origin = read3(straight + 9)?;
+    let range = straight + 12;
+    if tokens.get(range)?.as_integer()? != 2 { return None; }
+    let mut bounds = [0.; 4];
+    for (index, bound) in bounds.iter_mut().enumerate() {
+        let flag = tokens.get(range + 1 + index * 2)?;
+        if flag.as_float().is_some() { return None; }
+        *bound = tokens.get(range + 2 + index * 2)?.as_float()?;
+    }
+    if !bounds.iter().chain(root.iter()).chain(direction.iter()).chain(origin.iter()).all(|v|v.is_finite())
+        || bounds[0] >= bounds[1] || bounds[2] >= bounds[3] { return None; }
+    let control_count_u = controls.len();
+    let mut control_points = Vec::with_capacity(control_count_u * 2);
+    for v in [bounds[2], bounds[3]] {
+        for p in &controls {
+            control_points.push([p[0] + p[3] * (root[0] + direction[0] * v - origin[0]),
+                p[1] + p[3] * (root[1] + direction[1] * v - origin[1]),
+                p[2] + p[3] * (root[2] + direction[2] * v - origin[2]), p[3]]);
+        }
+    }
+    Some(SatBSplineSurface { rational:controls.iter().any(|p|p[3] != 1.), degree_u,degree_v:1,
+        u_closure:Some("open".into()),v_closure:Some("open".into()),u_singularity:None,v_singularity:None,
+        u_knots,v_knots:vec![bounds[2],bounds[2],bounds[3],bounds[3]],control_count_u,control_count_v:2,control_points,fit_tolerance:Some(0.) })
 }
 
 fn decode_bspline_surface(tokens: &[SatToken]) -> Option<SatBSplineSurface> {
@@ -1781,16 +1974,14 @@ fn decode_bspline_surface(tokens: &[SatToken]) -> Option<SatBSplineSurface> {
     let mut u_knots = Vec::new();
     for _ in 0..u_knot_count {
         let value = tokens.get(position)?.as_float()?;
-        let multiplicity =
-            usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
+        let multiplicity = usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
         u_knots.extend(std::iter::repeat(value).take(multiplicity));
         position += 2;
     }
     let mut v_knots = Vec::new();
     for _ in 0..v_knot_count {
         let value = tokens.get(position)?.as_float()?;
-        let multiplicity =
-            usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
+        let multiplicity = usize::try_from(tokens.get(position + 1)?.as_integer()?).ok()?;
         v_knots.extend(std::iter::repeat(value).take(multiplicity));
         position += 2;
     }
@@ -1887,12 +2078,7 @@ fn decode_bspline_surface(tokens: &[SatToken]) -> Option<SatBSplineSurface> {
 }
 
 /// Evaluate a homogeneous B-spline curve at parameter `t` via De Boor.
-fn de_boor_homogeneous(
-    degree: usize,
-    knots: &[f64],
-    ctrl: &[[f64; 4]],
-    t: f64,
-) -> [f64; 4] {
+fn de_boor_homogeneous(degree: usize, knots: &[f64], ctrl: &[[f64; 4]], t: f64) -> [f64; 4] {
     // Knot span k: knots[k] <= t < knots[k+1], clamped into the valid interval.
     let n = ctrl.len();
     let mut k = degree;
@@ -2245,6 +2431,19 @@ pub struct SatDocument {
     pub records: Vec<SatRecord>,
 }
 
+pub(super) fn transform_flags(matrix: [[f64; 3]; 3], scale: f64) -> [&'static str; 3] {
+    let m = crate::types::Matrix3::from_rows(matrix[0], matrix[1], matrix[2]);
+    let rotated = (0..3).any(|i| (0..3).any(|j| i != j && matrix[i][j].abs() > 1e-10));
+    let reflected = m.determinant() * scale < 0.0;
+    let rows = matrix.map(|row| crate::types::Vector3::new(row[0], row[1], row[2]));
+    let sheared = (0..3).any(|i| (i + 1..3).any(|j| rows[i].dot(&rows[j]).abs() > 1e-10));
+    [
+        if rotated { "rotate" } else { "no_rotate" },
+        if reflected { "reflect" } else { "no_reflect" },
+        if sheared { "shear" } else { "no_shear" },
+    ]
+}
+
 impl SatDocument {
     /// Creates a new empty SAT document with ACIS 7.0 header.
     pub fn new() -> Self {
@@ -2279,8 +2478,11 @@ impl SatDocument {
     /// book-keeping pointer and trailing rotate/reflect/shear flags are
     /// skipped by reading float-valued tokens only.
     pub fn placement(&self) -> ([[f64; 3]; 3], [f64; 3], f64) {
-        const IDENTITY: ([[f64; 3]; 3], [f64; 3], f64) =
-            ([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [0.0; 3], 1.0);
+        const IDENTITY: ([[f64; 3]; 3], [f64; 3], f64) = (
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [0.0; 3],
+            1.0,
+        );
         let Some(rec) = self.records.iter().find(|r| r.entity_type == "transform") else {
             return IDENTITY;
         };
@@ -2337,13 +2539,13 @@ impl SatDocument {
             tokens.push(SatToken::Float(x));
         }
         tokens.push(SatToken::Float(scale));
-        // rotate / reflect / shear — a composed matrix may be non-orthogonal,
-        // so flag it as a general (shear) placement.
-        tokens.push(SatToken::Integer(0));
-        tokens.push(SatToken::Integer(0));
-        tokens.push(SatToken::Integer(1));
+        tokens.extend(transform_flags(matrix, scale).map(|flag| SatToken::Ident(flag.into())));
 
-        if let Some(rec) = self.records.iter_mut().find(|r| r.entity_type == "transform") {
+        if let Some(rec) = self
+            .records
+            .iter_mut()
+            .find(|r| r.entity_type == "transform")
+        {
             rec.tokens = tokens;
             return;
         }
@@ -2577,6 +2779,49 @@ impl SatDocument {
         errors
     }
 
+    /// Fill missing vertex-edge and edge-coedge links for ACIS serialization.
+    /// Preserve existing non-null links.
+    pub fn complete_brep_links(&mut self) {
+        use std::collections::HashMap;
+
+        let mut vertex_edges = HashMap::<i32, i32>::new();
+        let mut edge_coedges = HashMap::<i32, i32>::new();
+
+        for record in &self.records {
+            if record.is_a("edge") {
+                for token in [1, 3] {
+                    if let Some(vertex) =
+                        record.token_pointer(token).filter(|value| !value.is_null())
+                    {
+                        vertex_edges.entry(vertex.0).or_insert(record.index);
+                    }
+                }
+            } else if record.is_a("coedge") {
+                if let Some(edge) = record.token_pointer(4).filter(|value| !value.is_null()) {
+                    edge_coedges.entry(edge.0).or_insert(record.index);
+                }
+            }
+        }
+
+        for record in &mut self.records {
+            if record.is_a("vertex") {
+                let missing_edge = record.token_pointer(1).is_none_or(|value| value.is_null());
+                if missing_edge {
+                    if let Some(&edge) = vertex_edges.get(&record.index) {
+                        record.tokens[1] = SatToken::Pointer(SatPointer::new(edge));
+                    }
+                }
+            } else if record.is_a("edge") {
+                let missing_coedge = record.token_pointer(5).is_none_or(|value| value.is_null());
+                if missing_coedge {
+                    if let Some(&coedge) = edge_coedges.get(&record.index) {
+                        record.tokens[5] = SatToken::Pointer(SatPointer::new(coedge));
+                    }
+                }
+            }
+        }
+    }
+
     /// Strip non-geometry entities for SAB binary encoding.
     ///
     /// AutoCAD/IntelliCAD's ACIS SAB format only includes core geometric
@@ -2707,15 +2952,9 @@ pub enum SatParseError {
     /// Failed to parse the tolerance line.
     InvalidTolerances(String),
     /// Failed to parse an entity record.
-    InvalidRecord {
-        line: usize,
-        message: String,
-    },
+    InvalidRecord { line: usize, message: String },
     /// Unexpected token.
-    UnexpectedToken {
-        line: usize,
-        token: String,
-    },
+    UnexpectedToken { line: usize, token: String },
 }
 
 impl fmt::Display for SatParseError {
@@ -2789,10 +3028,10 @@ pub enum SatEntityCategory {
 pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
     match entity_type {
         "asmheader" => SatEntityCategory::Header,
-        "body" | "lump" | "shell" | "subshell" | "face" | "loop" | "coedge" | "edge"
-        | "vertex" | "wire" => SatEntityCategory::Topology,
-        "point" | "straight-curve" | "ellipse-curve" | "intcurve-curve" | "bs3-curve" | "pcurve"
-        | "plane-surface" | "cone-surface" | "sphere-surface" | "torus-surface"
+        "body" | "lump" | "shell" | "subshell" | "face" | "loop" | "coedge" | "edge" | "vertex"
+        | "wire" => SatEntityCategory::Topology,
+        "point" | "straight-curve" | "ellipse-curve" | "intcurve-curve" | "bs3-curve"
+        | "pcurve" | "plane-surface" | "cone-surface" | "sphere-surface" | "torus-surface"
         | "spline-surface" | "meshsurf-surface" | "bs3-surface" => SatEntityCategory::Geometry,
         "transform" => SatEntityCategory::Transform,
         _ if matches!(
@@ -2807,11 +3046,17 @@ pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
                 | "edge"
                 | "vertex"
                 | "wire"
-        ) => SatEntityCategory::Topology,
+        ) =>
+        {
+            SatEntityCategory::Topology
+        }
         _ if matches!(
             base_entity_type(entity_type),
             "point" | "curve" | "surface" | "pcurve"
-        ) => SatEntityCategory::Geometry,
+        ) =>
+        {
+            SatEntityCategory::Geometry
+        }
         _ if entity_type.ends_with("-attrib") || entity_type.starts_with("attrib") => {
             SatEntityCategory::Attribute
         }
@@ -2824,4 +3069,161 @@ pub fn classify_entity_type(entity_type: &str) -> SatEntityCategory {
 /// For example, `tcoedge-coedge` derives from `coedge`.
 pub fn base_entity_type(entity_type: &str) -> &str {
     entity_type.rsplit('-').next().unwrap_or(entity_type)
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    fn raw(tag: u8, data: Vec<u8>) -> SatToken {
+        SatToken::Sab { tag, data }
+    }
+
+    fn counted_string(prefix_size: usize, value: &str) -> Vec<u8> {
+        let mut data = match prefix_size {
+            1 => vec![value.len() as u8],
+            2 => (value.len() as u16).to_le_bytes().to_vec(),
+            4 => (value.len() as u32).to_le_bytes().to_vec(),
+            _ => unreachable!(),
+        };
+        data.extend_from_slice(value.as_bytes());
+        data
+    }
+
+    fn assert_semantic_json(token: SatToken, expected_json: serde_json::Value, expected: SatToken) {
+        let actual = serde_json::to_value(&token).unwrap();
+        assert_eq!(actual, expected_json);
+        assert_eq!(
+            serde_json::from_value::<SatToken>(actual).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn sab_coordinate_tokens_use_the_legacy_position_json_shape() {
+        let values = [8.863414495014042e-14, -1.0, 0.0];
+        let data = values
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let token = SatToken::Sab { tag: 0x14, data };
+
+        assert_eq!(
+            serde_json::to_value(&token).unwrap(),
+            serde_json::json!({ "Position": values })
+        );
+        assert_eq!(
+            serde_json::from_value::<SatToken>(serde_json::json!({ "Position": values })).unwrap(),
+            SatToken::Position(values[0], values[1], values[2])
+        );
+    }
+
+    #[test]
+    fn sab_numeric_tokens_use_their_legacy_json_shapes() {
+        assert_semantic_json(
+            raw(0x02, (-7i8).to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": -7 }),
+            SatToken::Integer(-7),
+        );
+        assert_semantic_json(
+            raw(0x03, (-300i16).to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": -300 }),
+            SatToken::Integer(-300),
+        );
+        assert_semantic_json(
+            raw(0x04, 42i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": 42 }),
+            SatToken::Integer(42),
+        );
+        assert_semantic_json(
+            raw(0x15, 2i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": 2 }),
+            SatToken::Integer(2),
+        );
+        assert_semantic_json(
+            raw(0x17, i64::MAX.to_le_bytes().to_vec()),
+            serde_json::json!({ "Integer": i64::MAX }),
+            SatToken::Integer(i64::MAX),
+        );
+        assert_semantic_json(
+            raw(0x05, 1.5f32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Float": 1.5 }),
+            SatToken::Float(1.5),
+        );
+        assert_semantic_json(
+            raw(0x06, 1.0f64.to_le_bytes().to_vec()),
+            serde_json::json!({ "Float": 1.0 }),
+            SatToken::Float(1.0),
+        );
+    }
+
+    #[test]
+    fn sab_text_and_control_tokens_use_their_legacy_json_shapes() {
+        for (tag, prefix_size) in [(0x07, 1), (0x08, 2), (0x09, 4), (0x12, 4)] {
+            assert_semantic_json(
+                raw(tag, counted_string(prefix_size, "unknown")),
+                serde_json::json!({ "String": "unknown" }),
+                SatToken::String("unknown".to_string()),
+            );
+        }
+        for tag in [0x0D, 0x0E] {
+            assert_semantic_json(
+                raw(tag, counted_string(1, "curve")),
+                serde_json::json!({ "Ident": "curve" }),
+                SatToken::Ident("curve".to_string()),
+            );
+        }
+        assert_semantic_json(
+            raw(0x0A, Vec::new()),
+            serde_json::json!("False"),
+            SatToken::False,
+        );
+        assert_semantic_json(
+            raw(0x0B, Vec::new()),
+            serde_json::json!("True"),
+            SatToken::True,
+        );
+        assert_semantic_json(
+            raw(0x0C, 123i32.to_le_bytes().to_vec()),
+            serde_json::json!({ "Pointer": 123 }),
+            SatToken::Pointer(SatPointer::new(123)),
+        );
+        assert_semantic_json(
+            raw(0x0F, Vec::new()),
+            serde_json::json!({ "Ident": "{" }),
+            SatToken::Ident("{".to_string()),
+        );
+        assert_semantic_json(
+            raw(0x10, Vec::new()),
+            serde_json::json!({ "Ident": "}" }),
+            SatToken::Ident("}".to_string()),
+        );
+        assert_semantic_json(
+            raw(0x11, Vec::new()),
+            serde_json::json!("Terminator"),
+            SatToken::Terminator,
+        );
+    }
+
+    #[test]
+    fn unsupported_and_malformed_sab_tokens_keep_the_raw_json_shape() {
+        let tokens = [
+            raw(0x06, vec![0; 7]),
+            raw(0x07, vec![2, b'a']),
+            raw(0x07, vec![1, 0xFF]),
+            raw(0x0F, vec![0]),
+            raw(0x16, vec![0; 16]),
+            raw(0xFF, vec![1, 2, 3]),
+        ];
+
+        for token in tokens {
+            let expected = token.clone();
+            let json = serde_json::to_value(&token).unwrap();
+            assert!(
+                json.get("Sab").is_some(),
+                "unexpected semantic JSON: {json}"
+            );
+            assert_eq!(serde_json::from_value::<SatToken>(json).unwrap(), expected);
+        }
+    }
 }

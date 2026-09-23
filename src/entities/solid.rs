@@ -30,12 +30,7 @@ pub struct Solid {
 
 impl Solid {
     /// Create a new solid with four corners
-    pub fn new(
-        first: Vector3,
-        second: Vector3,
-        third: Vector3,
-        fourth: Vector3,
-    ) -> Self {
+    pub fn new(first: Vector3, second: Vector3, third: Vector3, fourth: Vector3) -> Self {
         Self {
             common: EntityCommon::default(),
             first_corner: first,
@@ -84,24 +79,18 @@ impl Solid {
         }
     }
 
-    /// Calculate the area of the solid
-    pub fn area(&self) -> f64 {
+    /// Get corners in visible boundary order.
+    /// Stored quadrilaterals use first, second, fourth, third.
+    pub fn boundary_corners(&self) -> Vec<Vector3> {
         if self.is_triangle() {
-            // Triangle area using cross product
-            let v1 = self.second_corner - self.first_corner;
-            let v2 = self.third_corner - self.first_corner;
-            v1.cross(&v2).length() * 0.5
+            vec![self.first_corner, self.second_corner, self.third_corner]
         } else {
-            // Quadrilateral area (sum of two triangles)
-            let v1 = self.second_corner - self.first_corner;
-            let v2 = self.third_corner - self.first_corner;
-            let area1 = v1.cross(&v2).length() * 0.5;
-
-            let v3 = self.third_corner - self.first_corner;
-            let v4 = self.fourth_corner - self.first_corner;
-            let area2 = v3.cross(&v4).length() * 0.5;
-
-            area1 + area2
+            vec![
+                self.first_corner,
+                self.second_corner,
+                self.fourth_corner,
+                self.third_corner,
+            ]
         }
     }
 }
@@ -157,7 +146,9 @@ impl Entity for Solid {
 
     fn bounding_box(&self) -> BoundingBox3D {
         BoundingBox3D::from_points(&self.corners())
-            .unwrap_or_else(|| BoundingBox3D::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0)))
+            .unwrap_or_else(|| {
+                BoundingBox3D::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0))
+            })
             .ocs_to_wcs(self.normal)
     }
 
@@ -168,11 +159,11 @@ impl Entity for Solid {
     fn entity_type(&self) -> &'static str {
         "SOLID"
     }
-    
+
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_solid(self, transform);
     }
-    
+
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
         super::mirror::mirror_solid(self, transform);
     }

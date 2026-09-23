@@ -4,7 +4,7 @@
 //! block headers, entities in each block, and non-graphical objects
 //! (dictionaries, layouts, etc.).
 //!
-//! Ported from ACadSharp `DwgObjectWriter` (partial class across
+//! Ported from the reference `DwgObjectWriter` (partial class across
 //! `DwgObjectWriter.cs`, `…Common.cs`, `…Entities.cs`, `…Objects.cs`).
 //!
 //! ## Record format
@@ -17,24 +17,24 @@
 //! interleaved per the DWG spec.
 
 pub mod associative;
-pub mod common;
 pub mod class_object;
+pub mod common;
 pub mod data_objects;
 pub mod dynamic_block;
 pub mod entities;
 pub mod field;
 pub mod objects;
 
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::document::CadDocument;
 use crate::entities::{EntityCommon, EntityType};
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
 use crate::io::dwg::dwg_stream_writers::DwgMergedWriter;
 use crate::io::dwg::dwg_version::DwgVersion;
+use crate::objects::{ClassObject, ClassObjectData, ObjectType};
 use crate::tables::{BlockRecord, TableEntry};
-use crate::types::{BoundingBox3D, DxfVersion, Handle, Vector2};
+use crate::types::{BoundingBox3D, DxfVersion, Handle};
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -110,11 +110,20 @@ pub struct DwgObjectWriter<'a> {
     pub(super) pending_has_ds_data: bool,
     /// Tracks which object handles have already been written to prevent duplicates.
     pub(super) visited_objects: HashSet<Handle>,
+    /// Number of emitted records for every class-based type code.
+    pub(super) class_instance_counts: HashMap<i16, i32>,
+    /// Type code belonging to the record currently being assembled.
+    pub(super) pending_type_code: Option<i16>,
+    /// False when an opaque record prevents an exact class census.
+    pub(super) class_counts_complete: bool,
     /// Every handle actually emitted to the object map. Central guard against
     /// writing the same handle twice (e.g. an xdictionary XRECORD reachable
     /// from more than one path): a duplicate handle is a hard DWG integrity
-    /// error that AutoCAD's audit rejects, so register_* skips repeats.
+    /// error that strict audits reject, so register_* skips repeats.
     pub(super) registered_handles: HashSet<u64>,
+    /// Records selected for serialization by the raw-all exclusion filter.
+    /// Shared with parallel entity writers so their passthrough decisions agree.
+    pub(super) raw_excluded_handles: std::sync::Arc<HashSet<u64>>,
     /// Owner handle overrides for extension dictionaries whose parent entity
     /// was re-allocated (e.g. ATTRIB children of INSERT).
     pub(super) owner_overrides: std::collections::HashMap<Handle, Handle>,
@@ -123,6 +132,8 @@ pub struct DwgObjectWriter<'a> {
     /// Populated before writing any table controls so controls and records agree.
     #[allow(dead_code)]
     pub(super) linetype_handles: std::collections::HashMap<String, Handle>,
+    /// Cached fallback for owners without a direct extension-dictionary handle.
+    pub(super) xdic_owner_index: std::sync::Arc<std::collections::HashMap<Handle, Handle>>,
 }
 
 struct ParallelEntityBatch {
@@ -130,6 +141,8 @@ struct ParallelEntityBatch {
     handle_map: Vec<(u64, u32)>,
     object_queue: VecDeque<Handle>,
     registered_handles: HashSet<u64>,
+    class_instance_counts: HashMap<i16, i32>,
+    class_counts_complete: bool,
 }
 
 impl<'a> DwgObjectWriter<'a> {
@@ -139,9 +152,9 @@ impl<'a> DwgObjectWriter<'a> {
     pub fn new(document: &'a CadDocument) -> crate::error::Result<Self> {
         let version = DwgVersion::from_dxf_version(document.version)?;
         let dxf_version = document.version;
-        let encoding =
-            crate::io::dxf::code_page::encoding_from_code_page(&document.header.code_page)
-                .unwrap_or(encoding_rs::WINDOWS_1252);
+        let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(
+            crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page),
+        );
         let writer = DwgMergedWriter::with_encoding(version, dxf_version, encoding);
 
         // Compute safe starting handle for allocation.
@@ -151,57 +164,90 @@ impl<'a> DwgObjectWriter<'a> {
         let mut max_h = document.header.handle_seed;
         for entity in document.entities() {
             let h = entity.common().handle.value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
-        for (handle, _) in &document.objects {
+        for (handle, object) in &document.objects {
+            if let ObjectType::ClassObject(ClassObject {
+                data: ClassObjectData::DataTable(table),
+                ..
+            }) = object
+            {
+                table.validate()?;
+            }
             let h = handle.value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         for br in document.block_records.iter() {
             let h = br.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
             // Also scan block entity and endblk entity handles:
             // these are written verbatim by write_block_begin/write_block_end
             // but are NOT part of document.entities(), so they would otherwise
             // be missed and cause alloc_handle() to re-issue their handle values.
             let h2 = br.block_entity_handle.value() + 1;
-            if h2 > max_h { max_h = h2; }
+            if h2 > max_h {
+                max_h = h2;
+            }
             let h3 = br.block_end_handle.value() + 1;
-            if h3 > max_h { max_h = h3; }
+            if h3 > max_h {
+                max_h = h3;
+            }
         }
         for ly in document.layers.iter() {
             let h = ly.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         for lt in document.line_types.iter() {
             let h = lt.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         for ts in document.text_styles.iter() {
             let h = ts.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         // Also scan the remaining table entries that were previously missed:
         // app_ids, dim_styles, views, vports, ucss
         for a in document.app_ids.iter() {
             let h = a.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         for ds in document.dim_styles.iter() {
             let h = ds.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         for v in document.views.iter() {
             let h = v.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         for vp in document.vports.iter() {
             let h = vp.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
         for u in document.ucss.iter() {
             let h = u.handle().value() + 1;
-            if h > max_h { max_h = h; }
+            if h > max_h {
+                max_h = h;
+            }
         }
 
         Ok(Self {
@@ -213,6 +259,7 @@ impl<'a> DwgObjectWriter<'a> {
             handle_map: Vec::with_capacity(1024),
             object_queue: VecDeque::new(),
             registered_handles: HashSet::new(),
+            raw_excluded_handles: std::sync::Arc::new(HashSet::new()),
             prev_handle: None,
             next_handle: None,
             next_alloc_handle: max_h,
@@ -220,27 +267,111 @@ impl<'a> DwgObjectWriter<'a> {
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
             visited_objects: HashSet::new(),
+            class_instance_counts: HashMap::new(),
+            pending_type_code: None,
+            class_counts_complete: true,
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
+            xdic_owner_index: std::sync::Arc::new(Self::build_xdic_owner_index(document)),
         })
+    }
+
+    /// Index the fallback ownership lookup used by `extension_dictionary_handle`.
+    fn build_xdic_owner_index(document: &CadDocument) -> std::collections::HashMap<Handle, Handle> {
+        let mut index = std::collections::HashMap::new();
+        for (handle, object) in &document.objects {
+            if let crate::objects::ObjectType::Dictionary(dictionary) = object {
+                if handle.is_null() || dictionary.owner.is_null() {
+                    continue;
+                }
+                if matches!(
+                    document.objects.get(&dictionary.owner),
+                    Some(crate::objects::ObjectType::Dictionary(_))
+                ) {
+                    continue;
+                }
+                index.entry(dictionary.owner).or_insert(*handle);
+            }
+        }
+        index
+    }
+
+    /// Resolve an extension dictionary without scanning every object per call.
+    pub(super) fn extension_dictionary_handle(&self, owner: Handle) -> Option<Handle> {
+        use crate::objects::ObjectType;
+        let document = self.document;
+        if let Some(entity) = document.get_entity(owner) {
+            if let Some(handle) = entity.common().xdictionary_handle {
+                return (!handle.is_null()).then_some(handle);
+            }
+        }
+        if let Some(handle) = document.xdic_by_handle.get(&owner).copied() {
+            return (!handle.is_null()).then_some(handle);
+        }
+        if let Some(handle) = match document.objects.get(&owner) {
+            Some(ObjectType::Dictionary(value)) => value.xdictionary_handle,
+            Some(ObjectType::Layout(value)) => value.xdictionary_handle,
+            Some(ObjectType::XRecord(value)) => value.xdictionary_handle,
+            Some(ObjectType::PlotSettings(value)) => value.xdictionary_handle,
+            Some(ObjectType::VisualStyle(value)) => value.xdictionary_handle,
+            Some(ObjectType::Material(value)) => value.xdictionary_handle,
+            Some(ObjectType::ProxyObject(value)) => value.xdictionary_handle,
+            _ => None,
+        } {
+            if !handle.is_null() {
+                return Some(handle);
+            }
+        }
+        if matches!(
+            document.objects.get(&owner),
+            Some(ObjectType::Dictionary(_))
+        ) {
+            return None;
+        }
+        self.xdic_owner_index.get(&owner).copied()
     }
 
     // ── Main entry point ────────────────────────────────────────────
 
-    /// Write all objects and return `(output_bytes, handle_map, model_space_extents, sab_entries)`.
+    pub fn write(
+        self,
+    ) -> (
+        Vec<u8>,
+        Vec<(u64, u32)>,
+        Option<BoundingBox3D>,
+        Vec<(Handle, Vec<u8>)>,
+    ) {
+        let (output, handles, extents, sab_entries, _, _) = self.write_with_class_metadata();
+        (output, handles, extents, sab_entries)
+    }
+
+    /// Write all objects and return the encoded records and their derived metadata.
     ///
     /// For AC1027+, ACIS entities (3DSOLID, REGION, BODY) are written with
     /// `acis_empty=true` in the entity stream; their SAB binary data is
     /// collected into `sab_entries` for writing into the `AcDb:AcDsPrototype_1b`
     /// section.
-    pub fn write(mut self) -> (Vec<u8>, Vec<(u64, u32)>, Option<BoundingBox3D>, Vec<(Handle, Vec<u8>)>) {
+    pub(crate) fn write_with_class_metadata(
+        mut self,
+    ) -> (
+        Vec<u8>,
+        Vec<(u64, u32)>,
+        Option<BoundingBox3D>,
+        Vec<(Handle, Vec<u8>)>,
+        HashMap<i16, i32>,
+        bool,
+    ) {
         // Compute model space extents for VPort view adjustment
         self.model_space_extents = self.compute_model_space_extents();
+
 
         // R2004+: 0x0DCA marker at the start
         if self.version.r2004_plus() {
             self.output.extend_from_slice(&0x0DCAi32.to_le_bytes());
         }
+
+        // Debug bisection aid (ACADRUST_RAW_ALL): re-emit source records verbatim.
+        self.preregister_raw_records();
 
         // Enqueue root dictionary for later.
         // If the header handle is NULL (e.g., after a DWG read where the
@@ -259,29 +390,59 @@ impl<'a> DwgObjectWriter<'a> {
         self.write_table_control(
             self.document.layers.handle(),
             common::OBJ_LAYER_CONTROL,
-            &self.document.layers.iter().map(|l| l.handle).collect::<Vec<_>>(),
+            &self
+                .document
+                .layers
+                .iter()
+                .map(|l| l.handle)
+                .collect::<Vec<_>>(),
         );
         self.write_text_style_control();
         self.write_ltype_control();
         self.write_table_control(
             self.document.views.handle(),
             common::OBJ_VIEW_CONTROL,
-            &self.document.views.iter().map(|v| v.handle).collect::<Vec<_>>(),
+            &self
+                .document
+                .views
+                .iter()
+                .map(|v| v.handle)
+                .collect::<Vec<_>>(),
         );
         self.write_table_control(
             self.document.ucss.handle(),
             common::OBJ_UCS_CONTROL,
-            &self.document.ucss.iter().map(|u| u.handle).collect::<Vec<_>>(),
+            &self
+                .document
+                .ucss
+                .iter()
+                .map(|u| u.handle)
+                .collect::<Vec<_>>(),
         );
         self.write_table_control(
             self.document.vports.handle(),
             common::OBJ_VPORT_CONTROL,
-            &self.document.vports.iter().map(|v| v.handle).collect::<Vec<_>>(),
+            &self
+                .document
+                .vports
+                .iter()
+                .map(|v| v.handle)
+                .collect::<Vec<_>>(),
         );
+        let mut appid_handles: Vec<_> = self
+            .document
+            .app_ids
+            .iter()
+            .map(|a| (a.name.eq_ignore_ascii_case("ACAD"), a.handle))
+            .collect();
+        appid_handles.sort_by_key(|(is_acad, _)| !*is_acad);
         self.write_table_control(
             self.document.app_ids.handle(),
             common::OBJ_APPID_CONTROL,
-            &self.document.app_ids.iter().map(|a| a.handle).collect::<Vec<_>>(),
+            &appid_handles
+                .into_iter()
+                .map(|(_, handle)| handle)
+                .collect::<Vec<_>>(),
         );
         self.write_dimstyle_control();
 
@@ -309,7 +470,14 @@ impl<'a> DwgObjectWriter<'a> {
         // ── Drain object queue ──────────────────────────────────
         self.write_objects();
 
-        (self.output, self.handle_map, self.model_space_extents, self.sab_entries)
+        (
+            self.output,
+            self.handle_map,
+            self.model_space_extents,
+            self.sab_entries,
+            self.class_instance_counts,
+            self.class_counts_complete,
+        )
     }
 
     /// Whether this version stores ACIS data externally (AcDsPrototype_1b section)
@@ -373,13 +541,7 @@ impl<'a> DwgObjectWriter<'a> {
         entry_handles: &[Handle],
     ) {
         // Owner is always 0 for table controls (owned by header)
-        self.write_common_non_entity_data(
-            type_code,
-            table_handle,
-            Handle::NULL,
-            &[],
-            &None,
-        );
+        self.write_common_non_entity_data(type_code, table_handle, Handle::NULL, &[], &None);
 
         // Entry count
         self.writer.write_bit_long(entry_handles.len() as i32);
@@ -440,12 +602,7 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// STYLE_CONTROL
     fn write_text_style_control(&mut self) {
-        let handles: Vec<Handle> = self
-            .document
-            .text_styles
-            .iter()
-            .map(|s| s.handle)
-            .collect();
+        let handles: Vec<Handle> = self.document.text_styles.iter().map(|s| s.handle).collect();
         self.write_table_control(
             self.document.text_styles.handle(),
             common::OBJ_STYLE_CONTROL,
@@ -495,12 +652,7 @@ impl<'a> DwgObjectWriter<'a> {
     /// DIMSTYLE_CONTROL — special: has an extra undocumented byte in R2000+.
     fn write_dimstyle_control(&mut self) {
         let table_handle = self.document.dim_styles.handle();
-        let handles: Vec<Handle> = self
-            .document
-            .dim_styles
-            .iter()
-            .map(|d| d.handle)
-            .collect();
+        let handles: Vec<Handle> = self.document.dim_styles.iter().map(|d| d.handle).collect();
 
         self.write_common_non_entity_data(
             common::OBJ_DIMSTYLE_CONTROL,
@@ -550,10 +702,8 @@ impl<'a> DwgObjectWriter<'a> {
         );
         self.writer.write_bit_short(handles.len() as i16);
         for handle in &handles {
-            self.writer.write_handle(
-                DwgReferenceType::SoftOwnership,
-                handle.value(),
-            );
+            self.writer
+                .write_handle(DwgReferenceType::SoftOwnership, handle.value());
         }
         self.register_object(table_handle);
     }
@@ -578,25 +728,16 @@ impl<'a> DwgObjectWriter<'a> {
 
         self.writer.write_variable_text(&entry.name);
         self.writer.write_bit(entry.is_xref_reference);
-        self.writer.write_bit_short(if entry.is_xref_resolved {
-            256
-        } else {
-            0
-        });
+        self.writer
+            .write_bit_short(if entry.is_xref_resolved { 256 } else { 0 });
         self.writer.write_bit(entry.is_xref_dependent);
         self.writer.write_bit(entry.is_on);
-        self.writer.write_handle(
-            DwgReferenceType::HardPointer,
-            entry.xref_handle.value(),
-        );
-        self.writer.write_handle(
-            DwgReferenceType::SoftPointer,
-            entry.viewport.value(),
-        );
-        self.writer.write_handle(
-            DwgReferenceType::HardPointer,
-            entry.previous_entry.value(),
-        );
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, entry.xref_handle.value());
+        self.writer
+            .write_handle(DwgReferenceType::SoftPointer, entry.viewport.value());
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, entry.previous_entry.value());
         self.register_object(entry.handle);
     }
 
@@ -626,13 +767,47 @@ impl<'a> DwgObjectWriter<'a> {
                 (app.handle.value(), bytes)
             })
         });
+        // A description is stored the same way, under its own application,
+        // as two strings of which the second is the text. Encoded through the
+        // EED codec rather than by hand: a DWG string carries a length and a
+        // code page, and from R2007 it is UTF-16.
+        let description_eed = self
+            .document
+            .app_ids
+            .get(crate::tables::layer::LAYER_DESCRIPTION_APP)
+            .and_then(|app| {
+                (!layer.description.is_empty()).then(|| {
+                    let code_page = crate::io::dxf::code_page::dwg_code_page_index(
+                        &self.document.header.code_page,
+                    );
+                    let encoding =
+                        crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page);
+                    let values = [
+                        crate::xdata::XDataValue::String(String::new()),
+                        crate::xdata::XDataValue::String(layer.description.clone()),
+                    ];
+                    let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
+                        self.version.r2007_plus(),
+                        &values,
+                        encoding,
+                        code_page,
+                        |_| 0,
+                    );
+                    (app.handle.value(), bytes)
+                })
+            });
+
+        let extra_eed: Vec<_> = transparency_eed
+            .into_iter()
+            .chain(description_eed)
+            .collect();
         self.write_common_non_entity_data_eed(
             common::OBJ_LAYER,
             layer.handle,
             self.document.layers.handle(),
             &[],
             &None,
-            transparency_eed,
+            extra_eed,
         );
 
         // Entry name
@@ -670,16 +845,24 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Color (CMC)
-        self.writer.write_cm_color(&layer.color);
+        self.writer.write_cm_color_with_names(
+            &layer.color,
+            layer.color_name.as_deref(),
+            layer.book_name.as_deref(),
+        );
 
         // External reference block handle
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, layer.xref_block_record_handle.value());
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            layer.xref_block_record_handle.value(),
+        );
 
         if self.version.r2000_plus() {
             // Plotstyle handle
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, layer.plotstyle_handle.value());
+            self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                layer.plotstyle_handle.value(),
+            );
         }
 
         if self.version.r2007_plus() {
@@ -704,8 +887,7 @@ impl<'a> DwgObjectWriter<'a> {
             .write_handle(DwgReferenceType::HardPointer, lt_handle.value());
 
         if self.version.r2013_plus(self.dxf_version) {
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, 0);
+            self.writer.write_handle(DwgReferenceType::HardPointer, 0);
         }
 
         self.register_object(layer.handle);
@@ -731,14 +913,14 @@ impl<'a> DwgObjectWriter<'a> {
             self.document.text_styles.handle(),
             &[],
             &None,
-            anno,
+            anno.into_iter().collect(),
         );
 
         // Entry name
         self.writer.write_variable_text(&style.name);
 
-        // Xref-dependant
-        self.write_xref_dependant_bit();
+        // Xref-dependent flag
+        self.write_xref_dependant_bit_value(style.xref_dependent);
 
         // Shape file flag
         self.writer.write_bit(style.is_shape_file);
@@ -751,8 +933,9 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(style.width_factor);
         // Oblique angle
         self.writer.write_bit_double(style.oblique_angle);
-        // Generation (mirror flags)
-        self.writer.write_byte(0);
+        // Generation (mirror flags: 2 = backward, 4 = upside down)
+        let generation = (if style.flags.backward { 2u8 } else { 0 }) | (if style.flags.upside_down { 4u8 } else { 0 });
+        self.writer.write_byte(generation);
         // Last height (must be > 0; use effective_last_height)
         self.writer.write_bit_double(style.effective_last_height());
         // Font name
@@ -761,9 +944,10 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_variable_text(&style.big_font_file);
 
         // External reference block handle (hard pointer)
-        // Null for non-xref-dependent styles
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            style.xref_block_record_handle.value(),
+        );
 
         self.register_object(style.handle);
     }
@@ -791,8 +975,9 @@ impl<'a> DwgObjectWriter<'a> {
 
         // Entry name
         self.writer.write_variable_text(&ltype.name);
-        // Xref
-        self.write_xref_dependant_bit();
+        // Xref-dependent flag (linetypes that came in through an xref keep it,
+        // otherwise AUDIT renames every "xref|name" record).
+        self.write_xref_dependant_bit_value(ltype.xref_dependent);
         // Description
         self.writer.write_variable_text(&ltype.description);
         // Pattern length
@@ -844,9 +1029,15 @@ impl<'a> DwgObjectWriter<'a> {
             // (per de-facto DWG convention; OpenDesign spec has these reversed)
             let flags = if let Some(ref cx) = c {
                 let mut f: i16 = 0;
-                if cx.is_absolute_rotation() { f |= 0x01; }
-                if cx.is_text() { f |= 0x02; }
-                if cx.is_shape() { f |= 0x04; }
+                if cx.is_absolute_rotation() {
+                    f |= 0x01;
+                }
+                if cx.is_text() {
+                    f |= 0x02;
+                }
+                if cx.is_shape() {
+                    f |= 0x04;
+                }
                 f
             } else {
                 0
@@ -876,19 +1067,19 @@ impl<'a> DwgObjectWriter<'a> {
             shape_numbers.push(shape_number);
         }
 
-        for ((seg, shape_number), flags) in ltype
-            .elements
-            .iter()
-            .zip(shape_numbers)
-            .zip(shape_flags)
+        for ((seg, shape_number), flags) in
+            ltype.elements.iter().zip(shape_numbers).zip(shape_flags)
         {
             let c = seg.complex.as_ref();
             self.writer.write_bit_double(seg.length);
             self.writer.write_bit_short(shape_number);
-            self.writer.write_raw_double(c.map_or(0.0, |cx| cx.offset[0]));
-            self.writer.write_raw_double(c.map_or(0.0, |cx| cx.offset[1]));
+            self.writer
+                .write_raw_double(c.map_or(0.0, |cx| cx.offset[0]));
+            self.writer
+                .write_raw_double(c.map_or(0.0, |cx| cx.offset[1]));
             self.writer.write_bit_double(c.map_or(1.0, |cx| cx.scale));
-            self.writer.write_bit_double(c.map_or(0.0, |cx| cx.rotation));
+            self.writer
+                .write_bit_double(c.map_or(0.0, |cx| cx.rotation));
             self.writer.write_bit_short(flags);
         }
 
@@ -901,14 +1092,15 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // External reference block handle
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+        self.writer.write_handle(
+            DwgReferenceType::HardPointer,
+            ltype.xref_block_record_handle.value(),
+        );
 
         // Shape file handles for each segment
         for seg in &ltype.elements {
             let sh = seg.complex.as_ref().map_or(0, |cx| cx.style_handle.value());
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, sh);
+            self.writer.write_handle(DwgReferenceType::HardPointer, sh);
         }
 
         self.register_object(ltype.handle);
@@ -931,16 +1123,14 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         self.writer.write_variable_text(&view.name);
-        self.write_xref_table_flags(
-            view.xref_reference,
-            view.xref_resolved,
-            view.xref_dependent,
-        );
+        self.write_xref_table_flags(view.xref_reference, view.xref_resolved, view.xref_dependent);
 
         self.writer.write_bit_double(view.height);
         self.writer.write_bit_double(view.width);
-        self.writer
-            .write_2raw_double(crate::types::Vector2 { x: view.center.x, y: view.center.y });
+        self.writer.write_2raw_double(crate::types::Vector2 {
+            x: view.center.x,
+            y: view.center.y,
+        });
         self.writer.write_3bit_double(view.target);
         self.writer.write_3bit_double(view.direction);
         self.writer.write_bit_double(view.twist_angle);
@@ -987,10 +1177,14 @@ impl<'a> DwgObjectWriter<'a> {
             .write_handle(DwgReferenceType::HardPointer, view.xref_handle.value());
 
         if self.version.r2007_plus() {
-            self.writer
-                .write_handle(DwgReferenceType::SoftPointer, view.background_handle.value());
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, view.visual_style_handle.value());
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                view.background_handle.value(),
+            );
+            self.writer.write_handle(
+                DwgReferenceType::HardPointer,
+                view.visual_style_handle.value(),
+            );
             self.writer
                 .write_handle(DwgReferenceType::HardOwnership, view.sun_handle.value());
         }
@@ -1003,8 +1197,10 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         if self.version.r2007_plus() {
-            self.writer
-                .write_handle(DwgReferenceType::SoftPointer, view.live_section_handle.value());
+            self.writer.write_handle(
+                DwgReferenceType::SoftPointer,
+                view.live_section_handle.value(),
+            );
         }
 
         self.register_object(view.handle);
@@ -1027,11 +1223,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         self.writer.write_variable_text(&ucs.name);
-        self.write_xref_table_flags(
-            ucs.xref_reference,
-            ucs.xref_resolved,
-            ucs.xref_dependent,
-        );
+        self.write_xref_table_flags(ucs.xref_reference, ucs.xref_resolved, ucs.xref_dependent);
 
         self.writer.write_3bit_double(ucs.origin);
         self.writer.write_3bit_double(ucs.x_axis);
@@ -1057,69 +1249,7 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_vport_entries(&mut self) {
-        let mut entries: Vec<_> = self
-            .document
-            .vports
-            .iter()
-            .map(|v| v.clone())
-            .collect();
-
-        // If model space extents were computed and VPort has default view
-        // settings that would miss the entities, apply a "zoom extents"
-        // so entities are visible when the file is first opened.
-        if let Some(ref ext) = self.model_space_extents {
-            let center = ext.center();
-            let ext_height = ext.max.y - ext.min.y;
-            let ext_width = ext.max.x - ext.min.x;
-
-            for vp in &mut entries {
-                if vp.name == "*Active" {
-                    let ar = if vp.aspect_ratio > 0.0 {
-                        vp.aspect_ratio
-                    } else {
-                        1.0
-                    };
-                    // Only apply the zoom-extents fix when this viewport's
-                    // CURRENT view would MISS the geometry (a default / empty
-                    // view). A real saved view is left untouched — crucially,
-                    // each pane of a tiled model layout is stored as its own
-                    // duplicate `*Active` entry with a distinct view, and
-                    // overwriting them all here would collapse every pane to
-                    // the same camera.
-                    let half_h = vp.view_height.abs() / 2.0;
-                    let half_w = half_h * ar;
-                    // view_center is in DCS — the view plane rotated by the
-                    // view twist. The WCS center is view_target plus the
-                    // center rotated back by the twist (Rz(-twist)); using the
-                    // raw view_center here would misjudge any twisted view as
-                    // "missing" the geometry and then clobber it.
-                    let (sin_t, cos_t) = vp.view_twist.sin_cos();
-                    let cx = vp.view_target.x + cos_t * vp.view_center.x
-                        + sin_t * vp.view_center.y;
-                    let cy = vp.view_target.y - sin_t * vp.view_center.x
-                        + cos_t * vp.view_center.y;
-                    let overlaps = cx + half_w >= ext.min.x
-                        && cx - half_w <= ext.max.x
-                        && cy + half_h >= ext.min.y
-                        && cy - half_h <= ext.max.y;
-                    if !overlaps {
-                        // Ensure the full extents fit, with 10% margin.
-                        let vh = (ext_height.max(ext_width / ar)) * 1.1;
-                        vp.view_height = if vh > 0.0 { vh } else { 10.0 };
-                        // Store the WCS extents center back in DCS: keep
-                        // view_target at the origin and rotate the center by
-                        // the twist (Rz(+twist)) so the reader folds it back to
-                        // the WCS center instead of double-rotating it.
-                        vp.view_target = crate::types::Vector3::ZERO;
-                        vp.view_center = Vector2::new(
-                            cos_t * center.x - sin_t * center.y,
-                            sin_t * center.x + cos_t * center.y,
-                        );
-                    }
-                }
-            }
-        }
-
+        let entries: Vec<_> = self.document.vports.iter().cloned().collect();
         for vp in &entries {
             self.write_vport(vp);
         }
@@ -1149,11 +1279,10 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer
             .write_bit_double(vport.aspect_ratio * vport.view_height);
         // View Center 2RD 12
-        self.writer
-            .write_2raw_double(crate::types::Vector2 {
-                x: vport.view_center.x,
-                y: vport.view_center.y,
-            });
+        self.writer.write_2raw_double(crate::types::Vector2 {
+            x: vport.view_center.x,
+            y: vport.view_center.y,
+        });
         // View target 3BD 17
         self.writer.write_3bit_double(vport.view_target);
         // View dir 3BD 16
@@ -1193,17 +1322,15 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Common: Lower left 2RD 10
-        self.writer
-            .write_2raw_double(crate::types::Vector2 {
-                x: vport.lower_left.x,
-                y: vport.lower_left.y,
-            });
+        self.writer.write_2raw_double(crate::types::Vector2 {
+            x: vport.lower_left.x,
+            y: vport.lower_left.y,
+        });
         // Common: Upper right 2RD 11
-        self.writer
-            .write_2raw_double(crate::types::Vector2 {
-                x: vport.upper_right.x,
-                y: vport.upper_right.y,
-            });
+        self.writer.write_2raw_double(crate::types::Vector2 {
+            x: vport.upper_right.x,
+            y: vport.upper_right.y,
+        });
 
         // UCSFOLLOW B 71
         self.writer.write_bit(vport.ucsfollow);
@@ -1217,11 +1344,10 @@ impl<'a> DwgObjectWriter<'a> {
         // Grid on/off B 76
         self.writer.write_bit(vport.grid_on);
         // Grid spacing 2RD 15
-        self.writer
-            .write_2raw_double(crate::types::Vector2 {
-                x: vport.grid_spacing.x,
-                y: vport.grid_spacing.y,
-            });
+        self.writer.write_2raw_double(crate::types::Vector2 {
+            x: vport.grid_spacing.x,
+            y: vport.grid_spacing.y,
+        });
         // Snap on/off B 75
         self.writer.write_bit(vport.snap_on);
         // Snap style B 77
@@ -1231,17 +1357,15 @@ impl<'a> DwgObjectWriter<'a> {
         // Snap rot BD 50
         self.writer.write_bit_double(vport.snap_rotation);
         // Snap base 2RD 13
-        self.writer
-            .write_2raw_double(crate::types::Vector2 {
-                x: vport.snap_base.x,
-                y: vport.snap_base.y,
-            });
+        self.writer.write_2raw_double(crate::types::Vector2 {
+            x: vport.snap_base.x,
+            y: vport.snap_base.y,
+        });
         // Snap spacing 2RD 14
-        self.writer
-            .write_2raw_double(crate::types::Vector2 {
-                x: vport.snap_spacing.x,
-                y: vport.snap_spacing.y,
-            });
+        self.writer.write_2raw_double(crate::types::Vector2 {
+            x: vport.snap_spacing.x,
+            y: vport.snap_spacing.y,
+        });
 
         // R2000+
         if self.version.r2000_plus() {
@@ -1263,10 +1387,8 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Common: External reference block handle (hard pointer)
-        self.writer.write_handle(
-            DwgReferenceType::HardPointer,
-            vport.xref_handle.value(),
-        );
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, vport.xref_handle.value());
 
         // R2007+
         if self.version.r2007_plus() {
@@ -1281,10 +1403,8 @@ impl<'a> DwgObjectWriter<'a> {
                 vport.visual_style_handle.value(),
             );
             // Sun handle H 361 hard owner (code 3)
-            self.writer.write_handle(
-                DwgReferenceType::HardOwnership,
-                vport.sun_handle.value(),
-            );
+            self.writer
+                .write_handle(DwgReferenceType::HardOwnership, vport.sun_handle.value());
         }
 
         // R2000+
@@ -1295,22 +1415,16 @@ impl<'a> DwgObjectWriter<'a> {
                 vport.named_ucs_handle.value(),
             );
             // Base UCS Handle H 346 hard pointer
-            self.writer.write_handle(
-                DwgReferenceType::HardPointer,
-                vport.base_ucs_handle.value(),
-            );
+            self.writer
+                .write_handle(DwgReferenceType::HardPointer, vport.base_ucs_handle.value());
         }
 
         self.register_object(vport.handle);
     }
 
     fn write_appid_entries(&mut self) {
-        let entries: Vec<_> = self
-            .document
-            .app_ids
-            .iter()
-            .map(|a| a.clone())
-            .collect();
+        let mut entries: Vec<_> = self.document.app_ids.iter().map(|a| a.clone()).collect();
+        entries.sort_by_key(|app| !app.name.eq_ignore_ascii_case("ACAD"));
         for app in &entries {
             self.write_appid(app);
         }
@@ -1326,8 +1440,27 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         // Sanitize name: strip control chars and forbidden symbol table characters
-        let name: String = app.name.chars()
-            .filter(|c| !c.is_control() && !matches!(c, '<' | '>' | '/' | '\\' | '"' | ':' | ';' | '?' | '*' | '|' | ',' | '=' | '`'))
+        let name: String = app
+            .name
+            .chars()
+            .filter(|c| {
+                !c.is_control()
+                    && !matches!(
+                        c,
+                        '<' | '>'
+                            | '/'
+                            | '\\'
+                            | '"'
+                            | ':'
+                            | ';'
+                            | '?'
+                            | '*'
+                            | '|'
+                            | ','
+                            | '='
+                            | '`'
+                    )
+            })
             .collect();
         self.writer.write_variable_text(&name);
         self.write_xref_dependant_bit();
@@ -1336,19 +1469,13 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_byte(0);
 
         // External reference block handle
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+        self.writer.write_handle(DwgReferenceType::HardPointer, 0);
 
         self.register_object(app.handle);
     }
 
     fn write_dimstyle_entries(&mut self) {
-        let entries: Vec<_> = self
-            .document
-            .dim_styles
-            .iter()
-            .map(|d| d.clone())
-            .collect();
+        let entries: Vec<_> = self.document.dim_styles.iter().map(|d| d.clone()).collect();
         for ds in &entries {
             self.write_dimstyle(ds);
         }
@@ -1374,20 +1501,16 @@ impl<'a> DwgObjectWriter<'a> {
             self.document.dim_styles.handle(),
             &[],
             &None,
-            anno,
+            anno.into_iter().collect(),
         );
 
         // Common: Entry name TV 2
         self.writer.write_variable_text(&ds.name);
-        self.write_xref_table_flags(
-            ds.xref_reference,
-            ds.xref_resolved,
-            ds.xref_dependent,
-        );
+        self.write_xref_table_flags(ds.xref_reference, ds.xref_resolved, ds.xref_dependent);
 
         // ── R13/R14 Only: DimStyle fields ───────────────────────────
         // These fields are ONLY written for R13/R14 (not R2000+).
-        // Field order matches C# ACadSharp writeDimensionStyle() R13_14Only block.
+        // Field order matches the reference writeDimensionStyle() R13_14Only block.
         if self.version.r13_14_only() {
             // DIMTOL B 71
             self.writer.write_bit(ds.dimtol);
@@ -1500,7 +1623,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // ── R2000+ DimStyle fields ──────────────────────────────────
-        // Field order, data types, and version guards match C# ACadSharp
+        // Field order, data types, and version guards match the reference implementation
         // DwgObjectWriter.writeDimensionStyle() exactly.
         if self.version.r2000_plus() {
             // DIMPOST TV 3
@@ -1742,19 +1865,7 @@ impl<'a> DwgObjectWriter<'a> {
             // for an xref block (see the `is_xref` guards in the header).
             let is_xref = br.flags.is_xref || br.flags.is_xref_overlay;
 
-            // The block header's owned-handle list MUST match the objects the
-            // entity loop below actually writes (br.entity_handles + their
-            // sub-entities). Compute that set first.
-            //
-            // A live editing session can leave DANGLING handles in the block's
-            // chain: deleting an entity removes it from the document but its
-            // handle may stay listed here until the chain is next rebuilt. A
-            // header that promises more owned objects than the entity loop
-            // writes makes AutoCAD stop reading the block at the first
-            // dangling handle — the file opens EMPTY (issue: model space with
-            // 40 claimed / 16 real entities). Keep only handles that resolve
-            // to a live entity; the entity loop below uses the same list so
-            // header and stream always agree.
+            // Keep only live entities directly owned by the block header.
             let live_handles: Vec<Handle> = br
                 .entity_handles
                 .iter()
@@ -1764,28 +1875,23 @@ impl<'a> DwgObjectWriter<'a> {
             let entity_handles_for_header = if is_xref {
                 Vec::new()
             } else {
-                let expanded = self.expand_entity_handles(&live_handles);
-                // Prefer the original DWG-binary order/handles when available,
-                // but only when they describe exactly the same set — otherwise
-                // the file had entities added or removed since it was read and
-                // the stored list is stale, leaving the header pointing at
-                // handles that are never written. AutoCAD stops reading a
-                // block's contents at the first such dangling owned handle,
-                // silently dropping every entity after it. Drop stale entries
-                // and fall back to the live set.
+                // Preserve the original order when it still matches the live set.
                 match self.document.block_entity_handles.get(&br.handle) {
                     Some(orig) => {
                         use std::collections::HashSet;
-                        let valid: HashSet<u64> = expanded.iter().map(|h| h.value()).collect();
-                        let filtered: Vec<Handle> =
-                            orig.iter().copied().filter(|h| valid.contains(&h.value())).collect();
-                        if filtered.len() == expanded.len() {
+                        let valid: HashSet<u64> = live_handles.iter().map(|h| h.value()).collect();
+                        let filtered: Vec<Handle> = orig
+                            .iter()
+                            .copied()
+                            .filter(|h| valid.contains(&h.value()))
+                            .collect();
+                        if filtered.len() == live_handles.len() {
                             filtered
                         } else {
-                            expanded
+                            live_handles.clone()
                         }
                     }
-                    None => expanded,
+                    None => live_handles.clone(),
                 }
             };
             self.write_block_header_with_handles(br, &entity_handles_for_header);
@@ -1834,8 +1940,7 @@ impl<'a> DwgObjectWriter<'a> {
                         if safe_to_batch {
                             let worker_count = worker_count();
                             let chunk_size =
-                                ((run.len() + worker_count * 4 - 1) / (worker_count * 4))
-                                    .max(512);
+                                ((run.len() + worker_count * 4 - 1) / (worker_count * 4)).max(512);
                             let batches: Vec<ParallelEntityBatch> =
                                 map_chunks(run, chunk_size, |chunk| {
                                     self.serialize_parallel_entity_batch(chunk)
@@ -1847,10 +1952,10 @@ impl<'a> DwgObjectWriter<'a> {
                         }
                         for (offset, eh) in run.iter().enumerate() {
                             if let Some(&idx) = self.document.entity_index.get(eh) {
-                                self.prev_handle = (start + offset > 0)
-                                    .then(|| handles[start + offset - 1]);
-                                self.next_handle = (start + offset + 1 < len)
-                                    .then(|| handles[start + offset + 1]);
+                                self.prev_handle =
+                                    (start + offset > 0).then(|| handles[start + offset - 1]);
+                                self.next_handle =
+                                    (start + offset + 1 < len).then(|| handles[start + offset + 1]);
                                 self.write_entity(&self.document.entities[idx]);
                             }
                         }
@@ -1861,11 +1966,7 @@ impl<'a> DwgObjectWriter<'a> {
                     if let Some(&idx) = self.document.entity_index.get(eh) {
                         let entity = &self.document.entities[idx];
                         // Set prev/next for entity linking (pre-R2004)
-                        self.prev_handle = if i > 0 {
-                            Some(handles[i - 1])
-                        } else {
-                            None
-                        };
+                        self.prev_handle = if i > 0 { Some(handles[i - 1]) } else { None };
                         self.next_handle = if i + 1 < len {
                             Some(handles[i + 1])
                         } else {
@@ -1904,18 +2005,14 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn serialize_parallel_entity_batch(&self, handles: &[Handle]) -> ParallelEntityBatch {
-        let encoding =
-            crate::io::dxf::code_page::encoding_from_code_page(&self.document.header.code_page)
-                .unwrap_or(encoding_rs::WINDOWS_1252);
+        let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(
+            crate::io::dxf::code_page::dwg_code_page_index(&self.document.header.code_page),
+        );
         let mut worker = Self {
             version: self.version,
             dxf_version: self.dxf_version,
             document: self.document,
-            writer: DwgMergedWriter::with_encoding(
-                self.version,
-                self.dxf_version,
-                encoding,
-            ),
+            writer: DwgMergedWriter::with_encoding(self.version, self.dxf_version, encoding),
             output: Vec::with_capacity(handles.len().saturating_mul(64)),
             handle_map: Vec::with_capacity(handles.len()),
             object_queue: VecDeque::new(),
@@ -1926,7 +2023,12 @@ impl<'a> DwgObjectWriter<'a> {
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
             visited_objects: HashSet::new(),
+            class_instance_counts: HashMap::new(),
+            pending_type_code: None,
+            class_counts_complete: true,
             registered_handles: HashSet::with_capacity(handles.len()),
+            raw_excluded_handles: self.raw_excluded_handles.clone(),
+            xdic_owner_index: self.xdic_owner_index.clone(),
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
         };
@@ -1940,6 +2042,8 @@ impl<'a> DwgObjectWriter<'a> {
             handle_map: worker.handle_map,
             object_queue: worker.object_queue,
             registered_handles: worker.registered_handles,
+            class_instance_counts: worker.class_instance_counts,
+            class_counts_complete: worker.class_counts_complete,
         }
     }
 
@@ -1961,56 +2065,14 @@ impl<'a> DwgObjectWriter<'a> {
         );
         self.object_queue.extend(batch.object_queue);
         self.registered_handles.extend(batch.registered_handles);
-    }
-
-    /// Expand entity_handles to include sub-entity handles (vertices, faces,
-    /// SEQENDs, ATTRIBs) that are children of compound entities.
-    fn expand_entity_handles(&self, handles: &[Handle]) -> Vec<Handle> {
-        let mut expanded = Vec::new();
-        for &eh in handles {
-            expanded.push(eh);
-            if let Some(&idx) = self.document.entity_index.get(&eh) {
-                let entity = self.document.entities[idx].as_ref();
-                match entity {
-                    EntityType::PolyfaceMesh(e) => {
-                        for v in &e.vertices {
-                            if !v.common.handle.is_null() { expanded.push(v.common.handle); }
-                        }
-                        for f in &e.faces {
-                            if !f.common.handle.is_null() { expanded.push(f.common.handle); }
-                        }
-                        if let Some(sh) = e.seqend_handle {
-                            if !sh.is_null() { expanded.push(sh); }
-                        }
-                    }
-                    EntityType::Polyline3D(e) => {
-                        for v in &e.vertices {
-                            if !v.handle.is_null() { expanded.push(v.handle); }
-                        }
-                    }
-                    EntityType::PolygonMesh(e) => {
-                        for v in &e.vertices {
-                            if !v.common.handle.is_null() { expanded.push(v.common.handle); }
-                        }
-                    }
-                    EntityType::Insert(e) if e.has_attributes() => {
-                        for att in &e.attributes {
-                            if !att.common.handle.is_null() { expanded.push(att.common.handle); }
-                        }
-                        if let Some(sh) = e.seqend_handle {
-                            if !sh.is_null() { expanded.push(sh); }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        for (class_number, count) in batch.class_instance_counts {
+            *self.class_instance_counts.entry(class_number).or_default() += count;
         }
-        expanded
+        self.class_counts_complete &= batch.class_counts_complete;
     }
 
     /// Write a BLOCK_HEADER (block record) object with explicit entity handles.
     fn write_block_header_with_handles(&mut self, record: &BlockRecord, entity_handles: &[Handle]) {
-
         self.write_common_non_entity_data(
             common::OBJ_BLOCK_HEADER,
             record.handle,
@@ -2028,15 +2090,21 @@ impl<'a> DwgObjectWriter<'a> {
         // Anonymous flag
         self.writer.write_bit(record.flags.anonymous);
         // Has attributes
-        self.writer.write_bit(record.flags.has_attributes);
+        let has_attributes = record.entity_handles.iter().any(|handle| {
+            matches!(
+                self.document.get_entity(*handle),
+                Some(EntityType::AttributeDefinition(_))
+            )
+        });
+        self.writer.write_bit(has_attributes);
         // Is xref
         self.writer.write_bit(record.flags.is_xref);
         // Is xref overlay
         self.writer.write_bit(record.flags.is_xref_overlay);
 
-        // R2000+: loaded bit
+        // R2000+: "loaded" bit, 1 = xref currently unloaded (0 = loaded)
         if self.version.r2000_plus() {
-            self.writer.write_bit(false); // is loaded
+            self.writer.write_bit(record.flags.is_xref_unloaded);
         }
 
         // R2004+: owned object count (non-xref)
@@ -2049,13 +2117,18 @@ impl<'a> DwgObjectWriter<'a> {
             .entity_handles
             .iter()
             .find_map(|eh| {
-                if let Some(EntityType::Block(b)) = self.document.entity_index.get(eh).map(|&idx| self.document.entities[idx].as_ref()) {
+                if let Some(EntityType::Block(b)) = self
+                    .document
+                    .entity_index
+                    .get(eh)
+                    .map(|&idx| self.document.entities[idx].as_ref())
+                {
                     Some(b.base_point)
                 } else {
                     None
                 }
             })
-            .unwrap_or(crate::types::Vector3::ZERO);
+            .unwrap_or(record.base_point);
         self.writer.write_3bit_double(base_pt);
 
         // Xref path
@@ -2088,8 +2161,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // NULL handle (hard pointer)
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, 0);
+        self.writer.write_handle(DwgReferenceType::HardPointer, 0);
 
         // BLOCK entity handle (hard owner)
         self.writer.write_handle(
@@ -2146,20 +2218,19 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write BLOCK entity (block begin).
     fn write_block_begin(&mut self, record: &BlockRecord) {
+        // New documents reserve marker handles in BlockRecord without storing
+        // BLOCK entities. Synthesize those markers; imported ones retain metadata.
         let block = if !record.block_entity_handle.is_null() {
-            let result = self.document.entity_index.get(&record.block_entity_handle)
+            self.document
+                .entity_index
+                .get(&record.block_entity_handle)
                 .and_then(|&idx| {
                     if let EntityType::Block(b) = self.document.entities[idx].as_ref() {
                         Some(b.clone())
                     } else {
-                        eprintln!("  BLOCK entity at idx {} is NOT Block type", idx);
                         None
                     }
-                });
-            if result.is_none() && self.document.entity_index.get(&record.block_entity_handle).is_none() {
-                eprintln!("  BLOCK handle {:?} NOT in entity_index for block '{}'", record.block_entity_handle, record.name);
-            }
-            result
+                })
         } else {
             None
         };
@@ -2199,9 +2270,16 @@ impl<'a> DwgObjectWriter<'a> {
             &common.reactors,
             &common.xdictionary_handle,
             common.graphic_data.as_deref(),
-            common.entity_mode, common.material_flags, &common.material_handle, common.shadow_flags, common.plotstyle_flags, &common.plotstyle_handle,
-            &common.color_book_handle, &common.full_visual_style_handle,
-            &common.face_visual_style_handle, &common.edge_visual_style_handle,
+            common.entity_mode,
+            common.material_flags,
+            &common.material_handle,
+            common.shadow_flags,
+            common.plotstyle_flags,
+            &common.plotstyle_handle,
+            &common.color_book_handle,
+            &common.full_visual_style_handle,
+            &common.face_visual_style_handle,
+            &common.edge_visual_style_handle,
         );
 
         // Use the original name as-is when we have the Block entity from binary;
@@ -2218,7 +2296,9 @@ impl<'a> DwgObjectWriter<'a> {
     /// Write ENDBLK entity (block end).
     fn write_block_end(&mut self, record: &BlockRecord) {
         let block_end = if !record.block_end_handle.is_null() {
-            self.document.entity_index.get(&record.block_end_handle)
+            self.document
+                .entity_index
+                .get(&record.block_end_handle)
                 .and_then(|&idx| {
                     if let EntityType::BlockEnd(be) = self.document.entities[idx].as_ref() {
                         Some(be.clone())
@@ -2255,15 +2335,125 @@ impl<'a> DwgObjectWriter<'a> {
             &common.reactors,
             &common.xdictionary_handle,
             common.graphic_data.as_deref(),
-            common.entity_mode, common.material_flags, &common.material_handle, common.shadow_flags, common.plotstyle_flags, &common.plotstyle_handle,
-            &common.color_book_handle, &common.full_visual_style_handle,
-            &common.face_visual_style_handle, &common.edge_visual_style_handle,
+            common.entity_mode,
+            common.material_flags,
+            &common.material_handle,
+            common.shadow_flags,
+            common.plotstyle_flags,
+            &common.plotstyle_handle,
+            &common.color_book_handle,
+            &common.full_visual_style_handle,
+            &common.face_visual_style_handle,
+            &common.edge_visual_style_handle,
         );
 
         self.register_object(common.handle);
     }
 
     // ── Object queue draining ───────────────────────────────────────
+
+    /// Debug bisection aid. When `ACADRUST_RAW_ALL` is set, every record the
+    /// reader captured from the source file (see `CadDocument::raw_records`)
+    /// is registered verbatim up front, so the normal serialisers are only
+    /// used for record types listed in `ACADRUST_RAW_EXCLUDE` (comma-separated
+    /// numeric DWG type codes or class DXF names, case-insensitive). The
+    /// duplicate-handle guards in `register_object` / `register_raw_object`
+    /// and the early return in `write_entity` keep the normal path from
+    /// emitting a second copy. Compound parents and children are excluded
+    /// together because their serializers also write their child records.
+    /// Only meaningful for an unmodified document written back to its own version.
+    fn preregister_raw_records(&mut self) {
+        if std::env::var_os("ACADRUST_RAW_ALL").is_none() || self.document.raw_records.is_empty() {
+            return;
+        }
+        let exclude: Vec<String> = std::env::var("ACADRUST_RAW_EXCLUDE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut handles: Vec<u64> = self.document.raw_records.keys().copied().collect();
+        handles.sort_unstable();
+        let mut excluded_handles = HashSet::new();
+        for &h in &handles {
+            let (type_code, raw) = &self.document.raw_records[&h];
+            if raw.version != self.dxf_version {
+                continue;
+            }
+            let class_name = if *type_code >= 500 {
+                self.document
+                    .classes
+                    .iter()
+                    .find(|c| c.class_number == *type_code)
+                    .map(|c| c.dxf_name.to_ascii_uppercase())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let code_str = type_code.to_string();
+            // Category tokens: TABLES (symbol tables + controls + block headers),
+            // ENTITIES, OBJECTS (everything else).
+            let is_table =
+                crate::io::dwg::dwg_stream_readers::object_reader::common::is_table_type(*type_code);
+            let is_entity = if *type_code >= 500 {
+                self.document
+                    .classes
+                    .iter()
+                    .find(|c| c.class_number == *type_code)
+                    .map(|c| c.is_an_entity)
+                    .unwrap_or(false)
+            } else {
+                crate::io::dwg::dwg_stream_readers::object_reader::common::is_entity_type(*type_code)
+            };
+            let category = if is_table {
+                "TABLES"
+            } else if is_entity {
+                "ENTITIES"
+            } else {
+                "OBJECTS"
+            };
+            if exclude.iter().any(|e| {
+                *e == code_str || *e == category || (!class_name.is_empty() && *e == class_name)
+            }) {
+                excluded_handles.insert(h);
+            }
+        }
+
+        // Child records are folded into their parent on read. Selecting any
+        // member must run the parent writer and replace the whole child set.
+        for (&child, &owner) in &self.document.raw_record_owners {
+            if excluded_handles.contains(&child) {
+                excluded_handles.insert(owner);
+            }
+        }
+        for (&child, &owner) in &self.document.raw_record_owners {
+            if excluded_handles.contains(&owner) {
+                excluded_handles.insert(child);
+            }
+        }
+        self.raw_excluded_handles = std::sync::Arc::new(excluded_handles);
+
+        let (mut registered, mut excluded, mut skipped) = (0usize, 0usize, 0usize);
+        for h in handles {
+            let (_, raw) = &self.document.raw_records[&h];
+            if raw.version != self.dxf_version {
+                skipped += 1;
+                continue;
+            }
+            if self.raw_excluded_handles.contains(&h) {
+                excluded += 1;
+                continue;
+            }
+            self.register_raw_object(Handle::from(h), &raw.data, raw.handle_bits);
+            if let Some(entity) = self.document.get_entity(Handle::from(h)) {
+                self.queue_raw_entity_sab(entity);
+            }
+            registered += 1;
+        }
+        eprintln!(
+            "[acadrust raw-all] registered={registered} excluded={excluded} version-skipped={skipped} exclude={exclude:?}"
+        );
+    }
 
     /// Drain the object queue, writing each non-graphical object.
     fn write_objects(&mut self) {
@@ -2293,13 +2483,16 @@ impl<'a> DwgObjectWriter<'a> {
             self.visited_objects.insert(Handle::from(handle_val));
         }
 
-        let remaining: Vec<(Handle, crate::objects::ObjectType)> = self
+        let mut remaining: Vec<(Handle, crate::objects::ObjectType)> = self
             .document
             .objects
             .iter()
             .filter(|(h, _)| !self.visited_objects.contains(h))
             .map(|(h, o)| (*h, o.clone()))
             .collect();
+        // `objects` is a HashMap: iterate in handle order so the same
+        // document writes the same bytes on every call.
+        remaining.sort_by_key(|(h, _)| h.value());
 
         for (handle, obj) in remaining {
             self.visited_objects.insert(handle);
@@ -2335,6 +2528,8 @@ impl<'a> DwgObjectWriter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::Line;
+    use crate::objects::{Dictionary, ObjectType};
 
     #[test]
     fn object_writer_creates_for_default_document() {
@@ -2364,5 +2559,28 @@ mod tests {
             let marker = i32::from_le_bytes([output[0], output[1], output[2], output[3]]);
             assert_eq!(marker, 0x0DCA);
         }
+    }
+
+    #[test]
+    fn extension_dictionary_index_matches_document_fallback() {
+        let mut document = CadDocument::new();
+        let owner = document
+            .add_entity(EntityType::Line(Line::from_coords(
+                0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            )))
+            .expect("line");
+        let dictionary_handle = document.allocate_handle();
+        let dictionary = Dictionary {
+            handle: dictionary_handle,
+            owner,
+            ..Dictionary::new()
+        };
+        document
+            .objects
+            .insert(dictionary_handle, ObjectType::Dictionary(dictionary));
+
+        let expected = document.extension_dictionary_handle(owner);
+        let writer = DwgObjectWriter::new(&document).expect("writer");
+        assert_eq!(writer.extension_dictionary_handle(owner), expected);
     }
 }

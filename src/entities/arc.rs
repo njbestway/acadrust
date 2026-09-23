@@ -1,7 +1,7 @@
 //! Arc entity
 
 use super::{Entity, EntityCommon};
-use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vector3};
+use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Matrix3, Transparency, Vector3};
 
 /// An arc entity (portion of a circle)
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +106,39 @@ impl Arc {
             self.center.z,
         )
     }
+
+    /// Centre converted from the entity coordinate system to world space.
+    pub fn center_wcs(&self) -> Vector3 {
+        Matrix3::arbitrary_axis(self.normal) * self.center
+    }
+
+    /// Point at an arc angle converted to world space.
+    pub fn point_at_angle_wcs(&self, angle: f64) -> Vector3 {
+        let local =
+            self.center + Vector3::new(self.radius * angle.cos(), self.radius * angle.sin(), 0.0);
+        Matrix3::arbitrary_axis(self.normal) * local
+    }
+
+    /// Start point in world space.
+    pub fn start_point_wcs(&self) -> Vector3 {
+        self.point_at_angle_wcs(self.start_angle)
+    }
+
+    /// End point in world space.
+    pub fn end_point_wcs(&self) -> Vector3 {
+        self.point_at_angle_wcs(self.end_angle)
+    }
+
+    /// Arc-length midpoint in world space.
+    pub fn midpoint_wcs(&self) -> Vector3 {
+        self.point_at_angle_wcs(self.start_angle + self.sweep_angle() * 0.5)
+    }
+
+    fn contains_angle(&self, angle: f64) -> bool {
+        let sweep = self.sweep_angle();
+        sweep >= std::f64::consts::TAU - 1.0e-12
+            || (angle - self.start_angle).rem_euclid(std::f64::consts::TAU) <= sweep + 1.0e-12
+    }
 }
 
 impl Default for Arc {
@@ -164,21 +197,28 @@ impl Entity for Arc {
     }
 
     fn bounding_box(&self) -> BoundingBox3D {
-        // Simplified bounding box - full circle bounds
-        // A proper implementation would calculate exact arc bounds
-        BoundingBox3D::new(
-            Vector3::new(
-                self.center.x - self.radius,
-                self.center.y - self.radius,
-                self.center.z,
-            ),
-            Vector3::new(
-                self.center.x + self.radius,
-                self.center.y + self.radius,
-                self.center.z,
-            ),
-        )
-        .ocs_to_wcs(self.normal)
+        let basis = Matrix3::arbitrary_axis(self.normal);
+        let ax = basis * Vector3::new(1.0, 0.0, 0.0);
+        let ay = basis * Vector3::new(0.0, 1.0, 0.0);
+        let mut angles = vec![self.start_angle, self.end_angle];
+        for angle in [ay.x.atan2(ax.x), ay.y.atan2(ax.y), ay.z.atan2(ax.z)] {
+            for candidate in [angle, angle + std::f64::consts::PI] {
+                if self.contains_angle(candidate) {
+                    angles.push(candidate);
+                }
+            }
+        }
+
+        let normal = self.normal.normalize();
+        let mut points = Vec::with_capacity(angles.len() * 2);
+        for angle in angles {
+            let base = self.point_at_angle_wcs(angle);
+            points.push(base);
+            if self.thickness != 0.0 {
+                points.push(base + normal * self.thickness);
+            }
+        }
+        BoundingBox3D::from_points(&points).unwrap_or_default()
     }
 
     fn translate(&mut self, offset: Vector3) {
@@ -188,11 +228,11 @@ impl Entity for Arc {
     fn entity_type(&self) -> &'static str {
         "ARC"
     }
-    
+
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_arc(self, transform);
     }
-    
+
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
         super::mirror::mirror_arc(self, transform);
     }
@@ -241,22 +281,22 @@ mod tests {
         assert_eq!(arc.center, Vector3::new(10.0, 20.0, 30.0));
         assert_eq!(arc.radius, 5.0);
     }
-    
+
     #[test]
     fn test_arc_mirror_x() {
         use std::f64::consts::PI;
         // Arc from 0° to 90° at origin, radius 5
         let mut arc = Arc::from_coords(0.0, 0.0, 0.0, 5.0, 0.0, PI / 2.0);
-        
+
         // Save original endpoints
         let orig_start = arc.start_point();
         let orig_end = arc.end_point();
-        
+
         arc.mirror_x();
-        
+
         // Center should be mirrored (x negated)
         assert!((arc.center.x - 0.0).abs() < 1e-10);
-        
+
         // New endpoints should match mirrored original endpoints (swapped)
         let new_start = arc.start_point();
         let new_end = arc.end_point();
@@ -267,16 +307,16 @@ mod tests {
         assert!((new_end.x - (-orig_start.x)).abs() < 1e-8);
         assert!((new_end.y - orig_start.y).abs() < 1e-8);
     }
-    
+
     #[test]
     fn test_arc_mirror_y() {
         use std::f64::consts::PI;
         let mut arc = Arc::from_coords(0.0, 0.0, 0.0, 5.0, 0.0, PI / 2.0);
         let orig_start = arc.start_point();
         let orig_end = arc.end_point();
-        
+
         arc.mirror_y();
-        
+
         let new_start = arc.start_point();
         let new_end = arc.end_point();
         // Mirrored original end → new start
@@ -287,5 +327,3 @@ mod tests {
         assert!((new_end.y - (-orig_start.y)).abs() < 1e-8);
     }
 }
-
-

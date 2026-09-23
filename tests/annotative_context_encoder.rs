@@ -14,9 +14,12 @@
 
 use std::io::Cursor;
 
+use acadrust::entities::{
+    BoundaryEdge, BoundaryPath, BoundaryPathFlags, HatchPatternLine, LineEdge,
+};
 use acadrust::objects::{
-    DimContext, DimSubtype, MTextColumns, MTextContext, ObjectContextData, ObjectContextKind,
-    ObjectType, Scale,
+    DimContext, DimSubtype, HatchLoopContext, HatchScaleContext, HatchViewContext, MTextColumns,
+    MTextContext, ObjectContextData, ObjectContextKind, ObjectType, Scale,
 };
 use acadrust::types::{DxfVersion, Vector2, Vector3};
 use acadrust::{CadDocument, DwgReader, DwgWriter, Handle};
@@ -44,7 +47,10 @@ fn baseline_roundtrip_preserves_all_contexts() {
 
     let ctx0 = doc.context_scales.len();
     let blk0 = blkref_fields(&doc);
-    eprintln!("loaded: context_scales={ctx0} modeled_blkref={}", blk0.len());
+    eprintln!(
+        "loaded: context_scales={ctx0} modeled_blkref={}",
+        blk0.len()
+    );
     assert!(blk0.len() >= 134, "expected the 134 BLKREF contexts");
 
     let rt = roundtrip(&doc);
@@ -72,7 +78,11 @@ fn blkref_fields(doc: &CadDocument) -> std::collections::BTreeMap<Handle, BlkFie
         .iter()
         .filter_map(|(h, o)| match o {
             ObjectType::ObjectContextData(c) => match &c.kind {
-                ObjectContextKind::BlkRef { rotation, insertion, scale_factor } => Some((
+                ObjectContextKind::BlkRef {
+                    rotation,
+                    insertion,
+                    scale_factor,
+                } => Some((
                     *h,
                     BlkFields {
                         class_version: c.class_version,
@@ -102,7 +112,11 @@ fn encoder_preserves_context_fields_and_scale_link() {
     let rt = roundtrip(&doc);
     let produced = blkref_fields(&rt);
 
-    assert_eq!(original.len(), produced.len(), "leaf count changed after encode");
+    assert_eq!(
+        original.len(),
+        produced.len(),
+        "leaf count changed after encode"
+    );
 
     let mut mism = 0usize;
     for (h, orig) in &original {
@@ -120,7 +134,10 @@ fn encoder_preserves_context_fields_and_scale_link() {
             _ => {}
         }
     }
-    assert_eq!(mism, 0, "{mism} BLKREF leaves lost fields/scale-link after field-encoding");
+    assert_eq!(
+        mism, 0,
+        "{mism} BLKREF leaves lost fields/scale-link after field-encoding"
+    );
 
     // The re-encode must be a stable semantic fixed point.
     let twice = blkref_fields(&roundtrip(&rt));
@@ -133,7 +150,10 @@ fn encoder_preserves_context_fields_and_scale_link() {
 /// that references a synthesized SCALE, round-trip it, and return the reloaded
 /// leaf's decoded fields (scale target + kind). Exercises the whole create
 /// path: class registration → object insertion → DWG write → read-back.
-fn synth_roundtrip_leaf(class_name: &str, kind: ObjectContextKind) -> (Handle, ObjectContextKind, i16, bool) {
+fn synth_roundtrip_leaf(
+    class_name: &str,
+    kind: ObjectContextKind,
+) -> (Handle, ObjectContextKind, i16, bool) {
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
     doc.register_object_context_class(class_name);
 
@@ -154,7 +174,8 @@ fn synth_roundtrip_leaf(class_name: &str, kind: ObjectContextKind) -> (Handle, O
         scale: scale_h,
         kind,
     };
-    doc.objects.insert(leaf_h, ObjectType::ObjectContextData(ctx));
+    doc.objects
+        .insert(leaf_h, ObjectType::ObjectContextData(ctx));
 
     let rt = roundtrip(&doc);
     let (h, c) = rt
@@ -185,10 +206,14 @@ fn synth_blkref_context_roundtrips() {
         insertion: Vector3::new(123.5, -42.25, 7.0),
         scale_factor: Vector3::new(2.0, 3.0, 4.0),
     };
-    let (_h, got, cv, def) = synth_roundtrip_leaf("ACDB_BLKREFOBJECTCONTEXTDATA_CLASS", kind.clone());
+    let (_h, got, cv, def) =
+        synth_roundtrip_leaf("ACDB_BLKREFOBJECTCONTEXTDATA_CLASS", kind.clone());
     assert_eq!(cv, 3);
     assert!(def);
-    assert_eq!(got, kind, "BLKREF fields did not survive synthesis round-trip");
+    assert_eq!(
+        got, kind,
+        "BLKREF fields did not survive synthesis round-trip"
+    );
 }
 
 #[test]
@@ -202,7 +227,10 @@ fn synth_text_context_roundtrips() {
     let (_h, got, cv, def) = synth_roundtrip_leaf("ACDB_TEXTOBJECTCONTEXTDATA_CLASS", kind.clone());
     assert_eq!(cv, 3);
     assert!(def);
-    assert_eq!(got, kind, "TEXT fields did not survive synthesis round-trip");
+    assert_eq!(
+        got, kind,
+        "TEXT fields did not survive synthesis round-trip"
+    );
 }
 
 #[test]
@@ -219,8 +247,12 @@ fn synth_mtext_context_roundtrips() {
         column_type: 0,
         columns: None,
     });
-    let (_h, got, _cv, _def) = synth_roundtrip_leaf("ACDB_MTEXTOBJECTCONTEXTDATA_CLASS", kind.clone());
-    assert_eq!(got, kind, "MTEXT (no columns) fields did not survive round-trip");
+    let (_h, got, _cv, _def) =
+        synth_roundtrip_leaf("ACDB_MTEXTOBJECTCONTEXTDATA_CLASS", kind.clone());
+    assert_eq!(
+        got, kind,
+        "MTEXT (no columns) fields did not survive round-trip"
+    );
 }
 
 #[test]
@@ -244,8 +276,52 @@ fn synth_mtext_columns_roundtrips() {
             heights: vec![10.0, 20.0, 15.0],
         }),
     });
-    let (_h, got, _cv, _def) = synth_roundtrip_leaf("ACDB_MTEXTOBJECTCONTEXTDATA_CLASS", kind.clone());
-    assert_eq!(got, kind, "MTEXT (columns) fields did not survive round-trip");
+    let (_h, got, _cv, _def) =
+        synth_roundtrip_leaf("ACDB_MTEXTOBJECTCONTEXTDATA_CLASS", kind.clone());
+    assert_eq!(
+        got, kind,
+        "MTEXT (columns) fields did not survive round-trip"
+    );
+}
+
+#[test]
+fn synth_hatch_view_context_roundtrips_inline_boundaries() {
+    let mut boundary = BoundaryPath::with_flags(BoundaryPathFlags::from_bits(1560));
+    boundary.add_edge(BoundaryEdge::Line(LineEdge {
+        start: Vector2::new(1.0, 2.0),
+        end: Vector2::new(3.0, 4.0),
+    }));
+    let kind = ObjectContextKind::HatchView(HatchViewContext {
+        hatch: HatchScaleContext {
+            pattern_lines: vec![HatchPatternLine {
+                angle: 0.5,
+                base_point: Vector2::new(5.0, 6.0),
+                offset: Vector2::new(0.25, 0.5),
+                dash_lengths: vec![1.0, -0.5],
+            }],
+            pattern_scale: 2.0,
+            pattern_base: Vector3::new(7.0, 8.0, 9.0),
+            loops: vec![
+                HatchLoopContext {
+                    loop_type: 7,
+                    supports_context: true,
+                    boundary: None,
+                },
+                HatchLoopContext {
+                    loop_type: 1560,
+                    supports_context: false,
+                    boundary: Some(boundary),
+                },
+            ],
+        },
+        view: Handle::from(0x45u64),
+        view_normal: Vector3::new(0.0, 0.0, 12.5),
+        view_rotation: 0.75,
+        evaluate_hatch: true,
+    });
+    let (_h, got, _cv, _def) =
+        synth_roundtrip_leaf("ACDB_HATCHVIEWCONTEXTDATA_CLASS", kind.clone());
+    assert_eq!(got, kind, "hatch-view fields did not survive round-trip");
 }
 
 fn dim_ctx(subtype: DimSubtype) -> DimContext {
@@ -273,7 +349,8 @@ fn synth_aligned_dim_context_roundtrips() {
     let kind = ObjectContextKind::Dim(dim_ctx(DimSubtype::Aligned {
         dimline_pt: Vector3::new(1.0, 2.0, 3.0),
     }));
-    let (_h, got, _cv, _def) = synth_roundtrip_leaf("ACDB_ALDIMOBJECTCONTEXTDATA_CLASS", kind.clone());
+    let (_h, got, _cv, _def) =
+        synth_roundtrip_leaf("ACDB_ALDIMOBJECTCONTEXTDATA_CLASS", kind.clone());
     assert_eq!(got, kind, "aligned-dim fields did not survive round-trip");
     // The dimension's block hard-pointer must survive too.
     if let ObjectContextKind::Dim(d) = &got {
@@ -288,6 +365,7 @@ fn synth_ordinate_dim_context_roundtrips() {
         feature_location_pt: Vector3::new(4.0, 5.0, 6.0),
         leader_endpt: Vector3::new(7.0, 8.0, 9.0),
     }));
-    let (_h, got, _cv, _def) = synth_roundtrip_leaf("ACDB_ORDDIMOBJECTCONTEXTDATA_CLASS", kind.clone());
+    let (_h, got, _cv, _def) =
+        synth_roundtrip_leaf("ACDB_ORDDIMOBJECTCONTEXTDATA_CLASS", kind.clone());
     assert_eq!(got, kind, "ordinate-dim fields did not survive round-trip");
 }

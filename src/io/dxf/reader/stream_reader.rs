@@ -27,10 +27,10 @@ pub struct DxfCodePair {
 
     /// The DXF code enum
     pub dxf_code: DxfCode,
-    
+
     /// String representation of the value
     pub value_string: String,
-    
+
     /// Typed value (integer, double, or boolean)
     typed_value: CodePairValue,
 }
@@ -51,30 +51,27 @@ impl DxfCodePair {
         // variants for a subset of the legal ranges, so routing through the
         // enum turns valid values such as XRecord code 290 into `Invalid`.
         let value_type = GroupCodeValueType::from_raw_code(code);
-        
+
         // Parse value based on type
         let typed_value = match value_type {
-            GroupCodeValueType::Int16 | GroupCodeValueType::Int32 | GroupCodeValueType::Int64 | GroupCodeValueType::Byte => {
-                match value_string.trim().parse::<i64>() {
-                    Ok(v) => CodePairValue::Int(v),
-                    Err(_) => CodePairValue::None,
-                }
-            }
-            GroupCodeValueType::Double => {
-                match value_string.trim().parse::<f64>() {
-                    Ok(v) => CodePairValue::Double(v),
-                    Err(_) => CodePairValue::None,
-                }
-            }
-            GroupCodeValueType::Bool => {
-                match value_string.trim().parse::<i32>() {
-                    Ok(v) => CodePairValue::Bool(v != 0),
-                    Err(_) => CodePairValue::None,
-                }
-            }
+            GroupCodeValueType::Int16
+            | GroupCodeValueType::Int32
+            | GroupCodeValueType::Int64
+            | GroupCodeValueType::Byte => match value_string.trim().parse::<i64>() {
+                Ok(v) => CodePairValue::Int(v),
+                Err(_) => CodePairValue::None,
+            },
+            GroupCodeValueType::Double => match value_string.trim().parse::<f64>() {
+                Ok(v) => CodePairValue::Double(v),
+                Err(_) => CodePairValue::None,
+            },
+            GroupCodeValueType::Bool => match value_string.trim().parse::<i32>() {
+                Ok(v) => CodePairValue::Bool(v != 0),
+                Err(_) => CodePairValue::None,
+            },
             _ => CodePairValue::None,
         };
-        
+
         Self {
             code,
             dxf_code,
@@ -82,7 +79,7 @@ impl DxfCodePair {
             typed_value,
         }
     }
-    
+
     /// Create a code/value pair with a pre-computed typed value.
     /// Skips string→typed parsing, used by the binary DXF reader.
     pub(crate) fn new_typed(code: i32, value_string: String, typed_value: CodePairValue) -> Self {
@@ -126,7 +123,31 @@ impl DxfCodePair {
             _ => None,
         }
     }
-    
+
+    /// Get value as a 32-bit *bit pattern*, accepting the unsigned spelling.
+    ///
+    /// A colour code (420, 421, and the `AcCmColor` values MLEADER carries in
+    /// its 90-series codes) is a packed word, not a quantity: producers set a
+    /// method byte in the high position, `0xC2` for a true colour, so a plain
+    /// RGB such as `0xC2FF8800` is written by some producers as the unsigned
+    /// `3271526400` and by others as the signed `-1023440896`. Only the second
+    /// fits an `i32`, so [`as_i32`](Self::as_i32) drops the first, the colour
+    /// never reaches the entity, and it falls back to its ACI index, which for
+    /// a true-coloured entity is usually 256 (`ByLayer`).
+    ///
+    /// Reinterpreting the unsigned spelling as its two's complement keeps both,
+    /// and the downstream decoders already mask the method byte off. Codes that
+    /// carry a real number keep using `as_i32`: a flags word of three billion is
+    /// a malformed file, not a negative count.
+    pub fn as_i32_bits(&self) -> Option<i32> {
+        match self.typed_value {
+            CodePairValue::Int(v) => i32::try_from(v)
+                .ok()
+                .or_else(|| u32::try_from(v).ok().map(|bits| bits as i32)),
+            _ => None,
+        }
+    }
+
     /// Get value as double
     pub fn as_double(&self) -> Option<f64> {
         match self.typed_value {
@@ -134,7 +155,7 @@ impl DxfCodePair {
             _ => None,
         }
     }
-    
+
     /// Get value as boolean
     pub fn as_bool(&self) -> Option<bool> {
         match self.typed_value {
@@ -142,7 +163,7 @@ impl DxfCodePair {
             _ => None,
         }
     }
-    
+
     /// Get value as handle (hex string to u64)
     #[allow(dead_code)]
     pub fn as_handle(&self) -> Option<u64> {
@@ -197,19 +218,19 @@ impl PointReader {
             group: None,
         }
     }
-    
+
     /// Add a coordinate value
     pub fn add_coordinate(&mut self, pair: &DxfCodePair) -> bool {
         if let Some(axis) = GroupCodeValueType::coordinate_axis(pair.dxf_code) {
             let coord_group = GroupCodeValueType::coordinate_group(pair.dxf_code);
-            
+
             // If this is a new group, reset
             if self.group.is_some() && self.group != coord_group {
                 return false;
             }
-            
+
             self.group = coord_group;
-            
+
             if let Some(value) = pair.as_double() {
                 match axis {
                     0 => self.x = Some(value),
@@ -222,7 +243,7 @@ impl PointReader {
         }
         false
     }
-    
+
     /// Check if we have a complete point
     #[allow(dead_code)]
     pub fn is_complete(&self) -> bool {
@@ -251,5 +272,61 @@ impl PointReader {
 impl Default for PointReader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Code 420 is an Int32 group code, so `DxfCodePair::new` parses its text
+    /// into `CodePairValue::Int` and the accessors below see an `i64`.
+    fn true_color_pair(text: &str) -> DxfCodePair {
+        DxfCodePair::new(420, text.to_string())
+    }
+
+    #[test]
+    fn as_i32_bits_keeps_what_as_i32_already_kept() {
+        for text in [
+            "0",
+            "16746496",
+            "-1023440896",
+            "-1",
+            "2147483647",
+            "-2147483648",
+        ] {
+            let pair = true_color_pair(text);
+
+            assert_eq!(pair.as_i32_bits(), pair.as_i32(), "spelled {text}");
+            assert!(pair.as_i32_bits().is_some(), "spelled {text}");
+        }
+    }
+
+    /// The whole point: the unsigned half of the 32-bit range, which `as_i32`
+    /// rejects, comes back as the same bit pattern read signed.
+    #[test]
+    fn as_i32_bits_accepts_the_unsigned_half_of_the_range() {
+        for (unsigned, signed) in [
+            ("2147483648", i32::MIN),
+            ("3271526400", -1_023_440_896), // 0xC2FF8800, a true colour
+            ("4294967295", -1),
+        ] {
+            let pair = true_color_pair(unsigned);
+
+            assert_eq!(pair.as_i32(), None, "as_i32 should still reject {unsigned}");
+            assert_eq!(pair.as_i32_bits(), Some(signed), "spelled {unsigned}");
+        }
+    }
+
+    /// Past `u32::MAX` there is no bit pattern to reinterpret, and a code that
+    /// carries no integer at all has nothing to offer either. Both must stay
+    /// `None` rather than wrap into a plausible-looking colour.
+    #[test]
+    fn as_i32_bits_refuses_what_is_not_a_32_bit_pattern() {
+        assert_eq!(true_color_pair("4294967296").as_i32_bits(), None);
+        assert_eq!(true_color_pair("-2147483649").as_i32_bits(), None);
+        assert_eq!(true_color_pair("not a number").as_i32_bits(), None);
+        // A Double code parses into `CodePairValue::Double`, not `Int`.
+        assert_eq!(DxfCodePair::new(40, "1.5".to_string()).as_i32_bits(), None);
     }
 }

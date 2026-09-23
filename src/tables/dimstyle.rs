@@ -3,7 +3,7 @@
 use super::TableEntry;
 use crate::types::{Color, Handle};
 
-/// A dimension style table entry — maps to ACadSharp's DimensionStyle
+/// A dimension style table entry (analogous to the reference DimensionStyle)
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimStyle {
@@ -202,7 +202,7 @@ pub struct DimStyle {
     pub dimtofl: bool,
     /// Cursor update (DIMUPT, code 288)
     pub dimupt: bool,
-    /// Dimension fit (DIMFIT, code 287) — obsolete 
+    /// Dimension fit (DIMFIT, code 287) — obsolete
     pub dimfit: i16,
 
     // ─── Formatting ───
@@ -277,7 +277,7 @@ impl DimStyle {
             dimclrt_true_color: None,
             dimtxt: 0.18,
             dimjust: 0,
-            dimtad: 1,    // Above
+            dimtad: 1, // Above
             dimtvp: 0.0,
             dimtih: false,
             dimtoh: false,
@@ -348,6 +348,33 @@ impl DimStyle {
     /// Create the standard dimension style
     pub fn standard() -> Self {
         Self::new("Standard")
+    }
+
+    /// The built-in values used for DIMSTYLE groups that a DXF leaves out.
+    ///
+    /// Writers may omit groups equal to the format's imperial defaults, so a
+    /// reader must start from those, not from the metric values [`Self::new`]
+    /// uses for freshly created styles. The differences affect zero
+    /// suppression, text orientation, precision, placement and line offsets.
+    pub fn dxf_defaults(name: impl Into<String>) -> Self {
+        DimStyle {
+            dimdli: 0.38,
+            dimgap: 0.09,
+            dimexe: 0.18,
+            dimexo: 0.0625,
+            dimsah: false,
+            dimtad: 0,
+            dimtih: true,
+            dimtoh: true,
+            dimdec: 4,
+            dimtdec: 4,
+            dimzin: 0,
+            dimtzin: 0,
+            dimaltd: 2,
+            dimalttd: 2,
+            dimtolj: 1,
+            ..Self::new(name)
+        }
     }
 }
 

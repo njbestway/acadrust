@@ -58,9 +58,15 @@ pub(crate) fn compose_acis_placement(acis: &mut AcisData, transform: &Transform)
         [lp[0][2], lp[1][2], lp[2][2]],
     ];
     doc.set_placement(m_out, tp, 1.0);
-    *acis = AcisData::from_sat(&doc.to_sat_string());
+    // Keep binary token types and modeler metadata when changing placement.
+    // A SAB -> SAT -> SAB conversion can lose typed native fields.
+    if acis.is_binary {
+        acis.sab_data = crate::entities::acis::SabWriter::write(&doc);
+        acis.sat_data.clear();
+    } else {
+        acis.sat_data = AcisData::strip_sat_terminator(&doc.to_sat_string());
+    }
 }
-
 
 /// True when `transform` reverses orientation (negative upper-3×3
 /// determinant — an odd number of mirrors). Plane-curve direction data
@@ -138,7 +144,9 @@ pub(crate) fn transform_arc(e: &mut Arc, transform: &Transform) {
     let we = transform.apply(endpoint(e.end_angle));
 
     let new_center = transform.apply(center_w);
-    let scale_factor = transform.apply_rotation(Vector3::new(1.0, 0.0, 0.0)).length();
+    let scale_factor = transform
+        .apply_rotation(Vector3::new(1.0, 0.0, 0.0))
+        .length();
     let new_normal = transform.apply_rotation(e.normal).normalize();
 
     let new_ocs_t = Matrix3::arbitrary_axis(new_normal).transpose();
@@ -299,21 +307,185 @@ pub(crate) fn transform_spline(e: &mut Spline, transform: &Transform) {
     for point in &mut e.fit_points {
         *point = transform.apply(*point);
     }
-    e.normal = transform.apply_rotation(e.normal).normalize();
+    e.begin_tangent = transform.apply_rotation(e.begin_tangent);
+    e.end_tangent = transform.apply_rotation(e.end_tangent);
+
+    let axes = [Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::UNIT_Z]
+        .map(|axis| transform.apply_rotation(axis));
+    let max_scale = axes.iter().map(|axis| axis.length()).fold(0.0, f64::max);
+    let orthogonal = [(0, 1), (0, 2), (1, 2)]
+        .into_iter()
+        .all(|(left, right)| axes[left].dot(&axes[right]).abs() <= 1e-12 * max_scale.powi(2));
+    // Exact for orthogonal axes; conservative for sheared transforms.
+    let distance_scale = if orthogonal {
+        max_scale
+    } else {
+        axes.iter()
+            .map(|axis| axis.length_squared())
+            .sum::<f64>()
+            .sqrt()
+    };
+    e.control_tolerance *= distance_scale;
+    e.fit_tolerance *= distance_scale;
+    e.normal = transform_normal(transform, e.normal);
 }
 
 // ── Helix ────────────────────────────────────────────────────────────────────
 
 pub(crate) fn transform_helix(e: &mut Helix, transform: &Transform) {
+    let old_axis = e.axis_vector.normalize();
+    let old_base = e.axis_base_point;
+    let old_start = e.start_point;
+    let transformed_axis = transform.apply_rotation(old_axis);
+    let transformed_radial = transform.apply_rotation(old_start - old_base);
+    let transformed_base = transform.apply(old_base);
+    let transformed_start = transform.apply(old_start);
+
     transform_spline(&mut e.spline, transform);
-    e.axis_base_point = transform.apply(e.axis_base_point);
-    e.start_point = transform.apply(e.start_point);
-    e.axis_vector = transform.apply_rotation(e.axis_vector).normalize();
+    e.axis_base_point = transformed_base;
+    e.start_point = transformed_start;
+    e.axis_vector = transformed_axis.normalize();
+    e.radius = transformed_radial.length();
+    e.turn_height *= transformed_axis.length();
+    if is_reflecting(transform) {
+        e.handedness = !e.handedness;
+    }
 }
 
 // ── Dimension ────────────────────────────────────────────────────────────────
 
-// Dimension uses the default Entity trait implementation (extract translation).
+fn transform_dimension_angle(
+    old_normal: Vector3,
+    new_normal: Vector3,
+    angle: f64,
+    transform: &Transform,
+) -> f64 {
+    let old_direction =
+        Matrix3::arbitrary_axis(old_normal) * Vector3::new(angle.cos(), angle.sin(), 0.0);
+    let new_direction =
+        Matrix3::arbitrary_axis(new_normal).transpose() * transform.apply_rotation(old_direction);
+    if new_direction.length_squared() > 1e-24 {
+        new_direction.y.atan2(new_direction.x)
+    } else {
+        angle
+    }
+}
+
+pub(crate) fn transform_dimension(e: &mut Dimension, transform: &Transform) {
+    if let Dimension::Ordinate(d) = e {
+        let old_normal = d.base.normal;
+        let old_basis = Matrix3::arbitrary_axis(old_normal);
+        let old_axis_angle = -d.base.horizontal_direction;
+        let old_axis = old_basis * Vector3::new(old_axis_angle.cos(), old_axis_angle.sin(), 0.0);
+        let old_text_angle = old_axis_angle + d.base.text_rotation;
+        let old_text_axis =
+            old_basis * Vector3::new(old_text_angle.cos(), old_text_angle.sin(), 0.0);
+
+        d.definition_point = transform.apply(d.definition_point);
+        d.feature_location = transform.apply(d.feature_location);
+        d.leader_endpoint = transform.apply(d.leader_endpoint);
+        d.base.definition_point = d.definition_point;
+        d.base.text_middle_point = transform.apply(d.base.text_middle_point);
+
+        let new_normal = transform_normal(transform, old_normal);
+        let (old_ocs, new_wcs_to_ocs) = ocs_pair(old_normal, new_normal);
+        d.base.insertion_point = new_wcs_to_ocs * transform.apply(old_ocs * d.base.insertion_point);
+        d.base.normal = new_normal;
+
+        let transformed_axis = new_wcs_to_ocs * transform.apply_rotation(old_axis);
+        let mut new_axis_angle = old_axis_angle;
+        if transformed_axis.length_squared() > 1e-24 {
+            new_axis_angle = transformed_axis.y.atan2(transformed_axis.x);
+            d.base.horizontal_direction = -new_axis_angle;
+        }
+        let transformed_text_axis = new_wcs_to_ocs * transform.apply_rotation(old_text_axis);
+        if transformed_text_axis.length_squared() > 1e-24 {
+            let relative = transformed_text_axis.y.atan2(transformed_text_axis.x) - new_axis_angle;
+            d.base.text_rotation = relative.sin().atan2(relative.cos());
+        }
+        d.refresh_measurement();
+        return;
+    }
+
+    let old_normal = e.base().normal;
+    let new_normal = transform_normal(transform, old_normal);
+    let text_rotation =
+        transform_dimension_angle(old_normal, new_normal, e.base().text_rotation, transform);
+    let horizontal_direction = transform_dimension_angle(
+        old_normal,
+        new_normal,
+        e.base().horizontal_direction,
+        transform,
+    );
+    let insertion_rotation = transform_dimension_angle(
+        old_normal,
+        new_normal,
+        e.base().insertion_rotation,
+        transform,
+    );
+    let linear_angles = match e {
+        Dimension::Linear(d) => Some((
+            transform_dimension_angle(old_normal, new_normal, d.rotation, transform),
+            transform_dimension_angle(old_normal, new_normal, d.ext_line_rotation, transform),
+        )),
+        _ => None,
+    };
+
+    let definition_point = transform.apply(e.definition_point());
+    e.set_definition_point(definition_point);
+    {
+        let base = e.base_mut();
+        base.text_middle_point = transform.apply(base.text_middle_point);
+        let (old_ocs, new_wcs_to_ocs) = ocs_pair(old_normal, new_normal);
+        base.insertion_point = new_wcs_to_ocs * transform.apply(old_ocs * base.insertion_point);
+        base.normal = new_normal;
+        base.text_rotation = text_rotation;
+        base.horizontal_direction = horizontal_direction;
+        base.insertion_rotation = insertion_rotation;
+    }
+
+    match e {
+        Dimension::Aligned(d) => {
+            d.first_point = transform.apply(d.first_point);
+            d.second_point = transform.apply(d.second_point);
+        }
+        Dimension::Linear(d) => {
+            d.first_point = transform.apply(d.first_point);
+            d.second_point = transform.apply(d.second_point);
+            if let Some((rotation, ext_line_rotation)) = linear_angles {
+                d.rotation = rotation;
+                d.ext_line_rotation = ext_line_rotation;
+            }
+        }
+        Dimension::Radius(d) => d.angle_vertex = transform.apply(d.angle_vertex),
+        Dimension::Diameter(d) => d.angle_vertex = transform.apply(d.angle_vertex),
+        Dimension::Angular2Ln(d) => {
+            d.dimension_arc = transform.apply(d.dimension_arc);
+            d.first_point = transform.apply(d.first_point);
+            d.second_point = transform.apply(d.second_point);
+            d.angle_vertex = transform.apply(d.angle_vertex);
+        }
+        Dimension::Angular3Pt(d) => {
+            d.first_point = transform.apply(d.first_point);
+            d.second_point = transform.apply(d.second_point);
+            d.angle_vertex = transform.apply(d.angle_vertex);
+        }
+        Dimension::Arc(d) => {
+            d.first_extension_point = transform.apply(d.first_extension_point);
+            d.second_extension_point = transform.apply(d.second_extension_point);
+            d.center_point = transform.apply(d.center_point);
+            d.first_leader_point = transform.apply(d.first_leader_point);
+            d.second_leader_point = transform.apply(d.second_leader_point);
+        }
+        Dimension::LargeRadial(d) => {
+            d.chord_point = transform.apply(d.chord_point);
+            d.override_center = transform.apply(d.override_center);
+            d.jog_point = transform.apply(d.jog_point);
+        }
+        Dimension::Ordinate(_) => unreachable!(),
+    }
+    e.base_mut().actual_measurement = e.measurement();
+}
 
 // ── Hatch ────────────────────────────────────────────────────────────────────
 
@@ -345,8 +517,7 @@ pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
 
     let x_in_new_ocs = new_wcs_to_ocs * trans_ocs_x_wcs;
     let y_in_new_ocs = new_wcs_to_ocs * trans_ocs_y_wcs;
-    let is_flipped =
-        (x_in_new_ocs.x * y_in_new_ocs.y - x_in_new_ocs.y * y_in_new_ocs.x) < 0.0;
+    let is_flipped = (x_in_new_ocs.x * y_in_new_ocs.y - x_in_new_ocs.y * y_in_new_ocs.x) < 0.0;
 
     let transform_ocs_point = |p: Vector2| -> Vector2 {
         let p_wcs = old_ocs_to_wcs * Vector3::new(p.x, p.y, old_elevation);
@@ -375,25 +546,9 @@ pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
                     line.end = transform_ocs_point(line.end);
                 }
                 BoundaryEdge::CircularArc(arc) => {
-                    // Stored-angle convention for boundary arcs, verified
-                    // against real AutoCAD output:
-                    //
-                    // 1. A clockwise (ccw = false) edge stores MIRRORED angles —
-                    //    the true point is `center + r·(cos(-θ), sin(-θ))`
-                    //    (endpoint continuity with adjacent edges: Δ = 0.0).
-                    // 2. The stored sweep is ALWAYS forward: `end - start ≥ 0`.
-                    //    When the arc crosses the 0 axis, AutoCAD writes `end`
-                    //    ABOVE 2π (e.g. start 5.81 → end 6.64). Normalizing the
-                    //    angles into [0, 2π) silently turns that 0.83 rad arc
-                    //    into its 5.46 rad complement — the giant wrong-way
-                    //    arcs this function used to produce via
-                    //    `transform_ocs_angle`'s atan2 normalization.
-                    //
-                    // So: transform only the START angle (one point, modulo is
-                    // fine) in TRUE angle space, and carry the stored sweep over
-                    // unchanged. The sweep is invariant under both rotation and
-                    // flip: a flip negates the true sweep AND mirrors the stored
-                    // space, which cancel.
+                    // Clockwise angles are mirrored and their forward sweep is
+                    // stored without normalization. Transform the geometric start
+                    // angle and preserve that sweep.
                     let to_true = |a: f64, ccw: bool| if ccw { a } else { -a };
                     let norm = |a: f64| a.rem_euclid(2.0 * std::f64::consts::PI);
                     let stored_sweep = arc.end_angle - arc.start_angle;
@@ -517,8 +672,7 @@ pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
                 }
                 BoundaryEdge::Spline(spline) => {
                     for cp in &mut spline.control_points {
-                        let p_wcs =
-                            old_ocs_to_wcs * Vector3::new(cp.x, cp.y, old_elevation);
+                        let p_wcs = old_ocs_to_wcs * Vector3::new(cp.x, cp.y, old_elevation);
                         let p_new_wcs = transform.apply(p_wcs);
                         let p_new_ocs = new_wcs_to_ocs * p_new_wcs;
                         cp.x = p_new_ocs.x;
@@ -561,6 +715,9 @@ pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
     e.pattern_angle = transformed_p_ocs_dir.y.atan2(transformed_p_ocs_dir.x);
     e.pattern_scale *= scale_x;
 
+    let pattern_origin = transform_ocs_point(e.pattern_origin());
+    e.record_pattern_origin(pattern_origin);
+
     for line in &mut e.pattern.lines {
         let l_dir = Vector2::new(line.angle.cos(), line.angle.sin());
         let l_wcs_dir = old_ocs_to_wcs * Vector3::new(l_dir.x, l_dir.y, 0.0);
@@ -581,10 +738,7 @@ pub(crate) fn transform_hatch(e: &mut Hatch, transform: &Transform) {
     }
 
     if e.gradient_color.enabled {
-        let g_dir = Vector2::new(
-            e.gradient_color.angle.cos(),
-            e.gradient_color.angle.sin(),
-        );
+        let g_dir = Vector2::new(e.gradient_color.angle.cos(), e.gradient_color.angle.sin());
         let g_wcs_dir = old_ocs_to_wcs * Vector3::new(g_dir.x, g_dir.y, 0.0);
         let transformed_g_wcs_dir = transform.apply_rotation(g_wcs_dir);
         let transformed_g_ocs_dir = new_wcs_to_ocs * transformed_g_wcs_dir;
@@ -661,8 +815,7 @@ pub(crate) fn transform_insert(e: &mut Insert, transform: &Transform) {
     let ocs_new = Matrix3::arbitrary_axis(new_normal);
     let new_position = ocs_new.transpose() * new_world_pos;
 
-    let trans_ow =
-        Matrix3::arbitrary_axis(e.normal) * Matrix3::rotation_z(e.rotation);
+    let trans_ow = Matrix3::arbitrary_axis(e.normal) * Matrix3::rotation_z(e.rotation);
 
     let trans_wo_base = Matrix3::arbitrary_axis(new_normal);
     let trans_wo = trans_wo_base.transpose();
@@ -679,8 +832,7 @@ pub(crate) fn transform_insert(e: &mut Insert, transform: &Transform) {
 
     let trans_wo_rot = Matrix3::rotation_z(new_rotation).transpose() * trans_wo;
     let s = trans_wo_rot
-        * (transformation
-            * (trans_ow * Vector3::new(e.x_scale(), e.y_scale(), e.z_scale())));
+        * (transformation * (trans_ow * Vector3::new(e.x_scale(), e.y_scale(), e.z_scale())));
 
     let clamp = |val: f64| -> f64 {
         if val.abs() < SCALE_EPSILON {
@@ -749,10 +901,7 @@ pub(crate) fn transform_viewport(e: &mut Viewport, transform: &Transform) {
 
 // ── AttributeDefinition ──────────────────────────────────────────────────────
 
-pub(crate) fn transform_attribute_definition(
-    e: &mut AttributeDefinition,
-    transform: &Transform,
-) {
+pub(crate) fn transform_attribute_definition(e: &mut AttributeDefinition, transform: &Transform) {
     // Insertion / alignment points are stored in OCS.
     let new_normal = transform.apply_rotation(e.normal).normalize();
     let (ocs, new_t) = ocs_pair(e.normal, new_normal);
@@ -805,9 +954,15 @@ pub(crate) fn transform_multileader(e: &mut MultiLeader, transform: &Transform) 
     e.context.base_point = transform.apply(e.context.base_point);
 
     e.context.text_normal = transform.apply_rotation(e.context.text_normal).normalize();
-    e.context.text_direction = transform.apply_rotation(e.context.text_direction).normalize();
-    e.context.base_direction = transform.apply_rotation(e.context.base_direction).normalize();
-    e.context.base_vertical = transform.apply_rotation(e.context.base_vertical).normalize();
+    e.context.text_direction = transform
+        .apply_rotation(e.context.text_direction)
+        .normalize();
+    e.context.base_direction = transform
+        .apply_rotation(e.context.base_direction)
+        .normalize();
+    e.context.base_vertical = transform
+        .apply_rotation(e.context.base_vertical)
+        .normalize();
 
     for root in &mut e.context.leader_roots {
         root.connection_point = transform.apply(root.connection_point);
@@ -883,8 +1038,9 @@ pub(crate) fn transform_solid3d(e: &mut Solid3D, transform: &Transform) {
     }
     for silhouette in &mut e.silhouettes {
         silhouette.target = transform.apply(silhouette.target);
-        silhouette.view_direction =
-            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.view_direction = transform
+            .apply_rotation(silhouette.view_direction)
+            .normalize();
         silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
         for wire in &mut silhouette.wires {
             for pt in &mut wire.points {
@@ -906,8 +1062,9 @@ pub(crate) fn transform_region(e: &mut Region, transform: &Transform) {
     }
     for silhouette in &mut e.silhouettes {
         silhouette.target = transform.apply(silhouette.target);
-        silhouette.view_direction =
-            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.view_direction = transform
+            .apply_rotation(silhouette.view_direction)
+            .normalize();
         silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
         for wire in &mut silhouette.wires {
             for pt in &mut wire.points {
@@ -929,8 +1086,9 @@ pub(crate) fn transform_body(e: &mut Body, transform: &Transform) {
     }
     for silhouette in &mut e.silhouettes {
         silhouette.target = transform.apply(silhouette.target);
-        silhouette.view_direction =
-            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.view_direction = transform
+            .apply_rotation(silhouette.view_direction)
+            .normalize();
         silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
         for wire in &mut silhouette.wires {
             for pt in &mut wire.points {
@@ -940,7 +1098,22 @@ pub(crate) fn transform_body(e: &mut Body, transform: &Transform) {
     }
 }
 
+/// Keep embedded loft curves in their local frame while moving their placement.
+pub(crate) fn transform_loft_placement(e: &mut crate::entities::Surface, transform: &Transform) {
+    if let crate::entities::SurfaceData::Lofted { loft_transform, .. } = &mut e.surface_data {
+        let previous = *loft_transform;
+        *loft_transform = std::array::from_fn(|index| {
+            let row = index % 4;
+            let column = index / 4;
+            (0..4)
+                .map(|inner| transform.matrix.m[row][inner] * previous[column * 4 + inner])
+                .sum()
+        });
+    }
+}
+
 pub(crate) fn transform_surface(e: &mut crate::entities::Surface, transform: &Transform) {
+    transform_loft_placement(e, transform);
     e.point_of_reference = transform.apply(e.point_of_reference);
     compose_acis_placement(&mut e.acis_data, transform);
     for wire in &mut e.wires {
@@ -950,8 +1123,9 @@ pub(crate) fn transform_surface(e: &mut crate::entities::Surface, transform: &Tr
     }
     for silhouette in &mut e.silhouettes {
         silhouette.target = transform.apply(silhouette.target);
-        silhouette.view_direction =
-            transform.apply_rotation(silhouette.view_direction).normalize();
+        silhouette.view_direction = transform
+            .apply_rotation(silhouette.view_direction)
+            .normalize();
         silhouette.up_vector = transform.apply_rotation(silhouette.up_vector).normalize();
         for wire in &mut silhouette.wires {
             for pt in &mut wire.points {
@@ -1092,12 +1266,7 @@ impl EntityType {
             EntityType::MText(e) => transform_mtext(e, transform),
             EntityType::Spline(e) => transform_spline(e, transform),
             EntityType::Helix(e) => transform_helix(e, transform),
-            EntityType::Dimension(_) => {
-                // Dimension uses the default Entity trait implementation
-                let origin = Vector3::ZERO;
-                let translated = transform.apply(origin);
-                self.as_entity_mut().translate(translated);
-            }
+            EntityType::Dimension(e) => e.apply_transform(transform),
             EntityType::Hatch(e) => transform_hatch(e, transform),
             EntityType::Solid(e) => transform_solid(e, transform),
             EntityType::Face3D(e) => transform_face3d(e, transform),
@@ -1165,10 +1334,7 @@ mod tests {
 
     #[test]
     fn test_transform_line() {
-        let mut line = Line::from_points(
-            Vector3::new(1.0, 0.0, 0.0),
-            Vector3::new(2.0, 0.0, 0.0),
-        );
+        let mut line = Line::from_points(Vector3::new(1.0, 0.0, 0.0), Vector3::new(2.0, 0.0, 0.0));
         let t = Transform::from_scale(2.0);
         transform_line(&mut line, &t);
         assert!((line.start.x - 2.0).abs() < 1e-10);
@@ -1200,12 +1366,56 @@ mod tests {
         }
     }
 
-    // Mirroring a hatch must keep its boundary arc edges continuous with the
-    // adjacent line edges. DXF stores CW (ccw=false) arc-edge angles MIRRORED
-    // — the true point is center + r·(cos(-θ), sin(-θ)) — verified against
-    // AutoCAD output by endpoint continuity. The old code stored geometric
-    // angles after a flip, so hatches inside mirrored INSERTs swept the wrong
-    // way and covered the complementary region.
+    fn assert_vector_near(actual: Vector3, expected: Vector3) {
+        assert!(
+            actual.distance(&expected) < 1e-9,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn test_transform_linear_dimension_rotates_out_of_world_plane() {
+        let mut linear = DimensionLinear::horizontal(Vector3::ZERO, Vector3::new(10.0, 0.0, 0.0));
+        linear.definition_point = Vector3::new(0.0, 5.0, 0.0);
+        linear.base.definition_point = linear.definition_point;
+        let mut dimension = Dimension::Linear(linear);
+
+        transform_dimension(
+            &mut dimension,
+            &Transform::from_rotation(Vector3::UNIT_Y, std::f64::consts::FRAC_PI_2),
+        );
+
+        let Dimension::Linear(linear) = dimension else {
+            unreachable!()
+        };
+        assert_vector_near(linear.second_point, Vector3::new(0.0, 0.0, -10.0));
+        assert_vector_near(linear.base.normal, Vector3::UNIT_X);
+        assert!((linear.measurement() - 10.0).abs() < 1e-9);
+        assert!((linear.base.actual_measurement - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_transform_linear_dimension_mirrors_about_offset_plane() {
+        let mut linear = DimensionLinear::horizontal(Vector3::ZERO, Vector3::new(10.0, 0.0, 0.0));
+        linear.definition_point = Vector3::new(0.0, 5.0, 0.0);
+        linear.base.definition_point = linear.definition_point;
+        let mut dimension = Dimension::Linear(linear);
+        let plane_point = Vector3::new(0.0, 2.0, 0.0);
+        let reflection = Transform::from_translation(-plane_point)
+            .then(&Transform::from_scaling(Vector3::new(1.0, -1.0, 1.0)))
+            .then(&Transform::from_translation(plane_point));
+
+        transform_dimension(&mut dimension, &reflection);
+
+        let Dimension::Linear(linear) = dimension else {
+            unreachable!()
+        };
+        assert_vector_near(linear.definition_point, Vector3::new(0.0, -1.0, 0.0));
+        assert!((linear.measurement() - 10.0).abs() < 1e-9);
+        assert!((linear.base.actual_measurement - 10.0).abs() < 1e-9);
+    }
+
+    // Mirrored boundary arcs must remain continuous with adjacent lines.
     #[test]
     fn test_mirror_hatch_arc_edge_stays_continuous() {
         use crate::entities::hatch::{BoundaryEdge, BoundaryPath, CircularArcEdge, LineEdge};
@@ -1246,11 +1456,17 @@ mod tests {
         // Stored-angle convention: true point of a CW edge is at -θ.
         let pt = |theta: f64, ccw: bool| {
             let a = if ccw { theta } else { -theta };
-            (arc.center.x + arc.radius * a.cos(), arc.center.y + arc.radius * a.sin())
+            (
+                arc.center.x + arc.radius * a.cos(),
+                arc.center.y + arc.radius * a.sin(),
+            )
         };
         let (sx, sy) = pt(arc.start_angle, arc.counter_clockwise);
         let (ex, ey) = pt(arc.end_angle, arc.counter_clockwise);
-        assert!(!arc.counter_clockwise, "mirror must flip the direction flag");
+        assert!(
+            !arc.counter_clockwise,
+            "mirror must flip the direction flag"
+        );
         assert!(
             (sx - l1.end.x).abs() < 1e-9 && (sy - l1.end.y).abs() < 1e-9,
             "arc start {:?} must meet previous line end {:?}",
@@ -1266,14 +1482,29 @@ mod tests {
         // Midpoint sanity: the half-circle bulges DOWN after a y-axis mirror?
         // Original bulges up (+y); x-mirror keeps +y bulge at mirrored x.
         let mid_a = {
-            let s = if arc.counter_clockwise { arc.start_angle } else { -arc.start_angle };
-            let e = if arc.counter_clockwise { arc.end_angle } else { -arc.end_angle };
+            let s = if arc.counter_clockwise {
+                arc.start_angle
+            } else {
+                -arc.start_angle
+            };
+            let e = if arc.counter_clockwise {
+                arc.end_angle
+            } else {
+                -arc.end_angle
+            };
             let mut sweep = e - s;
-            if arc.counter_clockwise && sweep <= 0.0 { sweep += std::f64::consts::TAU; }
-            if !arc.counter_clockwise && sweep >= 0.0 { sweep -= std::f64::consts::TAU; }
+            if arc.counter_clockwise && sweep <= 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+            if !arc.counter_clockwise && sweep >= 0.0 {
+                sweep -= std::f64::consts::TAU;
+            }
             s + sweep / 2.0
         };
-        let (mx, my) = (arc.center.x + arc.radius * mid_a.cos(), arc.center.y + arc.radius * mid_a.sin());
+        let (mx, my) = (
+            arc.center.x + arc.radius * mid_a.cos(),
+            arc.center.y + arc.radius * mid_a.sin(),
+        );
         assert!(
             (mx - (-1.0)).abs() < 1e-9 && (my - 1.0).abs() < 1e-9,
             "arc midpoint {:?} must be the mirror of (1,1) → (-1,1)",
@@ -1281,12 +1512,7 @@ mod tests {
         );
     }
 
-    // The stored sweep of a boundary arc is always forward (end - start ≥ 0)
-    // and AutoCAD encodes a wrap through 0 by writing `end` ABOVE 2π
-    // (e.g. start 5.81 → end 6.64 for a 0.83 rad arc). Any normalization of
-    // the angles into [0, 2π) flips such an arc into its huge complement —
-    // the regression seen in real survey DWGs. Translation must keep the
-    // angles bit-identical; a mirror must preserve the sweep magnitude.
+    // Wrapped boundary sweeps stay unnormalized through transforms.
     #[test]
     fn test_hatch_arc_wrap_sweep_survives_transform() {
         use crate::entities::hatch::{BoundaryEdge, BoundaryPath, CircularArcEdge};
@@ -1308,16 +1534,34 @@ mod tests {
 
         // Pure translation: angles must be untouched.
         let mut h = mk();
-        transform_hatch(&mut h, &Transform::from_translation(Vector3::new(3.0, -2.0, 0.0)));
-        let BoundaryEdge::CircularArc(a) = &h.paths[0].edges[0] else { panic!() };
-        assert!((a.start_angle - 5.80985).abs() < 1e-9, "start changed: {}", a.start_angle);
-        assert!((a.end_angle - 6.63571).abs() < 1e-9, "end changed: {}", a.end_angle);
+        transform_hatch(
+            &mut h,
+            &Transform::from_translation(Vector3::new(3.0, -2.0, 0.0)),
+        );
+        let BoundaryEdge::CircularArc(a) = &h.paths[0].edges[0] else {
+            panic!()
+        };
+        assert!(
+            (a.start_angle - 5.80985).abs() < 1e-9,
+            "start changed: {}",
+            a.start_angle
+        );
+        assert!(
+            (a.end_angle - 6.63571).abs() < 1e-9,
+            "end changed: {}",
+            a.end_angle
+        );
         assert!(!a.counter_clockwise);
 
         // Mirror: sweep magnitude must survive (0.82586), direction flag flips.
         let mut h = mk();
-        transform_hatch(&mut h, &Transform::from_scaling(Vector3::new(-1.0, 1.0, 1.0)));
-        let BoundaryEdge::CircularArc(a) = &h.paths[0].edges[0] else { panic!() };
+        transform_hatch(
+            &mut h,
+            &Transform::from_scaling(Vector3::new(-1.0, 1.0, 1.0)),
+        );
+        let BoundaryEdge::CircularArc(a) = &h.paths[0].edges[0] else {
+            panic!()
+        };
         assert!(a.counter_clockwise, "mirror must flip the flag");
         let sweep = a.end_angle - a.start_angle;
         assert!(
@@ -1342,7 +1586,10 @@ mod tests {
 
         // Mirror across Y (x → -x): reflection, bulges must negate.
         let mut a = lw.clone();
-        transform_lwpolyline(&mut a, &Transform::from_scaling(Vector3::new(-1.0, 1.0, 1.0)));
+        transform_lwpolyline(
+            &mut a,
+            &Transform::from_scaling(Vector3::new(-1.0, 1.0, 1.0)),
+        );
         assert!((a.vertices[0].bulge - (-0.5)).abs() < 1e-12);
         assert!((a.vertices[1].bulge - 0.3).abs() < 1e-12);
 

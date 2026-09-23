@@ -29,6 +29,7 @@ fn inherit_common(source: &EntityCommon) -> EntityCommon {
         linetype_scale: source.linetype_scale,
         transparency: source.transparency,
         color_name: source.color_name.clone(),
+        color_book_handle: source.color_book_handle,
         invisible: source.invisible,
         owner_handle: source.owner_handle,
         ..EntityCommon::new()
@@ -108,7 +109,13 @@ fn arc_from_bulge(
 }
 
 /// Build a [`Line`] entity between two 3-D points.
-fn line_entity(start: Vector3, end: Vector3, thickness: f64, normal: Vector3, common: &EntityCommon) -> EntityType {
+fn line_entity(
+    start: Vector3,
+    end: Vector3,
+    thickness: f64,
+    normal: Vector3,
+    common: &EntityCommon,
+) -> EntityType {
     EntityType::Line(Line {
         common: inherit_common(common),
         start,
@@ -288,7 +295,7 @@ fn explode_ellipse(ellipse: &Ellipse) -> Vec<EntityType> {
 fn explode_solid(solid: &Solid) -> Vec<EntityType> {
     // Explode a filled solid into its edge lines.
     let common = &solid.common;
-    let corners = solid.corners();
+    let corners = solid.boundary_corners();
     let n = corners.len();
     let mut result = Vec::with_capacity(n);
     for i in 0..n {
@@ -491,56 +498,160 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
     let base = dim.base();
     let common = &base.common;
 
-    let text_value = if !base.text.is_empty() {
-        base.text.clone()
-    } else if let Some(ref ut) = base.user_text {
-        ut.clone()
-    } else {
-        format!("{:.4}", base.actual_measurement)
-    };
+    let text_value = base
+        .text_override()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{:.4}", dim.measurement()));
 
     let mut result = Vec::new();
 
     match dim {
         Dimension::Linear(d) => {
             // Extension lines from definition points to dimension line.
-            result.push(line_entity(d.first_point, d.definition_point, 0.0, base.normal, common));
-            result.push(line_entity(d.second_point, d.definition_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.first_point,
+                d.definition_point,
+                0.0,
+                base.normal,
+                common,
+            ));
+            result.push(line_entity(
+                d.second_point,
+                d.definition_point,
+                0.0,
+                base.normal,
+                common,
+            ));
             // Dimension line between first and second projected points.
-            result.push(line_entity(d.first_point, d.second_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.first_point,
+                d.second_point,
+                0.0,
+                base.normal,
+                common,
+            ));
         }
         Dimension::Aligned(d) => {
-            result.push(line_entity(d.first_point, d.definition_point, 0.0, base.normal, common));
-            result.push(line_entity(d.second_point, d.definition_point, 0.0, base.normal, common));
-            result.push(line_entity(d.first_point, d.second_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.first_point,
+                d.definition_point,
+                0.0,
+                base.normal,
+                common,
+            ));
+            result.push(line_entity(
+                d.second_point,
+                d.definition_point,
+                0.0,
+                base.normal,
+                common,
+            ));
+            result.push(line_entity(
+                d.first_point,
+                d.second_point,
+                0.0,
+                base.normal,
+                common,
+            ));
         }
         Dimension::Radius(d) => {
-            result.push(line_entity(d.angle_vertex, d.definition_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.angle_vertex,
+                d.definition_point,
+                0.0,
+                base.normal,
+                common,
+            ));
         }
         Dimension::Diameter(d) => {
-            result.push(line_entity(d.angle_vertex, d.definition_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.angle_vertex,
+                d.definition_point,
+                0.0,
+                base.normal,
+                common,
+            ));
         }
         Dimension::Angular2Ln(d) => {
-            result.push(line_entity(d.angle_vertex, d.first_point, 0.0, base.normal, common));
-            result.push(line_entity(d.angle_vertex, d.second_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.angle_vertex,
+                d.first_point,
+                0.0,
+                base.normal,
+                common,
+            ));
+            result.push(line_entity(
+                d.angle_vertex,
+                d.second_point,
+                0.0,
+                base.normal,
+                common,
+            ));
         }
         Dimension::Angular3Pt(d) => {
-            result.push(line_entity(d.angle_vertex, d.first_point, 0.0, base.normal, common));
-            result.push(line_entity(d.angle_vertex, d.second_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.angle_vertex,
+                d.first_point,
+                0.0,
+                base.normal,
+                common,
+            ));
+            result.push(line_entity(
+                d.angle_vertex,
+                d.second_point,
+                0.0,
+                base.normal,
+                common,
+            ));
         }
         Dimension::Ordinate(d) => {
-            result.push(line_entity(d.feature_location, d.leader_endpoint, 0.0, base.normal, common));
+            let points = d.leader_polyline(0.0, 0.0, None);
+            for pair in points.windows(2) {
+                if (pair[1] - pair[0]).length() > 1e-12 {
+                    result.push(line_entity(pair[0], pair[1], 0.0, base.normal, common));
+                }
+            }
         }
         Dimension::Arc(d) => {
-            result.push(line_entity(d.center_point, d.first_extension_point, 0.0, base.normal, common));
-            result.push(line_entity(d.center_point, d.second_extension_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.center_point,
+                d.first_extension_point,
+                0.0,
+                base.normal,
+                common,
+            ));
+            result.push(line_entity(
+                d.center_point,
+                d.second_extension_point,
+                0.0,
+                base.normal,
+                common,
+            ));
             if d.has_leader {
-                result.push(line_entity(d.first_leader_point, d.second_leader_point, 0.0, base.normal, common));
+                result.push(line_entity(
+                    d.first_leader_point,
+                    d.second_leader_point,
+                    0.0,
+                    base.normal,
+                    common,
+                ));
             }
         }
         Dimension::LargeRadial(d) => {
-            result.push(line_entity(d.definition_point, d.jog_point, 0.0, base.normal, common));
-            result.push(line_entity(d.jog_point, d.chord_point, 0.0, base.normal, common));
+            result.push(line_entity(
+                d.definition_point,
+                d.jog_point,
+                0.0,
+                base.normal,
+                common,
+            ));
+            result.push(line_entity(
+                d.jog_point,
+                d.chord_point,
+                0.0,
+                base.normal,
+                common,
+            ));
         }
     }
 
@@ -623,7 +734,8 @@ fn explode_hatch(hatch: &Hatch) -> Vec<EntityType> {
                         .map(|cp| Vector3::new(cp.x, cp.y, elevation))
                         .collect();
                     if control_points.len() >= 2 {
-                        let mut spline = Spline::from_control_points(sp_edge.degree, control_points);
+                        let mut spline =
+                            Spline::from_control_points(sp_edge.degree, control_points);
                         spline.common = inherit_common(common);
                         spline.flags.rational = sp_edge.rational;
                         spline.flags.periodic = sp_edge.periodic;
@@ -635,7 +747,11 @@ fn explode_hatch(hatch: &Hatch) -> Vec<EntityType> {
                     // Each vertex has (x, y, bulge) stored in Vector3.
                     let verts = &pl_edge.vertices;
                     let n = verts.len();
-                    let seg_count = if pl_edge.is_closed { n } else { n.saturating_sub(1) };
+                    let seg_count = if pl_edge.is_closed {
+                        n
+                    } else {
+                        n.saturating_sub(1)
+                    };
                     for i in 0..seg_count {
                         let v1 = &verts[i];
                         let v2 = &verts[(i + 1) % n];
@@ -673,12 +789,15 @@ fn explode_mesh(mesh: &Mesh) -> Vec<EntityType> {
             continue;
         }
         let v = &face.vertices;
-        let get = |idx: usize| -> Vector3 {
-            mesh.vertices.get(idx).copied().unwrap_or(Vector3::ZERO)
-        };
+        let get =
+            |idx: usize| -> Vector3 { mesh.vertices.get(idx).copied().unwrap_or(Vector3::ZERO) };
 
         if n == 3 {
-            result.push(EntityType::Face3D(Face3D::triangle(get(v[0]), get(v[1]), get(v[2]))));
+            result.push(EntityType::Face3D(Face3D::triangle(
+                get(v[0]),
+                get(v[1]),
+                get(v[2]),
+            )));
         } else {
             // For quads and n-gons, fan-triangulate from vertex 0.
             for i in 1..n - 1 {
@@ -754,19 +873,12 @@ fn explode_polygon_mesh(mesh: &PolygonMeshEntity) -> Vec<EntityType> {
         return Vec::new();
     }
 
-    let get = |mi: usize, ni: usize| -> Vector3 {
-        mesh.vertices[mi * n + ni].location
-    };
+    let get = |mi: usize, ni: usize| -> Vector3 { mesh.vertices[mi * n + ni].location };
 
     let mut result = Vec::with_capacity((m - 1) * (n - 1));
     for i in 0..m - 1 {
         for j in 0..n - 1 {
-            let mut face = Face3D::new(
-                get(i, j),
-                get(i, j + 1),
-                get(i + 1, j + 1),
-                get(i + 1, j),
-            );
+            let mut face = Face3D::new(get(i, j), get(i, j + 1), get(i + 1, j + 1), get(i + 1, j));
             face.common = inherit_common(common);
             result.push(EntityType::Face3D(face));
         }
@@ -926,17 +1038,25 @@ mod tests {
 
     #[test]
     fn test_explode_solid_quad() {
-        let solid = Solid::new(
-            Vector3::new(0.0, 0.0, 0.0),
-            Vector3::new(10.0, 0.0, 0.0),
-            Vector3::new(10.0, 10.0, 0.0),
-            Vector3::new(0.0, 10.0, 0.0),
-        );
+        let first = Vector3::new(0.0, 0.0, 0.0);
+        let second = Vector3::new(10.0, 0.0, 0.0);
+        let third = Vector3::new(0.0, 10.0, 0.0);
+        let fourth = Vector3::new(10.0, 10.0, 0.0);
+        let solid = Solid::new(first, second, third, fourth);
         let entity = EntityType::Solid(solid);
         let parts = entity.explode();
-        assert_eq!(parts.len(), 4); // 4 edge lines
-        for part in &parts {
-            assert!(matches!(part, EntityType::Line(_)));
+        let expected = [
+            (first, second),
+            (second, fourth),
+            (fourth, third),
+            (third, first),
+        ];
+        assert_eq!(parts.len(), expected.len());
+        for (part, (start, end)) in parts.iter().zip(expected) {
+            let EntityType::Line(line) = part else {
+                panic!("expected line")
+            };
+            assert_eq!((line.start, line.end), (start, end));
         }
     }
 
@@ -1040,11 +1160,7 @@ mod tests {
 
     #[test]
     fn test_explode_ellipse() {
-        let ellipse = Ellipse::from_center_axes(
-            Vector3::ZERO,
-            Vector3::new(10.0, 0.0, 0.0),
-            0.5,
-        );
+        let ellipse = Ellipse::from_center_axes(Vector3::ZERO, Vector3::new(10.0, 0.0, 0.0), 0.5);
         let entity = EntityType::Ellipse(ellipse);
         let parts = entity.explode();
         assert_eq!(parts.len(), 1);
@@ -1085,10 +1201,7 @@ mod tests {
 
     #[test]
     fn test_explode_dimension() {
-        let dim = DimensionLinear::new(
-            Vector3::new(0.0, 0.0, 0.0),
-            Vector3::new(10.0, 0.0, 0.0),
-        );
+        let dim = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         let entity = EntityType::Dimension(Dimension::Linear(dim));
         let parts = entity.explode();
         // Should contain dimension lines + text

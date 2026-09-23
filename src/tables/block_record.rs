@@ -17,6 +17,8 @@ pub struct BlockFlags {
     pub is_xref_overlay: bool,
     /// Block is from external reference
     pub is_external: bool,
+    /// Xref is currently unloaded (R2000+ "loaded" bit set).
+    pub is_xref_unloaded: bool,
 }
 
 impl BlockFlags {
@@ -28,6 +30,7 @@ impl BlockFlags {
             is_xref: false,
             is_xref_overlay: false,
             is_external: false,
+            is_xref_unloaded: false,
         }
     }
 }
@@ -145,12 +148,14 @@ impl BlockRecord {
 
     /// Check if this is a model space block
     pub fn is_model_space(&self) -> bool {
-        self.name == "*Model_Space"
+        self.name.eq_ignore_ascii_case("*Model_Space")
     }
 
     /// Check if this is a paper space block
     pub fn is_paper_space(&self) -> bool {
-        self.name.starts_with("*Paper_Space")
+        self.name
+            .get(.."*Paper_Space".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("*Paper_Space"))
     }
 
     /// Check if this is a layout block
@@ -195,6 +200,15 @@ mod tests {
         let block = BlockRecord::new("MyBlock");
         assert_eq!(block.name, "MyBlock");
         assert!(block.explodable);
+    }
+
+    #[test]
+    fn space_record_names_are_ascii_case_insensitive() {
+        assert!(BlockRecord::new("*MODEL_SPACE").is_model_space());
+        assert!(BlockRecord::new("*model_space").is_model_space());
+        assert!(BlockRecord::new("*PAPER_SPACE").is_paper_space());
+        assert!(BlockRecord::new("*paper_space12").is_paper_space());
+        assert!(!BlockRecord::new("*paperwork").is_paper_space());
     }
 
     #[test]
