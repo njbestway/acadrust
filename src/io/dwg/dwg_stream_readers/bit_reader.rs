@@ -96,7 +96,7 @@ impl DwgBitReader {
     /// Decode bytes using the document's legacy text code page.
     pub fn decode_legacy_text(&self, bytes: &[u8]) -> String {
         let (decoded, _, _) = self.encoding.decode(bytes);
-        crate::io::dxf::code_page::decode_mif_escapes(&decoded)
+        crate::io::dxf::code_page::decode_legacy_escapes(&decoded)
     }
 
     /// Get the DWG version.
@@ -446,12 +446,6 @@ impl DwgBitReader {
 
     /// Read a raw double (RD type) — 8 bytes, little-endian IEEE 754.
     pub fn read_raw_double(&mut self) -> f64 {
-        // Read directly into a stack array: this is the hottest primitive in
-        // pass-2 decoding (every coordinate goes through here), and the
-        // previous `read_bytes(8)` did a heap allocation per double. On a
-        // 9 MB drawing (~82k records, ~1.6M doubles) that was ~45% of load
-        // time and, with rayon workers contending on the allocator lock,
-        // dominated the profile. Behaviour is byte-for-byte identical.
         let mut arr = [0u8; 8];
         self.apply_shift_to_arr(&mut arr);
         f64::from_le_bytes(arr)
@@ -729,9 +723,9 @@ impl DwgBitReader {
             let _encoding_key = self.read_byte();
             let bytes = self.read_bytes(text_length as usize);
             // Decode using the reader's encoding; legacy strings may embed
-            // MIF \U+XXXX escapes for characters outside the code page.
+            // CIF \U+XXXX escapes for characters outside the code page.
             let (decoded, _, _) = self.encoding.decode(&bytes);
-            crate::io::dxf::code_page::decode_mif_escapes(&decoded)
+            crate::io::dxf::code_page::decode_legacy_escapes(&decoded)
         }
     }
 
@@ -788,9 +782,9 @@ impl DwgBitReader {
             }
             let bytes = self.read_bytes(length as usize);
             let (decoded, _, _) = self.encoding.decode(&bytes);
-            // Legacy strings may embed MIF \U+XXXX escapes for characters
+            // Legacy strings may embed CIF \U+XXXX escapes for characters
             // outside the code page — decode them into Unicode chars.
-            crate::io::dxf::code_page::decode_mif_escapes(&decoded.replace('\0', ""))
+            crate::io::dxf::code_page::decode_legacy_escapes(&decoded.replace('\0', ""))
         }
     }
 

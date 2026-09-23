@@ -435,14 +435,10 @@ fn accept_loaded_entity_batch(
     visit: &mut dyn FnMut(&CadDocument, EntityType) -> Option<EntityType>,
     entities: &mut Vec<std::sync::Arc<EntityType>>,
 ) {
-    let mut kept = Vec::with_capacity(entities.len());
     for entity in entities.drain(..) {
         let owned = std::sync::Arc::try_unwrap(entity).unwrap_or_else(|arc| (*arc).clone());
-        if let Some(entity) = visit(document, owned) {
-            kept.push(std::sync::Arc::new(entity));
-        }
+        accept_loaded_entity(document, visit, owned);
     }
-    document.add_loaded_entity_batch(&mut kept);
 }
 
 impl DwgDocumentBuilder {
@@ -569,6 +565,7 @@ impl DwgDocumentBuilder {
         // We collect first and create domain objects after the loop so that
         // cross-references (e.g. layer → linetype name) can be resolved
         // using the fully-populated handle→name maps.
+        let mut block_control_entries = Vec::new();
         enum ParsedEntry {
             Layer(u64, tables::LayerData),
             Block(u64, tables::BlockHeaderData),
@@ -580,10 +577,10 @@ impl DwgDocumentBuilder {
             VPort(u64, tables::VPortData),
             AppId(u64, tables::AppIdData),
             Vx(u64, tables::VxTableRecordData),
-            /// BLOCK_CONTROL hard-owner refs: (model_space_handle, paper_space_handle).
+            /// BLOCK_CONTROL hard-owner refs and regular table order.
             /// These are the authoritative active model/paper space designation —
             /// the file header's block handles are unreliable on some versions.
-            BlockControl(u64, u64),
+            BlockControl(u64, u64, Vec<u64>),
             VxControl(Vec<u64>),
         }
         let mut parsed_entries: Vec<ParsedEntry> = Vec::new();
@@ -843,6 +840,7 @@ impl DwgDocumentBuilder {
                             Some(ParsedEntry::BlockControl(
                                 data.model_space_handle,
                                 data.paper_space_handle,
+                                data.entry_handles,
                             ))
                         }
                         OBJ_STYLE => {
@@ -927,7 +925,8 @@ impl DwgDocumentBuilder {
                             ParsedEntry::VPort(_, _) => {}
                             ParsedEntry::AppId(_, _) => {}
                             ParsedEntry::Vx(_, _) => {}
-                            ParsedEntry::BlockControl(m, p) => {
+                            ParsedEntry::BlockControl(m, p, entries) => {
+                                block_control_entries = entries.clone();
                                 // Seed the authoritative active model/paper space
                                 // handles (used by the block-name dedup below).
                                 if *m != 0 {
@@ -991,7 +990,7 @@ impl DwgDocumentBuilder {
             let active_model = document.header.model_space_block_handle;
             let active_paper = document.header.paper_space_block_handle;
 
-            // Collect (index, handle, base_name) for all Block entries
+            // Collect (index, handle, name) for all Block entries
             let block_info: Vec<(usize, u64, String)> = parsed_entries
                 .iter()
                 .enumerate()
@@ -1004,50 +1003,25 @@ impl DwgDocumentBuilder {
                 })
                 .collect();
 
-            // Group by name
-            let mut name_groups: std::collections::HashMap<String, Vec<(usize, u64)>> =
-                std::collections::HashMap::new();
-            for (idx, h, name) in &block_info {
-                name_groups
-                    .entry(name.clone())
-                    .or_default()
-                    .push((*idx, *h));
+            let anonymous_names = anonymous_block_names(&block_control_entries, &maps.blocks);
+            for (idx, h, _) in &block_info {
+                if let Some(name) = anonymous_names.get(h) {
+                    if let ParsedEntry::Block(_, ref mut data) = parsed_entries[*idx] {
+                        data.name = name.clone();
+                    }
+                    maps.blocks.insert(*h, name.clone());
+                }
             }
-
-            // Rename duplicates
-            for (base_name, entries) in &name_groups {
-                if entries.len() <= 1 {
-                    continue;
+            let names: Vec<(u64, String)> = block_info
+                .iter()
+                .map(|(_, h, _)| (*h, maps.blocks[h].clone()))
+                .collect();
+            for (pos, new_name) in dedupe_block_names(&names, active_model, active_paper) {
+                let (idx, h, _) = block_info[pos];
+                if let ParsedEntry::Block(_, ref mut data) = parsed_entries[idx] {
+                    data.name = new_name.clone();
                 }
-                // Determine which entry keeps the canonical (un-suffixed)
-                // name.  Prefer the one matching the header's active
-                // model/paper space handle; fall back to the first entry.
-                let active_h = if base_name.eq_ignore_ascii_case("*Model_Space") {
-                    active_model
-                } else if base_name.eq_ignore_ascii_case("*Paper_Space") {
-                    active_paper
-                } else {
-                    Handle::NULL
-                };
-
-                let canonical_idx = entries
-                    .iter()
-                    .find(|(_, h)| !active_h.is_null() && Handle::from(*h) == active_h)
-                    .or_else(|| entries.first())
-                    .map(|&(idx, _)| idx);
-
-                let mut suffix = 0usize;
-                for &(idx, h) in entries {
-                    if Some(idx) == canonical_idx {
-                        continue; // keep canonical name
-                    }
-                    let new_name = format!("{}{}", base_name, suffix);
-                    if let ParsedEntry::Block(_, ref mut data) = parsed_entries[idx] {
-                        data.name = new_name.clone();
-                    }
-                    maps.blocks.insert(h, new_name);
-                    suffix += 1;
-                }
+                maps.blocks.insert(h, new_name);
             }
         }
 
@@ -1082,6 +1056,12 @@ impl DwgDocumentBuilder {
         });
         let eed_is_wide = self.obj_reader.version().r2007_plus();
         let mut cleared_default_vports = false;
+        if parsed_entries
+            .iter()
+            .any(|entry| matches!(entry, ParsedEntry::Layer(..)))
+        {
+            let _ = document.layers.remove("0");
+        }
         for entry in &parsed_entries {
             match entry {
                 ParsedEntry::Layer(h, data) => {
@@ -1168,9 +1148,9 @@ impl DwgDocumentBuilder {
                     if data.xref_handle != 0 {
                         layer.xref_block_record_handle = Handle::from(data.xref_handle);
                     }
-                    // Remove default entry if it exists, then add
-                    let _ = document.layers.remove(&data.name);
-                    let _ = document.layers.add(layer);
+                    // Real drawings can contain several distinct records with an
+                    // empty name. Preserve each handle, including its properties.
+                    document.layers.add_allow_duplicate(layer);
                 }
                 ParsedEntry::Block(h, data) => {
                     let mut br = crate::tables::BlockRecord::new(&data.name);
@@ -4026,6 +4006,23 @@ impl DwgDocumentBuilder {
                     e.common = entity_common;
                     e.scale_factor = data.scale_factor;
                     e.justification = MLineJustification::from(data.justification as i16);
+                    // `Openclosed BS` — open (1), closed (3). It is DXF group 71
+                    // restricted to the two low bits `HAS_VERTICES = 1` and
+                    // `CLOSED = 2`, so the raw value maps straight onto
+                    // `MLineFlags`. The field is read off the object stream at
+                    // `src/io/dwg/dwg_stream_readers/object_reader/entities.rs:3032`
+                    // into `MLineData.openclosed`, but until this line it was never
+                    // transferred out of `MLineData`, so `e.flags` kept
+                    // `MLine::new()`'s default `HAS_VERTICES` and every DWG
+                    // multiline read back open. The DXF reader applies the same rule
+                    // (`src/io/dxf/reader/section_reader.rs:17608-17612`) and this is
+                    // the exact inverse of our own DWG writer
+                    // (`src/io/dwg/dwg_stream_writers/object_writer/entities.rs:3130-3136`).
+                    // `from_bits_truncate` rather than `== 3`: it also clears
+                    // `HAS_VERTICES` for a degenerate `openclosed == 0` and cannot
+                    // panic on an out-of-spec value. Plain `=`, not `|=`, for the
+                    // same reason — `|=` could never clear `HAS_VERTICES`.
+                    e.flags = MLineFlags::from_bits_truncate(data.openclosed);
                     e.start_point = data.start_point;
                     e.normal = data.normal;
                     e.style_element_count = data.lines_in_style as usize;
@@ -7206,6 +7203,157 @@ fn decode_section_view_style(
 
 /// DWG stores the spatial-filter transforms row-major (unlike DXF code 40,
 /// which is column-major).
+/// Unique block record names for `Table<BlockRecord>`, which compares names
+/// case-insensitively.
+///
+/// `blocks` is `(handle, stored name)` in file order. Returns
+/// `(position in blocks, new name)` for every record that must be renamed.
+///
+/// Records are grouped case-insensitively: a drawing can hold both
+/// "*PAPER_SPACE" and "*Paper_Space" records, and grouping by exact name let
+/// one overwrite the other (its entities then resolved to the wrong owner).
+/// In each group the record matching the header's active model/paper space
+/// handle (else the first one) keeps its name. The others get the lowest
+/// numeric suffix not used by any stored or generated name, keeping their own
+/// casing. Groups are processed in file order so the result is deterministic.
+fn dedupe_block_names(
+    blocks: &[(u64, String)],
+    active_model: Handle,
+    active_paper: Handle,
+) -> Vec<(usize, String)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut group_of: HashMap<String, usize> = HashMap::new();
+    let mut taken: HashSet<String> = HashSet::new();
+    for (pos, (_, name)) in blocks.iter().enumerate() {
+        let key = name.to_uppercase();
+        taken.insert(key.clone());
+        let g = *group_of.entry(key.clone()).or_insert_with(|| {
+            groups.push((key, Vec::new()));
+            groups.len() - 1
+        });
+        groups[g].1.push(pos);
+    }
+
+    let mut renames = Vec::new();
+    for (key, members) in &groups {
+        if members.len() <= 1 {
+            continue;
+        }
+        let active_h = if key == "*MODEL_SPACE" {
+            active_model
+        } else if key == "*PAPER_SPACE" {
+            active_paper
+        } else {
+            Handle::NULL
+        };
+        let canonical = members
+            .iter()
+            .copied()
+            .find(|&pos| !active_h.is_null() && Handle::from(blocks[pos].0) == active_h)
+            .unwrap_or(members[0]);
+
+        let mut suffix = 0usize;
+        for &pos in members {
+            if pos == canonical {
+                continue;
+            }
+            let base = &blocks[pos].1;
+            let new_name = loop {
+                let candidate = format!("{}{}", base, suffix);
+                suffix += 1;
+                if taken.insert(candidate.to_uppercase()) {
+                    break candidate;
+                }
+            };
+            renames.push((pos, new_name));
+        }
+    }
+    renames
+}
+
+/// AutoCAD numbers bare anonymous names in BLOCK_CONTROL order. Ordinary
+/// records consume an ordinal too; dangling/erased entries do not. This is
+/// independent of object-handle order and excludes the control's two special
+/// model/paper-space pointers. Preserve names with an explicit stored suffix.
+fn anonymous_block_names(entries: &[u64], names: &HashMap<u64, String>) -> HashMap<u64, String> {
+    entries
+        .iter()
+        .filter_map(|handle| names.get(handle).map(|name| (handle, name)))
+        .enumerate()
+        .filter_map(|(ordinal, (handle, name))| {
+            (name.len() == 2 && name.starts_with('*'))
+                .then(|| (*handle, format!("{name}{ordinal}")))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod dedupe_block_names_tests {
+    use super::*;
+
+    #[test]
+    fn anonymous_names_follow_live_control_order_including_named_blocks() {
+        let names = [(30, "*U"), (10, "Named"), (20, "*D"), (40, "*U99")]
+            .into_iter()
+            .map(|(h, n)| (h, n.to_string()))
+            .collect();
+        let result = anonymous_block_names(&[10, 999, 30, 20, 40], &names);
+        assert_eq!(result[&30], "*U1");
+        assert_eq!(result[&20], "*D2");
+        assert!(!result.contains_key(&40));
+        assert!(!result.contains_key(&10));
+        assert!(anonymous_block_names(&[], &names).is_empty());
+    }
+
+    fn names(blocks: &[(u64, &str)], model: u64, paper: u64) -> Vec<String> {
+        let input: Vec<(u64, String)> = blocks.iter().map(|(h, n)| (*h, n.to_string())).collect();
+        let mut out: Vec<String> = input.iter().map(|(_, n)| n.clone()).collect();
+        for (pos, name) in dedupe_block_names(&input, Handle::from(model), Handle::from(paper)) {
+            out[pos] = name;
+        }
+        out
+    }
+
+    #[test]
+    fn mixed_case_paper_space_records_get_distinct_names() {
+        let out = names(
+            &[
+                (0x18, "*MODEL_SPACE"),
+                (0x848A, "*PAPER_SPACE"),
+                (0xC49F, "*Paper_Space"),
+                (0x1291E, "*PAPER_SPACE"),
+                (0x593B1, "*Paper_Space"),
+            ],
+            0x18,
+            0x1291E,
+        );
+        assert_eq!(
+            out,
+            [
+                "*MODEL_SPACE",
+                "*PAPER_SPACE0",
+                "*Paper_Space1",
+                "*PAPER_SPACE",
+                "*Paper_Space2"
+            ]
+        );
+        let unique: HashSet<String> = out.iter().map(|n| n.to_uppercase()).collect();
+        assert_eq!(unique.len(), out.len());
+    }
+
+    #[test]
+    fn generated_names_skip_names_already_in_use() {
+        let out = names(&[(1, "*U"), (2, "*U0"), (3, "*U"), (4, "*u")], 0, 0);
+        assert_eq!(out, ["*U", "*U0", "*U1", "*u2"]);
+    }
+
+    #[test]
+    fn unique_names_are_left_alone() {
+        let out = names(&[(1, "Door"), (2, "Window"), (3, "*Model_Space")], 3, 0);
+        assert_eq!(out, ["Door", "Window", "*Model_Space"]);
+    }
+}
+
 fn matrix_from_row_major(v: &[f64; 12]) -> crate::types::Matrix4 {
     crate::types::Matrix4 {
         m: [

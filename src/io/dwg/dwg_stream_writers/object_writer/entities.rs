@@ -1308,6 +1308,16 @@ impl<'a> DwgObjectWriter<'a> {
             att.vertical_alignment as i16,
         );
 
+        // Common TEXT style precedes embedded MTEXT handles (ODA 20.4.4).
+        let style_handle = self
+            .document
+            .text_styles
+            .get(&att.text_style)
+            .map(|s| s.handle)
+            .unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
+
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
             self.writer.write_byte(0);
@@ -1345,14 +1355,6 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r2007_plus() {
             self.writer.write_bit(att.lock_position);
         }
-        let style_handle = self
-            .document
-            .text_styles
-            .get(&att.text_style)
-            .map(|s| s.handle)
-            .unwrap_or(Handle::NULL);
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         self.register_object(handle);
     }
@@ -1561,8 +1563,18 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_long(scenario);
         }
 
+        // Generate a clamped uniform knot vector if not provided. The
+        // degree written below must match the degree the knots were
+        // generated for, so both come from the same helper.
+        let (degree, knots): (i32, Vec<f64>) =
+            if scenario == 1 && e.knots.is_empty() && !e.control_points.is_empty() {
+                Spline::clamped_knots_with_degree(e.degree, e.control_points.len())
+            } else {
+                (e.degree, e.knots.clone())
+            };
+
         // Degree BL (common, before scenario switch)
-        self.writer.write_bit_long(e.degree);
+        self.writer.write_bit_long(degree);
 
         let has_weights = !e.weights.is_empty();
 
@@ -1580,13 +1592,6 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_double(e.knot_tolerance);
                 // Ctrl tol BD 43
                 self.writer.write_bit_double(e.control_tolerance);
-
-                // Generate clamped uniform knot vector if not provided
-                let knots: Vec<f64> = if e.knots.is_empty() && !e.control_points.is_empty() {
-                    Spline::generate_clamped_knots(e.degree as usize, e.control_points.len())
-                } else {
-                    e.knots.clone()
-                };
 
                 // Numknots BL 72
                 self.writer.write_bit_long(knots.len() as i32);
@@ -3131,13 +3136,29 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_3bit_double(e.start_point);
         self.writer.write_3bit_double(e.normal);
 
-        // Openclosed BS: open (1), closed (3) — always has HAS_VERTICES flag
-        let flag_value: i16 = if e.flags.contains(MLineFlags::CLOSED) {
-            3
-        } else {
-            1
-        };
-        self.writer.write_bit_short(flag_value);
+        // `Openclosed BS`, DXF group 71. The ODA specification documents two
+        // values for this field, open (1) and closed (3), and those are not
+        // enum tags: they are group 71's two low bits, `HAS_VERTICES` (1) and
+        // `HAS_VERTICES | CLOSED` (1 | 2). The short *is* group 71, so the
+        // cap-suppression bits `NO_START_CAPS` (4) and `NO_END_CAPS` (8) ride
+        // in it as well, and the entity's own object stream is the only place
+        // they can: MLINESTYLE's flag word has bits 4 and 8 unassigned, and
+        // its cap bits (16/32/64 start, 256/512/1024 end) pick a cap *shape*
+        // for every entity sharing the style, which cannot express one
+        // multiline suppressing its own caps. libredwg decodes this same field
+        // as `FIELD_BS (flags, 71)` with `MLINE_FLAGS_SUPPRESS_START_CAPS` /
+        // `_SUPPRESS_END_CAPS` and a validity mask of 15 (`src/dwg.spec`
+        // entity MLINE (47), `include/dwg.h`), and writes that raw short
+        // straight back out at group 71.
+        //
+        // HAS_VERTICES is derived from the vertex list in the record. Preserve
+        // the closed and cap-suppression bits supplied by the model while
+        // making group 71 agree with group 72 in every output format.
+        let caps = e.flags & (MLineFlags::NO_START_CAPS | MLineFlags::NO_END_CAPS);
+        let open_closed: i16 = (e.serialized_flags()
+            & (MLineFlags::HAS_VERTICES | MLineFlags::CLOSED))
+            .bits();
+        self.writer.write_bit_short(open_closed | caps.bits());
 
         // Linesinstyle RC 73 — number of segments from first vertex
         let nlines: u8 = if let Some(first_v) = e.vertices.first() {
@@ -4597,8 +4618,7 @@ impl<'a> DwgObjectWriter<'a> {
         fallback.style = style.to_string();
         let mtext = embedded.unwrap_or(&fallback);
 
-        // AcDbMTextObjectEmbedded has a reduced common-entity header whose
-        // order differs from a standalone MTEXT entity.
+        // AcDbMTextObjectEmbedded starts at the common entity's Entmode.
         // Embedded MTEXT is a payload, not a model/paper-space entity.  Mode
         // zero still requires its (nullable) owner slot in the handle stream.
         self.writer.write_2bits(0);
@@ -4608,12 +4628,12 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit(true);
         self.writer.write_bit(false);
         self.writer
-            .write_bit_short(mtext.common.color.index().unwrap_or(256) as i16);
+            .write_en_color(&mtext.common.color, &mtext.common.transparency);
         self.writer.write_bit_double(mtext.common.linetype_scale);
         self.writer.write_2bits(0);
         self.writer.write_2bits(0);
-        self.writer.write_2bits(0);
         self.writer.write_byte(mtext.common.shadow_flags);
+        self.writer.write_2bits(0);
         self.writer.write_bit(false);
         self.writer.write_bit(false);
         self.writer.write_bit(false);
@@ -4724,6 +4744,16 @@ impl<'a> DwgObjectWriter<'a> {
             e.vertical_alignment as i16,
         );
 
+        // Common TEXT style precedes embedded MTEXT handles (ODA 20.4.4).
+        let style_handle = self
+            .document
+            .text_styles
+            .get(&e.text_style)
+            .map(|s| s.handle)
+            .unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
+
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
             self.writer.write_byte(0); // version
@@ -4772,17 +4802,6 @@ impl<'a> DwgObjectWriter<'a> {
         // Prompt
         self.writer.write_variable_text(&e.prompt);
 
-        // The outer TEXT style is the final ATTDEF handle.  For multiline
-        // attributes the embedded MTEXT layer/style handles precede it.
-        let style_handle = self
-            .document
-            .text_styles
-            .get(&e.text_style)
-            .map(|s| s.handle)
-            .unwrap_or(Handle::NULL);
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
-
         self.register_object(e.common.handle);
     }
 
@@ -4806,6 +4825,16 @@ impl<'a> DwgObjectWriter<'a> {
             e.horizontal_alignment as i16,
             e.vertical_alignment as i16,
         );
+
+        // Common TEXT style precedes embedded MTEXT handles (ODA 20.4.4).
+        let style_handle = self
+            .document
+            .text_styles
+            .get(&e.text_style)
+            .map(|s| s.handle)
+            .unwrap_or(Handle::NULL);
+        self.writer
+            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
@@ -4844,15 +4873,6 @@ impl<'a> DwgObjectWriter<'a> {
         if self.version.r2007_plus() {
             self.writer.write_bit(e.lock_position);
         }
-        // The outer TEXT style follows the embedded MTEXT handles.
-        let style_handle = self
-            .document
-            .text_styles
-            .get(&e.text_style)
-            .map(|s| s.handle)
-            .unwrap_or(Handle::NULL);
-        self.writer
-            .write_handle(DwgReferenceType::HardPointer, style_handle.value());
 
         self.register_object(e.common.handle);
     }

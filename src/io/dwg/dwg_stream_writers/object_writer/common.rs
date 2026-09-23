@@ -309,8 +309,8 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Resolve an entity's layer name to the handle to write.
     ///
-    /// An entity's layer is a *required* hard pointer: AutoCAD reports a NULL
-    /// one as a damaged drawing and offers recovery (issue #80). A name can
+    /// An entity's layer is a *required* hard pointer: a NULL value leaves an
+    /// invalid drawing (issue #80). A name can
     /// fail to resolve when the caller set `common.layer` to a layer that was
     /// never added, or renamed a layer in place so the entities still carry the
     /// old name. Fall back to layer "0", which every drawing has and which
@@ -789,7 +789,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // Use side-channel xdictionary if struct value is None (roundtrip preservation)
         // Only use it if the xdictionary object actually exists in document.objects,
-        // otherwise BricsCAD reports "Object was erased" for the dangling reference.
+        // otherwise strict readers report an erased object for the dangling reference.
         let effective_xdic = if xdictionary_handle.is_none() {
             self.extension_dictionary_handle(handle)
                 .filter(|xdic| self.document.objects.contains_key(xdic))
@@ -916,9 +916,7 @@ impl<'a> DwgObjectWriter<'a> {
             }
             let code_page =
                 crate::io::dxf::code_page::dwg_code_page_index(&self.document.header.code_page);
-            let encoding =
-                crate::io::dxf::code_page::encoding_from_code_page(&self.document.header.code_page)
-                    .unwrap_or(encoding_rs::WINDOWS_1252);
+            let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page);
             let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
                 wide,
                 &rec.values,
