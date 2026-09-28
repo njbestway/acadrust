@@ -7427,6 +7427,9 @@ fn map_entity_common(
     common.invisible = data.invisible;
     common.linetype_scale = data.linetype_scale;
     common.layer = maps.layer_name(data.layer_handle);
+    // Keep the source handle: `layer_name` falls back to "0" when it does not
+    // resolve, and the handle is the only way to tell the two apart (#113).
+    common.layer_handle = (data.layer_handle != 0).then(|| Handle::from(data.layer_handle));
     // Line weight (raw DWG index byte → LineWeight)
     common.line_weight = crate::types::LineWeight::from_dwg_index(data.line_weight);
     // Reactors
@@ -7467,6 +7470,71 @@ fn map_entity_common(
     // right modeler entity in object-stream order.
     common.has_ds_data = data.has_ds_data;
     common
+}
+
+#[cfg(test)]
+mod layer_handle_tests {
+    use super::{map_entity_common, HandleMaps};
+    use crate::io::dwg::dwg_stream_readers::object_reader::{EntityCommonData, ObjectCommonData};
+    use crate::types::{Color, Handle, Transparency};
+
+    fn entity_on_layer(layer_handle: u64) -> EntityCommonData {
+        EntityCommonData {
+            common: ObjectCommonData {
+                type_code: 19,
+                handle: 0x100,
+                eed_raw: Vec::new(),
+            },
+            has_graphic: false,
+            graphic_data: None,
+            entity_mode: 2,
+            owner_handle: 0,
+            reactors: Vec::new(),
+            xdictionary_handle: None,
+            color: Color::ByLayer,
+            transparency: Transparency::BY_LAYER,
+            line_weight: 0,
+            linetype_scale: 1.0,
+            invisible: false,
+            layer_handle,
+            linetype_flags: 0,
+            linetype_handle: 0,
+            color_book_handle: None,
+            prev_entity_handle: None,
+            next_entity_handle: None,
+            material_flags: 0,
+            material_handle: None,
+            shadow_flags: 0,
+            plotstyle_flags: 0,
+            plotstyle_handle: None,
+            full_visual_style_handle: None,
+            face_visual_style_handle: None,
+            edge_visual_style_handle: None,
+            has_ds_data: false,
+        }
+    }
+
+    fn map(layer_handle: u64, maps: &HandleMaps) -> crate::entities::EntityCommon {
+        map_entity_common(&entity_on_layer(layer_handle), maps, Handle::new(0x1F), Handle::new(0x1B))
+    }
+
+    #[test]
+    fn unresolved_layer_keeps_its_handle_apart_from_layer_zero() {
+        let mut maps = HandleMaps::new();
+        maps.layers.insert(0x10, "0".to_string());
+
+        let on_zero = map(0x10, &maps);
+        assert_eq!(on_zero.layer, "0");
+        assert_eq!(on_zero.layer_handle, Some(Handle::new(0x10)));
+
+        // Same fallback name, but the handle shows the reference did not resolve.
+        let dangling = map(0x99, &maps);
+        assert_eq!(dangling.layer, "0");
+        assert_eq!(dangling.layer_handle, Some(Handle::new(0x99)));
+        assert!(!maps.layers.contains_key(&dangling.layer_handle.unwrap().value()));
+
+        assert_eq!(map(0, &maps).layer_handle, None);
+    }
 }
 
 #[cfg(test)]

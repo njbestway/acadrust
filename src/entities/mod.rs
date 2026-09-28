@@ -284,6 +284,11 @@ pub struct EntityCommon {
     pub handle: Handle,
     /// Layer name
     pub layer: String,
+    /// DWG layer handle as read from the file. Preserved so consumers can tell
+    /// an entity on layer "0" from one whose layer reference did not resolve
+    /// (the DWG reader falls back to `layer = "0"` in that case).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub layer_handle: Option<Handle>,
     /// Color
     pub color: Color,
     /// Line weight
@@ -365,6 +370,7 @@ pub struct EntityCommon {
 
 impl EntityCommon {
     fn preserve_storage_data_from(&mut self, source: &Self) {
+        self.layer_handle = source.layer_handle;
         self.linetype_handle = source.linetype_handle;
         self.graphic_data = source.graphic_data.clone();
         self.color_book_handle = source.color_book_handle;
@@ -385,6 +391,7 @@ impl EntityCommon {
             raw_record: None,
             handle: Handle::NULL,
             layer: "0".to_string(),
+            layer_handle: None,
             color: Color::ByLayer,
             line_weight: LineWeight::ByLayer,
             linetype: String::new(),

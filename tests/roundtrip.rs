@@ -629,6 +629,9 @@ fn normalize_entity_common(common: &mut acadrust::entities::EntityCommon) {
     // roundtrip comparison fail before a single geometry field is examined.
     // It is not part of the drawing's data, so it is normalized away.
     common.raw_record = None;
+    // layer_handle is the source-file layer reference the DWG reader keeps
+    // (#113); a programmatic document has None. The layer name is compared.
+    common.layer_handle = None;
 }
 
 /// Comprehensive normalization for roundtrip comparison.
