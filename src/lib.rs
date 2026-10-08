@@ -27,7 +27,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! acadrust = { version = "0.5.5", features = ["serde", "import"] }
+//! acadrust = { version = "0.6.1", features = ["serde", "import"] }
 //! ```
 //!
 //! ## Quick Start — DXF
@@ -187,6 +187,7 @@
 
 pub mod classes;
 pub mod compound_file;
+pub mod count;
 pub mod document;
 mod current_transparency;
 pub mod nested_copy;
@@ -197,6 +198,7 @@ pub mod io;
 pub mod layer_state;
 pub mod notification;
 pub mod objects;
+pub mod sheet_set;
 pub mod tables;
 pub mod types;
 pub mod vba;

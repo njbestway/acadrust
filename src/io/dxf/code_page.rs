@@ -397,7 +397,7 @@ pub fn decode_mif_escapes(text: &str) -> String {
                 '1' => Some(encoding_rs::SHIFT_JIS),
                 '2' => Some(encoding_rs::BIG5),
                 '3' => Some(encoding_rs::EUC_KR),
-                '4' => Some(encoding_rs::EUC_KR),
+                // Johab: no decoder here, so the escape stays literal.
                 '5' => Some(encoding_rs::GBK),
                 _ => None,
             };
@@ -418,6 +418,10 @@ pub fn decode_mif_escapes(text: &str) -> String {
         i += 1;
     }
     out
+}
+
+pub fn has_legacy_escape(text: &str) -> bool {
+    text.contains("\\U+") || text.contains("\\M+")
 }
 
 /// Decode both legacy AutoCAD escape formats found in pre-Unicode strings.
@@ -508,6 +512,10 @@ mod tests {
         assert_eq!(decode_legacy_escapes(r"\M+5BCFE\U+0021"), "件!");
         assert_eq!(decode_mif_escapes(r"\M+9BCFE"), r"\M+9BCFE");
         assert_eq!(decode_mif_escapes(r"\M+5GGGG"), r"\M+5GGGG");
+        // Shift-JIS as SolidWorks writes it, mixed with literal text.
+        assert_eq!(decode_mif_escapes("\\M+18B5A术\\M+19776\\M+18B81"), "技术要求");
+        // Johab has no decoder: the escape stays literal.
+        assert_eq!(decode_mif_escapes("\\M+4ABCD"), "\\M+4ABCD");
     }
 
     #[test]

@@ -23,7 +23,7 @@ use std::fs::File;
 use std::io::{BufWriter, Cursor, Seek, Write};
 use std::path::Path;
 
-use crate::document::{CadDocument, HeaderVariables};
+use crate::document::{CadDocument, HeaderVariables, SummaryInfo};
 use crate::error::{DxfError, Result};
 use crate::types::{DxfVersion, Handle};
 
@@ -65,6 +65,7 @@ impl DwgWriter {
         prepare_surface_classes(&mut prepared);
         prepare_database_references(&mut prepared);
         prepare_table_keys(&mut prepared);
+        prepare_roundtrip_records(&mut prepared);
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
@@ -93,7 +94,11 @@ impl DwgWriter {
                 if owned.dwg_source_version != Some(owned.version) {
                     prepare_legacy_classes(&mut owned);
                 }
+            }
+            if owned.version < DxfVersion::AC1027 {
                 prepare_legacy_document(&mut owned);
+                crate::objects::store_table_style_roundtrip(&mut owned);
+                crate::objects::store_visual_style_roundtrip(&mut owned);
             }
             &owned
         } else {
@@ -140,6 +145,7 @@ impl DwgWriter {
         prepare_surface_classes(&mut prepared);
         prepare_database_references(&mut prepared);
         prepare_table_keys(&mut prepared);
+        prepare_roundtrip_records(&mut prepared);
         write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 
@@ -497,6 +503,82 @@ pub(crate) fn prepare_table_keys(document: &mut std::borrow::Cow<'_, CadDocument
     document.to_mut().resync_table_keys();
 }
 
+fn prepare_roundtrip_records(document: &mut std::borrow::Cow<'_, CadDocument>) {
+    use crate::objects::{ObjectType, XRecordValue};
+    if document.version < DxfVersion::AC1024 {
+        return;
+    }
+    let key_of = |value: &XRecordValue| value.as_string().map(str::to_string);
+    let mut drops: Vec<(Handle, Handle, String, bool)> = Vec::new();
+    for (handle, object) in &document.objects {
+        let roundtrip_owner = match object {
+            ObjectType::VisualStyle(style) => style.properties.len() >= 58,
+            ObjectType::TableStyle(style) => !style.modern_overrides.is_empty(),
+            _ => false,
+        };
+        if !roundtrip_owner {
+            continue;
+        }
+        let Some(dictionary) = document.extension_dictionary_handle(*handle) else {
+            continue;
+        };
+        let Some(ObjectType::Dictionary(entries)) = document.objects.get(&dictionary) else {
+            continue;
+        };
+        let is_visual_style = matches!(object, ObjectType::VisualStyle(_));
+        for (name, child) in &entries.entries {
+            let drop = match (name.as_str(), document.objects.get(child)) {
+                ("ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP", Some(ObjectType::DataObject(_))) => {
+                    !is_visual_style
+                }
+                ("ACAD_XREC_ROUNDTRIP", Some(ObjectType::XRecord(record))) => {
+                    let prefix = if is_visual_style {
+                        "RTVS"
+                    } else {
+                        "ACAD_ROUNDTRIP_PRE2007_TABLESTYLE"
+                    };
+                    record
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.code == 102)
+                        .filter_map(|entry| key_of(&entry.value))
+                        .all(|key| {
+                            key.starts_with(prefix)
+                                || (!is_visual_style && key.is_empty())
+                        })
+                        && record.entries.iter().any(|entry| entry.code == 102)
+                }
+                _ => false,
+            };
+            if drop {
+                drops.push((*handle, dictionary, name.clone(), is_visual_style));
+            }
+        }
+    }
+    if drops.is_empty() {
+        return;
+    }
+    let document = document.to_mut();
+    for (owner, dictionary, name, is_visual_style) in drops {
+        let mut now_empty = false;
+        if let Some(ObjectType::Dictionary(entries)) = document.objects.get_mut(&dictionary) {
+            if let Some(child) = entries.get(&name) {
+                entries.entries.retain(|(entry, _)| *entry != name);
+                entries.hard_owner_entries.retain(|entry| *entry != name);
+                now_empty = entries.entries.is_empty();
+                document.objects.remove(&child);
+            }
+        }
+        if is_visual_style && now_empty {
+            document.objects.remove(&dictionary);
+            document.xdic_by_handle.remove(&owner);
+            if let Some(ObjectType::VisualStyle(style)) = document.objects.get_mut(&owner) {
+                style.xdictionary_handle = None;
+            }
+        }
+    }
+}
+
 /// The DXF class name an entity is declared under in the CLASSES section.
 fn entity_class_name(entity: &crate::entities::EntityType) -> &str {
     match entity {
@@ -523,10 +605,19 @@ fn prepare_legacy_classes(document: &mut CadDocument) {
     let object_classes = document.objects.values().flat_map(
         crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names,
     );
+    // FIELD / FIELDLIST records exist from R2004 on and are written from the
+    // document's field table, not from `objects`.
+    let field_classes: &[&str] = if document.version >= DxfVersion::AC1018 {
+        &["FIELD", "FIELDLIST"]
+    } else {
+        &[]
+    };
+    let field_classes = field_classes.iter().map(|name| std::borrow::Cow::Owned(name.to_string()));
     let mut seen = std::collections::HashSet::new();
     let required: Vec<_> = entity_classes
         .map(std::borrow::Cow::Borrowed)
         .chain(object_classes)
+        .chain(field_classes)
         .filter_map(|name| document.classes.get_by_name(&name).cloned())
         .filter(|class| seen.insert(class.dxf_name.to_ascii_uppercase()))
         .collect();
@@ -579,14 +670,10 @@ fn prepare_legacy_document(document: &mut CadDocument) {
         }
     }
 
-    // A document read from an R2004 (AC1018) DWG that already carried
-    // ACAD_MLEADERSTYLE (AutoCAD writes it there when saving as 2004, with
-    // the MLEADERSTYLE class declared) must keep it: the reader parsed those
-    // records with the same pre-R2010 layout the writer emits, and dropping
-    // them silently loses every multileader style in the file.  Only a
-    // document that did not come from such a file gets the legacy cleanup.
-    let keep_mleader_style = document.dwg_source_version == Some(document.version)
-        && document.version >= DxfVersion::AC1018
+    // R2004 saves keep ACAD_MLEADERSTYLE (with the MLEADERSTYLE class
+    // declared), written in the pre-R2010 record layout, as the reference
+    // application does; only older versions drop it.
+    let keep_mleader_style = document.version >= DxfVersion::AC1018
         && document.classes.get_by_name("MLEADERSTYLE").is_some();
     let root_handle = document.header.named_objects_dict_handle;
     let mut obsolete = Vec::new();
@@ -1184,7 +1271,8 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: SummaryInfo ──
-    let summary_data = build_summary_info(version);
+    let summary_data =
+        build_summary_info(version, &document.summary_info, summary_encoding(document));
     fhw.add_section(
         output,
         section_names::SUMMARY_INFO,
@@ -1362,7 +1450,8 @@ fn write_ac21_impl<W: Write + Seek>(
     // from ac21_section_info, so no page_size or compressed flag needed.
 
     // SummaryInfo
-    let summary_data = build_summary_info(version);
+    let summary_data =
+        build_summary_info(version, &document.summary_info, summary_encoding(document));
     fhw.add_section(output, section_names::SUMMARY_INFO, &summary_data)?;
 
     // Preview
@@ -1507,7 +1596,12 @@ fn build_template(description: &[u8], measurement: i16) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Build SummaryInfo section data (AC18+ only).
+fn summary_encoding(document: &CadDocument) -> &'static encoding_rs::Encoding {
+    crate::io::dxf::code_page::encoding_from_dwg_code_page(
+        crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page),
+    )
+}
+
 ///
 /// Writes empty summary info fields (all empty strings).
 ///
@@ -1518,22 +1612,45 @@ fn build_template(description: &[u8], measurement: i16) -> Result<Vec<u8>> {
 /// **AC1021 (R2007)**: UTF-16LE strings.
 ///   Format: UInt16(char_count_incl_null) + UTF-16LE chars.
 ///   Empty → UInt16(1) + 0x00 0x00 = 4 bytes.
-fn build_summary_info(version: DxfVersion) -> Vec<u8> {
+fn build_summary_info(
+    version: DxfVersion,
+    info: &SummaryInfo,
+    encoding: &'static encoding_rs::Encoding,
+) -> Vec<u8> {
     let mut data = Vec::with_capacity(128);
     let is_utf16 = version >= DxfVersion::AC1021;
 
-    // 8 × empty strings
-    // Title, Subject, Author, Keywords, Comments, LastSavedBy, RevisionNumber, HyperlinkBase
-    for _ in 0..8 {
-        data.extend_from_slice(&1u16.to_le_bytes()); // char/byte count including null
+    // The UInt16 count includes the terminating null; longer text is cut.
+    let push_text = |data: &mut Vec<u8>, text: &str| {
         if is_utf16 {
+            let units: Vec<u16> = text.encode_utf16().take(u16::MAX as usize - 1).collect();
+            data.extend_from_slice(&(units.len() as u16 + 1).to_le_bytes());
+            for unit in units {
+                data.extend_from_slice(&unit.to_le_bytes());
+            }
             // UTF-16LE null terminator: 2 bytes
-            data.push(0);
-            data.push(0);
+            data.extend_from_slice(&[0, 0]);
         } else {
+            let mut bytes = crate::io::dxf::code_page::encode_legacy_string(text, encoding);
+            bytes.truncate(u16::MAX as usize - 1);
+            data.extend_from_slice(&(bytes.len() as u16 + 1).to_le_bytes());
+            data.extend_from_slice(&bytes);
             // ANSI null terminator: 1 byte
             data.push(0);
         }
+    };
+
+    for text in [
+        &info.title,
+        &info.subject,
+        &info.author,
+        &info.keywords,
+        &info.comments,
+        &info.last_saved_by,
+        &info.revision_number,
+        &info.hyperlink_base,
+    ] {
+        push_text(&mut data, text);
     }
 
     // Total editing time: 2 × Int32 (zeros)
@@ -1548,8 +1665,18 @@ fn build_summary_info(version: DxfVersion) -> Vec<u8> {
     data.extend_from_slice(&0i32.to_le_bytes());
     data.extend_from_slice(&0i32.to_le_bytes());
 
-    // Property count: Int16 (0)
-    data.extend_from_slice(&0u16.to_le_bytes());
+    // Custom properties: Int16 count, then name/value string pairs
+    let properties: Vec<&(String, String)> = info
+        .custom_properties
+        .iter()
+        .filter(|(name, value)| !(name.is_empty() && value.is_empty()))
+        .take(u16::MAX as usize)
+        .collect();
+    data.extend_from_slice(&(properties.len() as u16).to_le_bytes());
+    for (name, value) in properties {
+        push_text(&mut data, name);
+        push_text(&mut data, value);
+    }
 
     // 2 × Int32 (trailing zeros)
     data.extend_from_slice(&0i32.to_le_bytes());
@@ -2077,6 +2204,56 @@ mod tests {
     use crate::types::{DxfVersion, Handle};
 
     #[test]
+    fn unchanged_history_keeps_source_bytes_without_hiding_edits() {
+        use crate::objects::{
+            DynamicBlockData, DynamicBlockObject, ObjectType, SolidHistoryOperation,
+            SolidHistorySweep,
+        };
+        use crate::{
+            entities::{EntityType, Line},
+            types::Vector3,
+            DwgReader,
+        };
+        use std::io::Cursor;
+        let mut doc = CadDocument::new();
+        let mut history = DynamicBlockObject::new("ACSH_EXTRUSION_CLASS", "AcDbShExtrusion");
+        history.handle = doc.allocate_handle();
+        let handle = history.handle;
+        history.data = DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Extrusion(
+            SolidHistorySweep {
+                direction: Vector3::UNIT_Z,
+                ..Default::default()
+            },
+        ));
+        doc.objects.insert(handle, ObjectType::DynamicBlock(history));
+        let mut source = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+            .read()
+            .unwrap();
+        let original = source.raw_records[&handle.value()].1.data.clone();
+        source
+            .add_entity(EntityType::Line(Line::from_points(Vector3::ZERO, Vector3::UNIT_X)))
+            .unwrap();
+        let saved = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&source).unwrap()))
+            .read()
+            .unwrap();
+        assert_eq!(saved.raw_records[&handle.value()].1.data, original);
+        assert_eq!(saved.model_space_entities().count(), 1);
+        let ObjectType::DynamicBlock(history) = source.objects.get_mut(&handle).unwrap() else {
+            panic!("History missing")
+        };
+        let DynamicBlockData::SolidHistoryNode(SolidHistoryOperation::Extrusion(history)) =
+            &mut history.data
+        else {
+            panic!("Extrusion missing")
+        };
+        history.direction = Vector3::new(0.0, 0.0, 12.0);
+        let edited = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&source).unwrap()))
+            .read()
+            .unwrap();
+        assert_ne!(edited.raw_records[&handle.value()].1.data, original);
+        assert_eq!(edited.objects[&handle], source.objects[&handle]);
+    }
+    #[test]
     fn acds_record_table_indexes_each_length_prefixed_blob() {
         for count in [1, 2, 7, 8, 16] {
             let entries: Vec<_> = (0..count)
@@ -2407,7 +2584,11 @@ mod tests {
 
     #[test]
     fn test_build_summary_info_ac18() {
-        let d = build_summary_info(DxfVersion::AC1018);
+        let d = build_summary_info(
+            DxfVersion::AC1018,
+            &SummaryInfo::default(),
+            encoding_rs::WINDOWS_1252,
+        );
         // 8 × 3 bytes (u16(1) + ANSI null) + 8 + 16 + 2 + 8 = 58
         assert_eq!(d.len(), 58);
         assert_eq!(u16::from_le_bytes([d[0], d[1]]), 1);
@@ -2418,7 +2599,11 @@ mod tests {
 
     #[test]
     fn test_build_summary_info_ac21() {
-        let d = build_summary_info(DxfVersion::AC1021);
+        let d = build_summary_info(
+            DxfVersion::AC1021,
+            &SummaryInfo::default(),
+            encoding_rs::WINDOWS_1252,
+        );
         // 8 × 4 bytes (u16(1) + UTF-16LE null) + 8 + 16 + 2 + 8 = 66
         assert_eq!(d.len(), 66);
         // First string: u16(1) + 00 00
@@ -2427,6 +2612,31 @@ mod tests {
         assert_eq!(d[3], 0);
         // Next string starts at offset 4
         assert_eq!(u16::from_le_bytes([d[4], d[5]]), 1);
+    }
+
+    #[test]
+    fn test_build_summary_info_writes_properties() {
+        let info = SummaryInfo {
+            title: "Kanal S\u{fc}d".into(),
+            custom_properties: vec![
+                ("Plan".into(), "B-1".into()),
+                (String::new(), String::new()),
+            ],
+            ..SummaryInfo::default()
+        };
+        // R2004: drawing code page, one byte per character
+        let d = build_summary_info(DxfVersion::AC1018, &info, encoding_rs::WINDOWS_1252);
+        assert_eq!(u16::from_le_bytes([d[0], d[1]]), 10);
+        assert_eq!(&d[2..12], b"Kanal S\xfcd\0");
+        // Seven empty strings, 24 bytes of timers, then one property (the empty pair is skipped)
+        let count_at = 12 + 7 * 3 + 24;
+        assert_eq!(u16::from_le_bytes([d[count_at], d[count_at + 1]]), 1);
+        assert_eq!(&d[count_at + 2..count_at + 9], b"\x05\0Plan\0");
+        assert_eq!(d.len(), count_at + 2 + 7 + 6 + 8);
+        // R2007+: UTF-16LE, count in code units
+        let d = build_summary_info(DxfVersion::AC1021, &info, encoding_rs::WINDOWS_1252);
+        assert_eq!(u16::from_le_bytes([d[0], d[1]]), 10);
+        assert_eq!(u16::from_le_bytes([d[16], d[17]]), 0xfc);
     }
 
     #[test]

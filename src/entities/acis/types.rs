@@ -1428,6 +1428,71 @@ impl<'a> SatIntCurve<'a> {
         })
     }
 
+    pub fn support_in(
+        &self,
+        document: &SatDocument,
+    ) -> Option<(SatBSplineSurface, (usize, Vec<f64>, Vec<[f64; 3]>), f64)> {
+        let open = self
+            .record
+            .tokens
+            .iter()
+            .position(|token| token.as_ident() == Some("{"))?;
+        let tokens = subtype_definition(document, &self.record.tokens, open)?;
+        let mut depth = 0usize;
+        let mut surface = None;
+        for (index, token) in tokens.iter().enumerate().skip(1) {
+            match token.as_ident() {
+                Some("{") => depth += 1,
+                Some("}") => depth = depth.checked_sub(1)?,
+                Some(ident) if depth == 0 && is_surface_kind(ident) => {
+                    surface = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let surface = surface?;
+        if tokens[surface].as_ident() != Some("spline") {
+            return None;
+        }
+        let open = (surface + 1..tokens.len()).find(|&i| tokens[i].as_ident() == Some("{"))?;
+        let close = block_close(tokens, open)?;
+        let definition = subtype_definition(document, tokens, open)?;
+        let surface = decode_spline_definition(document, definition)?;
+        // A curve on an offset surface ends with the distance and two flags.
+        let offset = if tokens.first()?.as_ident() == Some("off_surf_int_cur") {
+            let numbers: Vec<f64> = tokens
+                .iter()
+                .rev()
+                .take(3)
+                .map(SatToken::as_float)
+                .collect::<Option<_>>()?;
+            numbers[2]
+        } else {
+            0.0
+        };
+        // The pcurve follows the second surface, which may be a spline of its
+        // own: only a block at the top level is the first pcurve.
+        let mut depth = 0usize;
+        for index in close + 1..tokens.len() {
+            match tokens[index].as_ident() {
+                Some("{") => depth += 1,
+                Some("}") => depth = depth.checked_sub(1)?,
+                Some("nubs" | "nurbs") if depth == 0 => {
+                    let (degree, knots, controls) = SatPCurve::bspline_at(tokens, index)?;
+                    let controls = controls
+                        .into_iter()
+                        .map(|point| [point[0], point[1], point[3]])
+                        .collect();
+                    return Some((surface, (degree, knots, controls), offset));
+                }
+                Some("nullbs") if depth == 0 => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Whether the spline definition is periodic or closed.
     pub fn is_closed_in(&self, document: &SatDocument) -> bool {
         let tokens = if let Some(reference) = subtype_reference(&self.record.tokens) {
@@ -1485,9 +1550,16 @@ impl<'a> SatIntCurve<'a> {
 }
 
 fn decode_bspline_curve(t: &[SatToken]) -> Option<(usize, Vec<f64>, Vec<[f64; 4]>)> {
-    let ni = t
-        .iter()
-        .position(|x| matches!(x.as_ident(), Some("nubs" | "nurbs")))?;
+    // An intcurve saves its spline ahead of its support surfaces and their
+    // pcurves. One saved without it (only a knot summary) would otherwise
+    // hand its first 2-D pcurve over as the 3-D curve.
+    let ni = t.iter().position(|x| {
+        x.as_ident()
+            .is_some_and(|ident| matches!(ident, "nubs" | "nurbs") || is_surface_kind(ident))
+    })?;
+    if !matches!(t[ni].as_ident(), Some("nubs" | "nurbs")) {
+        return None;
+    }
     let rational = t.get(ni)?.as_ident() == Some("nurbs");
     let degree = t.get(ni + 1)?.as_integer()? as usize;
     // t[ni + 2] is the curve form/closure flag.
@@ -1878,12 +1950,184 @@ impl<'a> SatSplineSurface<'a> {
 
     /// Decode the final `nubs`/`nurbs` block into a complete control net.
     pub fn bspline(&self, document: &SatDocument) -> Option<SatBSplineSurface> {
-        let tokens = self.definition_tokens(document)?;
-        if tokens.iter().any(|token| token.as_ident() == Some("sum_spl_sur")) {
-            return decode_linear_sum_surface(tokens);
-        }
-        decode_bspline_surface(tokens)
+        decode_spline_definition(document, self.definition_tokens(document)?)
     }
+
+    pub fn offset_in(&self, document: &SatDocument) -> Option<(SatBSplineSurface, f64)> {
+        let tokens = self.definition_tokens(document)?;
+        let name = tokens.iter().position(|t| t.as_ident() == Some("off_spl_sur"))?;
+        let open = (name..tokens.len()).find(|&i| tokens[i].as_ident() == Some("{"))?;
+        let base = decode_spline_definition(document, subtype_definition(document, tokens, open)?)?;
+        // The base's u and v ranges: `I` unset, or `F` and a bound, per end.
+        let mut index = block_close(tokens, open)? + 1;
+        for _ in 0..4 {
+            index += if tokens.get(index)?.as_ident()? == "I" { 1 } else { 2 };
+        }
+        let distance = tokens.get(index)?.as_float()?;
+        distance.is_finite().then_some((base, distance))
+    }
+}
+
+fn decode_spline_definition(
+    document: &SatDocument,
+    tokens: &[SatToken],
+) -> Option<SatBSplineSurface> {
+    // A record's own tokens lead with its sense and the block's brace; a
+    // shared definition starts at its name.
+    let name = tokens.iter().filter_map(SatToken::as_ident).find(|ident| {
+        !matches!(*ident, "{" | "forward" | "reversed" | "forward_v" | "reversed_v")
+    });
+    match name {
+        // A sum saves its fitted spline last; only a spline plus a line is
+        // rebuilt exactly.
+        Some("sum_spl_sur") => {
+            decode_linear_sum_surface(tokens).or_else(|| decode_bspline_surface(tokens))
+        }
+        // An extrusion saves no fitted spline, only its profile, so its last
+        // block is the profile's.
+        Some("cyl_spl_sur") => decode_extruded_surface(document, tokens)
+            .or_else(|| decode_fitted_extrusion(tokens)),
+        _ => decode_bspline_surface(tokens),
+    }
+}
+
+fn is_surface_kind(ident: &str) -> bool {
+    matches!(
+        ident,
+        "null_surface" | "spline" | "plane" | "cone" | "sphere" | "torus"
+    )
+}
+
+fn block_close(tokens: &[SatToken], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.as_ident() {
+            Some("{") => depth += 1,
+            Some("}") => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn subtype_definition<'a>(
+    document: &'a SatDocument,
+    tokens: &'a [SatToken],
+    open: usize,
+) -> Option<&'a [SatToken]> {
+    if tokens.get(open + 1).and_then(SatToken::as_ident) == Some("ref") {
+        let index = usize::try_from(tokens.get(open + 2)?.as_integer()?).ok()?;
+        return document.subtype_tokens(index);
+    }
+    Some(&tokens[open + 1..block_close(tokens, open)?])
+}
+
+fn scalar_tokens(source: &[SatToken]) -> Vec<SatToken> {
+    source
+        .iter()
+        .flat_map(|token| {
+            if let Some((values, len)) = token.coordinate_components() {
+                values[..len].iter().copied().map(SatToken::Float).collect()
+            } else {
+                vec![token.clone()]
+            }
+        })
+        .collect()
+}
+
+fn decode_fitted_extrusion(tokens: &[SatToken]) -> Option<SatBSplineSurface> {
+    let name = tokens.iter().position(|t| t.as_ident() == Some("cyl_spl_sur"))?;
+    let open = (name..tokens.len()).find(|&i| tokens[i].as_ident() == Some("{"))?;
+    let close = block_close(tokens, open)?;
+    let last = tokens
+        .iter()
+        .rposition(|token| matches!(token.as_ident(), Some("nubs" | "nurbs")))?;
+    (last > close).then(|| decode_bspline_surface(tokens)).flatten()
+}
+
+fn decode_extruded_surface(
+    document: &SatDocument,
+    source: &[SatToken],
+) -> Option<SatBSplineSurface> {
+    let tokens = scalar_tokens(source);
+    let name = tokens.iter().position(|t| t.as_ident() == Some("cyl_spl_sur"))?;
+    let open = (name..tokens.len()).find(|&i| tokens[i].as_ident() == Some("{"))?;
+    let close = block_close(&tokens, open)?;
+    let profile = scalar_tokens(subtype_definition(document, &tokens, open)?);
+    let (degree_u, u_knots, controls) = decode_bspline_curve(&profile)?;
+    let closed = profile
+        .iter()
+        .position(|t| matches!(t.as_ident(), Some("nubs" | "nurbs")))
+        .and_then(|start| profile.get(start + 2))
+        .is_some_and(|form| {
+            matches!(form.as_ident(), Some("closed" | "periodic"))
+                || form.as_integer().is_some_and(|value| value != 0)
+        });
+    // The profile's own interval: `I` unset, or `F` and a bound, per end.
+    let mut index = close + 1;
+    for _ in 0..2 {
+        index += if tokens.get(index)?.as_ident()? == "I" { 1 } else { 2 };
+    }
+    let read3 = |i: usize| -> Option<[f64; 3]> {
+        Some([
+            tokens.get(i)?.as_float()?,
+            tokens.get(i + 1)?.as_float()?,
+            tokens.get(i + 2)?.as_float()?,
+        ])
+    };
+    let direction = read3(index)?;
+    read3(index + 3)?;
+    // Level 2 saves only the ranges; a fitted spline (level 0) is read by
+    // the caller instead.
+    let range = index + 6;
+    if tokens.get(range)?.as_integer()? != 2 {
+        return None;
+    }
+    let mut bounds = [0.0; 4];
+    for (slot, bound) in bounds.iter_mut().enumerate() {
+        if tokens.get(range + 1 + slot * 2)?.as_float().is_some() {
+            return None;
+        }
+        *bound = tokens.get(range + 2 + slot * 2)?.as_float()?;
+    }
+    if !bounds.iter().chain(direction.iter()).all(|value| value.is_finite())
+        || bounds[2] >= bounds[3]
+    {
+        return None;
+    }
+    let control_count_u = controls.len();
+    let mut control_points = Vec::with_capacity(control_count_u * 2);
+    for v in [bounds[2], bounds[3]] {
+        for p in &controls {
+            control_points.push([
+                p[0] + p[3] * direction[0] * v,
+                p[1] + p[3] * direction[1] * v,
+                p[2] + p[3] * direction[2] * v,
+                p[3],
+            ]);
+        }
+    }
+    let form = if closed { "closed" } else { "open" };
+    Some(SatBSplineSurface {
+        rational: controls.iter().any(|p| p[3] != 1.0),
+        degree_u,
+        degree_v: 1,
+        u_closure: Some(form.into()),
+        v_closure: Some("open".into()),
+        u_singularity: None,
+        v_singularity: None,
+        u_knots,
+        v_knots: vec![bounds[2], bounds[2], bounds[3], bounds[3]],
+        control_count_u,
+        control_count_v: 2,
+        control_points,
+        fit_tolerance: Some(0.0),
+    })
 }
 
 /// A spline plus a straight curve is an exact tensor-product ruled surface.
@@ -2896,6 +3140,98 @@ impl SatDocument {
         // Source files from older ACIS versions may use different values
         // (e.g. 10.0) which can cause compatibility issues.
         self.header.spatial_resolution = 1.0;
+    }
+
+    pub fn completed_for_restore(&self) -> Option<SatDocument> {
+        if self.header.version.major < 7 {
+            return None;
+        }
+        let roots_uncounted = self.header.num_bodies == 0
+            && self.records.iter().any(|record| record.entity_type == "body");
+        if !roots_uncounted && !self.records.iter().any(|r| Self::missing_tail(r).is_some()) {
+            return None;
+        }
+        let mut doc = self.clone();
+        for record in &mut doc.records {
+            if let Some(tail) = Self::missing_tail(record) {
+                record.tokens.extend(tail);
+                record.raw_text = None;
+            }
+        }
+        if roots_uncounted {
+            doc.bodies_first();
+        }
+        Some(doc)
+    }
+
+    pub(crate) fn missing_tail(record: &SatRecord) -> Option<Vec<SatToken>> {
+        let ident = |name: &str| SatToken::Ident(name.to_string());
+        // Everything after the leading `$-1` that is neither a pointer nor a
+        // number: senses, range markers, convexity.
+        let keywords = record
+            .tokens
+            .iter()
+            .skip(1)
+            .filter(|token| {
+                token.as_pointer().is_none()
+                    && token.as_float().is_none()
+                    && token.coordinate_components().is_none()
+            })
+            .count();
+        let infinite = |sense: &str, ends: usize| {
+            let mut tail = vec![ident(sense)];
+            tail.extend((0..ends).map(|_| ident("I")));
+            tail
+        };
+        match record.entity_type.as_str() {
+            "plane-surface" | "sphere-surface" | "torus-surface" if keywords == 0 => {
+                Some(infinite("forward_v", 4))
+            }
+            // A cone already carries the two `I` continuation markers before
+            // its half-angle.
+            "cone-surface" if keywords <= 2 => Some(infinite("forward", 4)),
+            "straight-curve" | "ellipse-curve" if keywords == 0 => {
+                Some(vec![ident("I"), ident("I")])
+            }
+            // $-1 $start t0 $end t1 $coedge $curve sense — convexity missing.
+            "edge" if record.tokens.len() == 8 => {
+                Some(vec![SatToken::String("unknown".to_string())])
+            }
+            _ => None,
+        }
+    }
+
+    fn bodies_first(&mut self) {
+        let mut order: Vec<usize> = (0..self.records.len()).collect();
+        order.sort_by_key(|&at| self.records[at].entity_type != "body");
+        let mut index_map = vec![-1i32; order.len()];
+        for (new, &old) in order.iter().enumerate() {
+            index_map[old] = new as i32;
+        }
+        let remap = |p: &mut SatPointer| {
+            if let Some(at) = p.index().filter(|&at| at < index_map.len()) {
+                p.0 = index_map[at];
+            }
+        };
+        let mut old: Vec<Option<SatRecord>> =
+            std::mem::take(&mut self.records).into_iter().map(Some).collect();
+        for (new, &at) in order.iter().enumerate() {
+            let mut record = old[at].take().expect("each record moves once");
+            record.index = new as i32;
+            record.raw_text = None;
+            remap(&mut record.attribute);
+            for token in &mut record.tokens {
+                if let SatToken::Pointer(p) = token {
+                    remap(p);
+                }
+            }
+            self.records.push(record);
+        }
+        self.header.num_bodies = self
+            .records
+            .iter()
+            .filter(|record| record.entity_type == "body")
+            .count();
     }
 
     /// Check if an entity type is a core ACIS geometry type that should

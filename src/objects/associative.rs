@@ -90,6 +90,7 @@ pub enum AssociativeData {
     ViewRepHatchManager(AssocViewRepHatchManager),
     ViewRepHatchActionParam(AssocViewRepHatchActionParam),
     ViewLabelActionParam(AssocViewLabelActionParam),
+    SmartCenterActionBody(AssocSmartCenterActionBody),
 }
 
 impl AssociativeData {
@@ -220,14 +221,14 @@ impl AssociativeData {
                 single_dependency_references(&value.single_dependency, target)
                     || value.history == target
             }
-            Self::ArrayParameters(value) => value.items.iter().any(|item| {
-                item.first_handle == Some(target) || item.second_handle == Some(target)
-            }),
+            Self::ArrayParameters(value) => array_items_reference(&value.items, target),
             Self::ArrayActionBody(value) => {
                 parameter_body_references(&value.parameter_body, target)
+                    || array_items_reference(&value.items, target)
             }
             Self::ArrayModifyActionBody(value) => {
                 parameter_body_references(&value.body.parameter_body, target)
+                    || array_items_reference(&value.body.items, target)
             }
             Self::DimensionAssociation(value) => {
                 value.dimension == target
@@ -249,6 +250,9 @@ impl AssociativeData {
             }
             Self::ViewLabelActionParam(value) => {
                 single_dependency_references(&value.single_dependency, target)
+            }
+            Self::SmartCenterActionBody(value) => {
+                parameter_body_references(&value.parameter_body, target)
             }
         }
     }
@@ -393,20 +397,15 @@ impl AssociativeData {
                 ..
             }) => visit_single_dependency(value, visit),
             Self::ArrayParameters(value) => {
-                for item in &mut value.items {
-                    if let Some(handle) = item.first_handle.as_mut() {
-                        visit(handle);
-                    }
-                    if let Some(handle) = item.second_handle.as_mut() {
-                        visit(handle);
-                    }
-                }
+                visit_array_items(&mut value.items, visit);
             }
             Self::ArrayActionBody(value) => {
                 visit_parameter_body(&mut value.parameter_body, visit);
+                visit_array_items(&mut value.items, visit);
             }
             Self::ArrayModifyActionBody(value) => {
                 visit_parameter_body(&mut value.body.parameter_body, visit);
+                visit_array_items(&mut value.body.items, visit);
             }
             Self::DimensionAssociation(value) => {
                 visit(&mut value.dimension);
@@ -435,6 +434,9 @@ impl AssociativeData {
             Self::ViewLabelActionParam(value) => {
                 visit_single_dependency(&mut value.single_dependency, visit);
             }
+            Self::SmartCenterActionBody(value) => {
+                visit_parameter_body(&mut value.parameter_body, visit);
+            }
         }
         if let Self::AsmBodyActionParam(value) = self {
             visit(&mut value.history);
@@ -444,6 +446,20 @@ impl AssociativeData {
 
 fn eval_references(value: &AssocEvalVariant, target: Handle) -> bool {
     matches!(value.value, AssocEvalValue::Handle(handle) if handle == target)
+}
+
+fn array_items_reference(items: &[AssocArrayItem], target: Handle) -> bool {
+    items.iter().any(|item| {
+        item.first_handle == Some(target) || item.second_handle == Some(target)
+    })
+}
+
+fn visit_array_items(items: &mut [AssocArrayItem], visit: &mut impl FnMut(&mut Handle)) {
+    for item in items {
+        for handle in item.first_handle.iter_mut().chain(item.second_handle.iter_mut()) {
+            visit(handle);
+        }
+    }
 }
 
 fn value_param_references(value: &AssocValueParam, target: Handle) -> bool {
@@ -595,6 +611,30 @@ pub struct AssocValueDependency {
 pub struct AssocPersistentSubentId {
     pub class_name: String,
     pub dependent_on_compound_object: bool,
+    pub class_code: i32,
+    pub values: Vec<i32>,
+    pub leading_flag: bool,
+}
+
+const PERS_SUBENT_CLASSES: [(i32, &str); 2] = [
+    (1, "AcDbAssocSingleEdgePersSubentId"),
+    (5, "AcDbAssocAsmBasedEntityPersSubentId"),
+];
+
+impl AssocPersistentSubentId {
+    pub fn class_name_for_code(code: i32) -> Option<&'static str> {
+        PERS_SUBENT_CLASSES
+            .iter()
+            .find(|(value, _)| *value == code)
+            .map(|(_, name)| *name)
+    }
+
+    pub fn code_for_class_name(name: &str) -> Option<i32> {
+        PERS_SUBENT_CLASSES
+            .iter()
+            .find(|(_, value)| value.eq_ignore_ascii_case(name))
+            .map(|(code, _)| *code)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -797,10 +837,7 @@ pub struct AssocAnnotationActionBody {
 pub struct AssocPersSubentManager {
     pub class_version: i32,
     pub markers: [i32; 3],
-    pub steps: Vec<i32>,
-    pub subent_count: i32,
-    /// Fixed semantic tail currently documented as 34 integer slots.
-    pub subent_data: Vec<i32>,
+    pub values: Vec<i32>,
     pub final_flag: bool,
 }
 
@@ -811,6 +848,14 @@ pub struct AssocSingleDependencyActionParam {
     pub dependency_class_version: i32,
     pub dependency: Handle,
     pub class_version: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AssocSmartCenterActionBody {
+    pub action_body: AssocActionBody,
+    pub parameter_body: AssocParamBasedActionBody,
+    pub version: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -899,6 +944,16 @@ pub struct AssocEdgeActionParam {
     pub has_action: bool,
     pub action_type: i32,
     pub subcurve_kind: AssocSubcurveKind,
+    pub curve: Vec<AssocCurveValue>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AssocCurveValue {
+    Bool(bool),
+    Int(i32),
+    Real(f64),
+    Point(Vector3),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1219,6 +1274,9 @@ pub struct AssocArrayActionBody {
     pub parameter_body: AssocParamBasedActionBody,
     pub version: i32,
     pub parameter_block: String,
+    pub item_list_version: i32,
+    pub item_class: String,
+    pub items: Vec<AssocArrayItem>,
     pub transform: [f64; 16],
 }
 
@@ -1229,6 +1287,9 @@ impl Default for AssocArrayActionBody {
             parameter_body: AssocParamBasedActionBody::default(),
             version: 0,
             parameter_block: String::new(),
+            item_list_version: 0,
+            item_class: String::new(),
+            items: Vec::new(),
             transform: [0.0; 16],
         }
     }
@@ -1281,8 +1342,7 @@ pub struct PersSubentManager {
     pub marker_two: i32,
     pub associative_step_count: i32,
     pub associative_subent_count: i32,
-    pub steps: Vec<i32>,
-    pub subents: Vec<i32>,
+    pub values: Vec<i32>,
 }
 
 pub fn associative_canonical_name(name: &str) -> String {
@@ -1359,6 +1419,8 @@ pub fn is_associative_object_name(name: &str) -> bool {
             | "ASSOCVIEWSYMBOLACTIONPARAM"
             | "ASSOCVIEWSTYLEACTIONPARAM"
             | "ASSOCVIEWLABELACTIONPARAM"
+            | "ACDBCENTERMARKACTIONBODY"
+            | "ACDBCENTERLINEACTIONBODY"
     )
 }
 
@@ -1419,6 +1481,8 @@ pub fn associative_cpp_class_name(name: &str) -> Option<&'static str> {
         "ASSOCVIEWSYMBOLACTIONPARAM" => "AcDbAssocViewSymbolActionParam",
         "ASSOCVIEWSTYLEACTIONPARAM" => "AcDbAssocViewStyleActionParam",
         "ASSOCVIEWLABELACTIONPARAM" => "AcDbAssocViewLabelActionParam",
+        "ACDBCENTERMARKACTIONBODY" => "AcDbCenterMarkActionBody",
+        "ACDBCENTERLINEACTIONBODY" => "AcDbCenterLineActionBody",
         _ => return None,
     })
 }

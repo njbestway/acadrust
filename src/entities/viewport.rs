@@ -7,6 +7,8 @@ use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vecto
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ViewportStatusFlags {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub non_rectangular_clipping: bool,
     /// Viewport is on (visible)
     pub is_on: bool,
     /// Perspective mode active
@@ -55,6 +57,7 @@ impl ViewportStatusFlags {
     /// bits are viewport-locked(0x4000) and viewport-on/visible(0x8000).
     pub fn from_bits(bits: i32) -> Self {
         Self {
+            non_rectangular_clipping: (bits & 0x10000) != 0,
             perspective: (bits & (1 << 0)) != 0,
             front_clipping: (bits & (1 << 1)) != 0,
             back_clipping: (bits & (1 << 2)) != 0,
@@ -77,6 +80,9 @@ impl ViewportStatusFlags {
     /// Convert to the DWG/DXF viewport status bit-coded flags (group 90).
     pub fn to_bits(&self) -> i32 {
         let mut bits = 0;
+        if self.non_rectangular_clipping {
+            bits |= 0x10000;
+        }
         if self.perspective {
             bits |= 1 << 0;
         }
@@ -251,6 +257,7 @@ pub struct Viewport {
     pub status: ViewportStatusFlags,
     /// Viewport ID (unique within the drawing)
     pub id: i16,
+    pub off_screen: bool,
     /// View center point (DCS - Display Coordinate System)
     pub view_center: Vector3,
     /// Snap base point
@@ -345,6 +352,7 @@ impl Viewport {
             height: 210.0, // A4 height in mm
             status: ViewportStatusFlags::default_on(),
             id: 0,
+            off_screen: false,
             view_center: Vector3::ZERO,
             snap_base: Vector3::ZERO,
             snap_spacing: Vector3::new(10.0, 10.0, 0.0),

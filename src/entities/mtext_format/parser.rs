@@ -433,7 +433,7 @@ impl MTextParser {
                 let end = self.pos + 6;
                 if end < self.chars.len() {
                     let token: String = self.chars[self.pos - 1..=end].iter().collect();
-                    let decoded = crate::io::dxf::code_page::decode_mif_escapes(&token);
+                    let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&token);
                     if decoded != token {
                         self.text_buf.push_str(&decoded);
                         self.pos = end + 1;

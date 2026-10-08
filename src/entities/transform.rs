@@ -174,9 +174,38 @@ pub(crate) fn transform_arc(e: &mut Arc, transform: &Transform) {
 // ── Ellipse ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn transform_ellipse(e: &mut Ellipse, transform: &Transform) {
+    use std::f64::consts::TAU;
+    let fallback = |e: &mut Ellipse| {
+        e.center = transform.apply(e.center);
+        e.major_axis = transform.apply_rotation(e.major_axis);
+        e.normal = transform.apply_rotation(e.normal).normalize();
+    };
+    let normal_len = e.normal.length();
+    if normal_len <= 1e-12 || e.major_axis.length() <= 1e-12 {
+        return fallback(e);
+    }
+    let minor = (e.normal * (1.0 / normal_len)).cross(&e.major_axis) * e.minor_axis_ratio;
+    let major0 = transform.apply_rotation(e.major_axis);
+    let minor0 = transform.apply_rotation(minor);
+    let theta = 0.5 * (2.0 * major0.dot(&minor0)).atan2(major0.dot(&major0) - minor0.dot(&minor0));
+    let (sin, cos) = theta.sin_cos();
+    let major = major0 * cos + minor0 * sin;
+    let minor = major0 * (-sin) + minor0 * cos;
+    let cross = major.cross(&minor);
+    let (major_len, cross_len) = (major.length(), cross.length());
+    if major_len <= 1e-12 || cross_len <= 1e-12 * major_len * major_len {
+        return fallback(e);
+    }
+    let full = e.is_full();
     e.center = transform.apply(e.center);
-    e.major_axis = transform.apply_rotation(e.major_axis);
-    e.normal = transform.apply_rotation(e.normal).normalize();
+    e.major_axis = major;
+    e.normal = cross * (1.0 / cross_len);
+    e.minor_axis_ratio = (minor.length() / major_len).min(1.0);
+    if !full {
+        let sweep = (e.end_parameter - e.start_parameter).rem_euclid(TAU);
+        e.start_parameter = (e.start_parameter - theta).rem_euclid(TAU);
+        e.end_parameter = e.start_parameter + if sweep <= 1e-12 { TAU } else { sweep };
+    }
 }
 
 // ── Polyline (3D heavy) ──────────────────────────────────────────────────────
@@ -1015,15 +1044,11 @@ pub(crate) fn transform_mesh(e: &mut Mesh, transform: &Transform) {
 // ── RasterImage ──────────────────────────────────────────────────────────────
 
 pub(crate) fn transform_raster_image(e: &mut RasterImage, transform: &Transform) {
+    // Same as a wipeout: `u_vector` / `v_vector` carry the pixel size, and the
+    // linear part already scales them — a second multiply squared the factor.
     e.insertion_point = transform.apply(e.insertion_point);
     e.u_vector = transform.apply_rotation(e.u_vector);
     e.v_vector = transform.apply_rotation(e.v_vector);
-
-    let unit_x = Vector3::new(1.0, 0.0, 0.0);
-    let transformed_unit = transform.apply_rotation(unit_x);
-    let scale_factor = transformed_unit.length();
-    e.u_vector = e.u_vector * scale_factor;
-    e.v_vector = e.v_vector * scale_factor;
 }
 
 // ── Solid3D ──────────────────────────────────────────────────────────────────

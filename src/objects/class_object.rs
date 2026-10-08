@@ -127,7 +127,7 @@ impl ClassObjectData {
             Self::PointPath(_) => "ACDBPOINTPATH",
             Self::TvDeviceProperties(_) => "TVDEVICEPROPERTIES",
             Self::PointCloudDefinition(_) => "ACDBPOINTCLOUDDEF",
-            Self::PointCloudDefinitionEx(_) => "ACDBPOINTCLOUDDEFEX",
+            Self::PointCloudDefinitionEx(_) => "ACDBPOINTCLOUDDEF_EX",
             Self::PointCloudDefinitionReactor(_) => "ACDBPOINTCLOUDDEF_REACTOR",
             Self::PointCloudDefinitionReactorEx(_) => "ACDBPOINTCLOUDDEF_REACTOR_EX",
             Self::PointCloudColorMap(_) => "ACDBPOINTCLOUDCOLORMAP",
@@ -973,8 +973,17 @@ pub struct PointCloudDefinitionReactor {
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PointCloudColorRamp {
+    pub id: String,
     pub class_version: i16,
-    pub color_schemes: Vec<String>,
+    pub colors: Vec<PointCloudRampColor>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PointCloudRampColor {
+    pub color: i32,
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1250,6 +1259,16 @@ pub struct ModelDocViewStyle {
     pub modified_for_recompute: bool,
     pub display_name: String,
     pub flags: i32,
+}
+
+impl ModelDocViewStyle {
+    pub fn display_name_or_description(&self) -> &str {
+        if self.display_name.is_empty() {
+            &self.description
+        } else {
+            &self.display_name
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

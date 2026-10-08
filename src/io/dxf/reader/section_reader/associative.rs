@@ -18,12 +18,19 @@ struct AssocDxfRecord {
 
 impl AssocDxfRecord {
     fn values(&self, section: &str, code: i32) -> Vec<&str> {
+        use crate::io::dxf::GroupCodeValueType;
+        // Numeric groups are right-aligned with spaces; only string groups
+        // keep their whitespace.
+        let preserve_whitespace = matches!(
+            GroupCodeValueType::from_raw_code(code),
+            GroupCodeValueType::String | GroupCodeValueType::None
+        );
         self.sections
             .get(section)
             .into_iter()
             .flatten()
             .filter(|(item_code, _)| *item_code == code)
-            .map(|(_, value)| value.as_str())
+            .map(|(_, value)| if preserve_whitespace { value.as_str() } else { value.trim() })
             .collect()
     }
 
@@ -165,7 +172,13 @@ impl<'a> AssocCursor<'a> {
     }
 }
 
-fn read_eval(cursor: &mut AssocCursor<'_>) -> AssocEvalVariant {
+fn read_eval(
+    cursor: &mut AssocCursor<'_>,
+    handle_values_remaining: Option<usize>,
+) -> AssocEvalVariant {
+    if cursor.peek_code().is_none() {
+        return AssocEvalVariant::default();
+    }
     let code = if cursor.peek_code() == Some(70) {
         let marker = cursor
             .entries
@@ -183,8 +196,17 @@ fn read_eval(cursor: &mut AssocCursor<'_>) -> AssocEvalVariant {
     } else {
         cursor.peek_code().unwrap_or_default() as i16
     };
+    if let Some(handle_values_remaining) = handle_values_remaining.filter(|_| code == 330) {
+        let followed_by_variable_handle = cursor
+            .entries
+            .get(cursor.position + 1)
+            .is_some_and(|(code, _)| *code == 330);
+        if handle_values_remaining == 0 || !followed_by_variable_handle {
+            return AssocEvalVariant::default();
+        }
+    }
     let value = match code {
-        i16::MIN..=-1 | 5 | 105 | 320..=329 | 390..=399 => {
+        i16::MIN..=-1 | 5 | 105 | 320..=369 | 390..=399 => {
             AssocEvalValue::Handle(cursor.handle(code as i32))
         }
         0..=9 | 100..=102 | 300..=309 | 410..=419 | 430..=439 | 470..=479 | 999 | 1000..=1009 => {
@@ -208,10 +230,26 @@ fn read_value_param(cursor: &mut AssocCursor<'_>) -> AssocValueParam {
     let name = cursor.text(1);
     let unit_type = cursor.i32(90);
     let count = cursor.i32(90).max(0).min(100_000);
+    let tail = &cursor.entries[cursor.position..];
+    // Each variable and the controlled dependency require one handle; any
+    // additional handles are values. The next parameter starts with 90, 1.
+    let end = tail
+        .windows(2)
+        .position(|pair| pair[0].0 == 90 && pair[1].0 == 1)
+        .unwrap_or(tail.len());
+    let mut handle_values_remaining = tail[..end]
+        .iter()
+        .filter(|(code, _)| (330..=369).contains(code))
+        .count()
+        .saturating_sub(count as usize + 1);
     let mut variables = Vec::with_capacity(count as usize);
     for _ in 0..count {
+        let value = read_eval(cursor, Some(handle_values_remaining));
+        if (330..=369).contains(&value.code) && matches!(value.value, AssocEvalValue::Handle(_)) {
+            handle_values_remaining = handle_values_remaining.saturating_sub(1);
+        }
         variables.push(AssocValueParamVariable {
-            value: read_eval(cursor),
+            value,
             handle: cursor.handle(330),
         });
     }
@@ -662,6 +700,51 @@ fn skip_action(cursor: &mut AssocCursor<'_>) {
     }
 }
 
+fn read_edge_curve(record: &AssocDxfRecord) -> Vec<AssocCurveValue> {
+    let Some(pairs) = record.sections.get("AcDbAssocEdgeActionParam") else {
+        return Vec::new();
+    };
+    let Some(start) = pairs
+        .iter()
+        .enumerate()
+        .filter(|(_, (code, _))| *code == 90)
+        .nth(1)
+        .map(|(index, _)| index + 1)
+    else {
+        return Vec::new();
+    };
+    let number = |value: &str| value.trim().parse::<f64>().unwrap_or(0.0);
+    let mut curve = Vec::new();
+    let mut index = start;
+    while index < pairs.len() {
+        let (code, value) = &pairs[index];
+        match code {
+            70 => curve.push(AssocCurveValue::Bool(number(value) != 0.0)),
+            90 => curve.push(AssocCurveValue::Int(value.trim().parse().unwrap_or(0))),
+            40 => curve.push(AssocCurveValue::Real(number(value))),
+            10 => {
+                let coordinate = |offset: usize, expected: i32| {
+                    pairs
+                        .get(index + offset)
+                        .filter(|(code, _)| *code == expected)
+                        .map(|(_, value)| number(value))
+                };
+                let y = coordinate(1, 20);
+                let z = coordinate(2, 30);
+                curve.push(AssocCurveValue::Point(Vector3::new(
+                    number(value),
+                    y.unwrap_or(0.0),
+                    z.unwrap_or(0.0),
+                )));
+                index += usize::from(y.is_some()) + usize::from(z.is_some());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    curve
+}
+
 fn read_action_param(record: &AssocDxfRecord) -> AssocActionParam {
     let mut cursor = AssocCursor::new(record, "AcDbAssocActionParam");
     let is_r2013 = cursor.i16(90);
@@ -846,8 +929,19 @@ fn read_array_parameters(record: &AssocDxfRecord) -> AssocArrayParameters {
     let version = cursor.i32(90);
     let count = cursor.i32(90).max(0).min(100_000);
     let class_name = cursor.text(1);
-    let mut items = Vec::with_capacity(count as usize);
-    for _ in 0..count {
+    let items = (0..count).map(|_| read_array_item(&mut cursor)).collect();
+    AssocArrayParameters {
+        version,
+        class_name,
+        items,
+        item_count: cursor.i32(90),
+        row_count: cursor.i32(90),
+        level_count: cursor.i32(90),
+    }
+}
+
+fn read_array_item(cursor: &mut AssocCursor<'_>) -> AssocArrayItem {
+    {
         let class_version = cursor.i32(90);
         let location = [cursor.i32(90), cursor.i32(90), cursor.i32(90)];
         let flags = cursor.i32(90);
@@ -886,7 +980,7 @@ fn read_array_parameters(record: &AssocDxfRecord) -> AssocArrayParameters {
             None
         };
         let second_handle = (flags & 0x10 != 0).then(|| cursor.handle(330));
-        items.push(AssocArrayItem {
+        AssocArrayItem {
             class_version,
             location,
             flags,
@@ -896,15 +990,7 @@ fn read_array_parameters(record: &AssocDxfRecord) -> AssocArrayParameters {
             relative_transform,
             first_handle,
             second_handle,
-        });
-    }
-    AssocArrayParameters {
-        version,
-        class_name,
-        items,
-        item_count: cursor.i32(90),
-        row_count: cursor.i32(90),
-        level_count: cursor.i32(90),
+        }
     }
 }
 
@@ -990,15 +1076,9 @@ fn read_static_pers_subent_manager_dxf(record: &AssocDxfRecord) -> PersSubentMan
     let marker_two = cursor.i32(90);
     let associative_step_count = cursor.i32(90);
     let associative_subent_count = cursor.i32(90);
-    let step_count = cursor.i32(90).max(0).min(100_000) as usize;
-    let mut steps = Vec::with_capacity(step_count);
-    for _ in 0..step_count {
-        steps.push(cursor.i32(90));
-    }
-    let subent_count = cursor.i32(90).max(0).min(100_000) as usize;
-    let mut subents = Vec::with_capacity(subent_count);
-    for _ in 0..subent_count {
-        subents.push(cursor.i32(90));
+    let mut values = Vec::new();
+    while cursor.peek_code() == Some(90) {
+        values.push(cursor.i32(90));
     }
     PersSubentManager {
         class_version,
@@ -1006,8 +1086,7 @@ fn read_static_pers_subent_manager_dxf(record: &AssocDxfRecord) -> PersSubentMan
         marker_two,
         associative_step_count,
         associative_subent_count,
-        steps,
-        subents,
+        values,
     }
 }
 
@@ -1059,26 +1138,45 @@ impl<'a> SectionReader<'a> {
                     dependency: read_dependency(&record),
                     class_version: cursor.i32(90),
                     name: cursor.text(1),
-                    value: read_eval(&mut cursor),
+                    value: read_eval(&mut cursor, None),
                 })
             }
-            "ASSOCGEOMDEPENDENCY" => AssociativeData::GeomDependency(AssocGeomDependency {
-                dependency: read_dependency(&record),
-                class_version: record.i16("AcDbAssocGeomDependency", 90, 0),
-                enabled: record.bool("AcDbAssocGeomDependency", 290, 0),
-                persistent_subent: AssocPersistentSubentId {
-                    class_name: {
-                        let value = record.text("AcDbAssocPersSubentId", 1, 0);
-                        if value.is_empty() {
-                            record.text("AcDbAssocAsmBasedEntityPersSubentId", 1, 0)
-                        } else {
-                            value
-                        }
+            "ASSOCGEOMDEPENDENCY" => {
+                // 90 version, 290 enabled, then the subentity id: 1 class
+                // name, 90 fields, 290 compound-object bit. Older output of
+                // this crate put the id under an AcDbAssocPersSubentId marker.
+                let section = if record.sections.contains_key("AcDbAssocPersSubentId") {
+                    "AcDbAssocPersSubentId"
+                } else {
+                    "AcDbAssocGeomDependency"
+                };
+                let entries = record.sections.get(section).map(Vec::as_slice).unwrap_or_default();
+                let start = entries.iter().position(|(code, _)| *code == 1);
+                let class_name = start.map(|index| entries[index].1.clone()).unwrap_or_default();
+                let tail = start.map(|index| &entries[index + 1..]).unwrap_or_default();
+                let values = tail
+                    .iter()
+                    .take_while(|(code, _)| *code == 90)
+                    .map(|(_, value)| value.trim().parse().unwrap_or(0))
+                    .collect();
+                let dependent_on_compound_object = tail
+                    .iter()
+                    .find(|(code, _)| *code == 290)
+                    .is_some_and(|(_, value)| value.trim() != "0");
+                AssociativeData::GeomDependency(AssocGeomDependency {
+                    dependency: read_dependency(&record),
+                    class_version: record.i16("AcDbAssocGeomDependency", 90, 0),
+                    enabled: record.bool("AcDbAssocGeomDependency", 290, 0),
+                    persistent_subent: AssocPersistentSubentId {
+                        class_code: AssocPersistentSubentId::code_for_class_name(&class_name)
+                            .unwrap_or(0),
+                        class_name,
+                        dependent_on_compound_object,
+                        values,
+                        leading_flag: false,
                     },
-                    dependent_on_compound_object: record.bool("AcDbAssocPersSubentId", 290, 0)
-                        || record.bool("AcDbAssocAsmBasedEntityPersSubentId", 290, 0),
-                },
-            }),
+                })
+            }
             "ASSOCACTION" => AssociativeData::Action(read_action(&record)),
             "ASSOCNETWORK" => {
                 let mut cursor = AssocCursor::new(&record, "AcDbAssocNetwork");
@@ -1214,18 +1312,10 @@ impl<'a> SectionReader<'a> {
                     parsed.next().unwrap_or_default(),
                     parsed.next().unwrap_or_default(),
                 ];
-                let step_count = parsed.next().unwrap_or_default().max(0).min(100_000);
-                let mut steps = Vec::with_capacity(step_count as usize);
-                for _ in 0..step_count {
-                    steps.push(parsed.next().unwrap_or_default());
-                }
-                let subent_count = parsed.next().unwrap_or_default();
                 AssociativeData::PersSubentManager(AssocPersSubentManager {
                     class_version,
                     markers,
-                    steps,
-                    subent_count,
-                    subent_data: parsed.collect(),
+                    values: parsed.collect(),
                     final_flag: record.bool("AcDbAssocPersSubentManager", 290, 0),
                 })
             }
@@ -1255,6 +1345,7 @@ impl<'a> SectionReader<'a> {
                         27 => AssocSubcurveKind::Curve3d,
                         _ => AssocSubcurveKind::None,
                     },
+                    curve: read_edge_curve(&record),
                 })
             }
             "ASSOC2DCONSTRAINTGROUP" => {
@@ -1329,7 +1420,7 @@ impl<'a> SectionReader<'a> {
                 let expression = cursor.text(1);
                 let evaluator = cursor.text(1);
                 let description = cursor.text(1);
-                let value = read_eval(&mut cursor);
+                let value = read_eval(&mut cursor, None);
                 let has_cached_value = cursor.bool(290);
                 let cached_value = if has_cached_value {
                     cursor.text(1)
@@ -1444,21 +1535,34 @@ impl<'a> SectionReader<'a> {
                 AssociativeData::ArrayParameters(read_array_parameters(&record))
             }
             "ASSOCARRAYACTIONBODY" | "ASSOCARRAYMODIFYACTIONBODY" => {
-                let section = "AcDbAssocArrayActionBody";
+                // 90 version, 1 parameters class, 90 item list version,
+                // 90 count, 1 item class; each item under its own
+                // AcDbAssocArrayItem marker; the body matrix (40 x16) ends
+                // the record (after the last item).
+                let mut cursor = AssocCursor::new(&record, "AcDbAssocArrayActionBody");
+                let version = cursor.i32(90);
+                let parameter_block = cursor.text(1);
+                let has_items = cursor.peek_code() == Some(90);
+                let item_list_version = if has_items { cursor.i32(90) } else { 0 };
+                let count = if has_items { cursor.i32(90).max(0).min(100_000) } else { 0 };
+                let item_class = if has_items { cursor.text(1) } else { String::new() };
+                let mut item_cursor = AssocCursor::new(&record, "AcDbAssocArrayItem");
+                let items: Vec<_> = (0..count).map(|_| read_array_item(&mut item_cursor)).collect();
+                let matrix_cursor = if count > 0 { &mut item_cursor } else { &mut cursor };
                 let mut matrix = [0.0; 16];
-                for (target, source) in matrix
-                    .iter_mut()
-                    .zip(record.values(section, 40).into_iter())
-                {
-                    *target = source.parse().unwrap_or_default();
+                for target in &mut matrix {
+                    *target = matrix_cursor.f64(40);
                 }
                 let body = AssocArrayActionBody {
                     action_body: AssocActionBody {
                         version: record.i32("AcDbAssocActionBody", 90, 0),
                     },
                     parameter_body: read_parameter_body(&record),
-                    version: record.i32(section, 90, 0),
-                    parameter_block: record.text(section, 1, 0),
+                    version,
+                    parameter_block,
+                    item_list_version,
+                    item_class,
+                    items,
                     transform: matrix,
                 };
                 if canonical == "ASSOCARRAYMODIFYACTIONBODY" {
@@ -1477,6 +1581,15 @@ impl<'a> SectionReader<'a> {
                 } else {
                     AssociativeData::ArrayActionBody(body)
                 }
+            }
+            "ACDBCENTERMARKACTIONBODY" | "ACDBCENTERLINEACTIONBODY" => {
+                AssociativeData::SmartCenterActionBody(AssocSmartCenterActionBody {
+                    action_body: AssocActionBody {
+                        version: record.i32("AcDbAssocActionBody", 90, 0),
+                    },
+                    parameter_body: read_parameter_body(&record),
+                    version: record.i32("AcDbSmartCenterActionBody", 90, 0),
+                })
             }
             "ASSOCVIEWREPACTIONBODY" => {
                 let section = "AcDbAssocViewRepActionBody";

@@ -6,6 +6,58 @@ use crate::types::{DxfVersion, Handle};
 
 use super::safe_count;
 
+fn read_edge_curve(
+    reader: &mut DwgMergedReader,
+    curve_type: i32,
+    out: &mut Vec<AssocCurveValue>,
+    depth: usize,
+) {
+    let point = |reader: &mut DwgMergedReader| AssocCurveValue::Point(reader.read_3bit_double());
+    let real = |reader: &mut DwgMergedReader| AssocCurveValue::Real(reader.read_bit_double());
+    match curve_type {
+        // Arc and ellipse: three vectors, then four or five reals.
+        11 | 17 => {
+            for _ in 0..3 {
+                out.push(point(reader));
+            }
+            for _ in 0..if curve_type == 11 { 4 } else { 5 } {
+                out.push(real(reader));
+            }
+        }
+        23 => {
+            out.push(point(reader));
+            out.push(point(reader));
+        }
+        42 => {
+            out.push(AssocCurveValue::Bool(reader.read_bit()));
+            out.push(AssocCurveValue::Bool(reader.read_bit()));
+            out.push(AssocCurveValue::Int(reader.read_bit_long()));
+            out.push(real(reader));
+            // Knots, weights and control points: length, physical length and
+            // grow length, then the items.
+            for points in [false, false, true] {
+                let length = reader.read_bit_long();
+                out.push(AssocCurveValue::Int(length));
+                out.push(AssocCurveValue::Int(reader.read_bit_long()));
+                out.push(AssocCurveValue::Int(reader.read_bit_long()));
+                for _ in 0..safe_count(length) {
+                    out.push(if points { point(reader) } else { real(reader) });
+                }
+            }
+        }
+        47 if depth < 8 => {
+            let count = reader.read_bit_long();
+            out.push(AssocCurveValue::Int(count));
+            for _ in 0..safe_count(count) {
+                let part = reader.read_bit_long();
+                out.push(AssocCurveValue::Int(part));
+                read_edge_curve(reader, part, out, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle(reader: &mut DwgMergedReader) -> Handle {
     Handle::from(reader.read_handle())
 }
@@ -21,7 +73,8 @@ fn read_handles(reader: &mut DwgMergedReader, count: i32) -> Vec<Handle> {
 
 fn eval_kind(code: i16) -> u8 {
     match code {
-        i16::MIN..=-1 | 5 | 105 | 320..=329 | 390..=399 => 6,
+        // 330-369: soft/hard pointer and owner handles.
+        i16::MIN..=-1 | 5 | 105 | 320..=369 | 390..=399 => 6,
         0..=9 | 100..=102 | 300..=309 | 410..=419 | 430..=439 | 470..=479 | 999 | 1000..=1009 => 5,
         10..=37 | 110..=139 | 210..=269 | 1010..=1039 | 1043..=1069 => 0,
         38..=59 | 140..=149 | 460..=469 | 1040..=1042 => 1,
@@ -414,6 +467,13 @@ fn read_array_action_body(
     let parameter_body = read_parameter_body(reader, version, dxf_version);
     let body_version = reader.read_bit_long();
     let parameter_block = reader.read_variable_text();
+    let item_list_version = reader.read_bit_long();
+    let count = safe_count(reader.read_bit_long());
+    let item_class = reader.read_variable_text();
+    let mut items = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        items.push(read_array_item(reader));
+    }
     for item in &mut transform {
         *item = reader.read_bit_double();
     }
@@ -422,7 +482,48 @@ fn read_array_action_body(
         parameter_body,
         version: body_version,
         parameter_block,
+        item_list_version,
+        item_class,
+        items,
         transform,
+    }
+}
+
+fn read_array_item(reader: &mut DwgMergedReader) -> AssocArrayItem {
+    let class_version = reader.read_bit_long();
+    let location = [
+        reader.read_bit_long(),
+        reader.read_bit_long(),
+        reader.read_bit_long(),
+    ];
+    let flags = reader.read_bit_long();
+    let uses_default_transform = flags & 4 == 0;
+    let mut x_direction = crate::types::Vector3::ZERO;
+    let mut transform = [0.0; 16];
+    if uses_default_transform {
+        x_direction = reader.read_3bit_double();
+    } else {
+        for item in &mut transform {
+            *item = reader.read_bit_double();
+        }
+    }
+    let relative_transform = (flags & 2 != 0).then(|| {
+        let mut matrix = [0.0; 16];
+        for item in &mut matrix {
+            *item = reader.read_bit_double();
+        }
+        matrix
+    });
+    AssocArrayItem {
+        class_version,
+        location,
+        flags,
+        uses_default_transform,
+        x_direction,
+        transform,
+        relative_transform,
+        first_handle: Some(handle(reader)),
+        second_handle: (flags & 0x10 != 0).then(|| handle(reader)),
     }
 }
 
@@ -571,18 +672,10 @@ fn read_static_pers_subent_manager(reader: &mut DwgMergedReader) -> PersSubentMa
     let marker_two = reader.read_bit_long();
     let associative_step_count = reader.read_bit_long();
     let associative_subent_count = reader.read_bit_long();
-    let count = safe_count(reader.read_bit_long());
-    let mut steps = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        steps.push(reader.read_bit_long());
-    }
-    let mut subents = Vec::new();
-    if reader.main_remaining_bits() > 0 {
-        let count = safe_count(reader.read_bit_long());
-        subents.reserve(count as usize);
-        for _ in 0..count {
-            subents.push(reader.read_bit_long());
-        }
+    // The body is a flat run of integers up to the end of the data stream.
+    let mut values = Vec::new();
+    while reader.main_remaining_bits() >= 2 {
+        values.push(reader.read_bit_long());
     }
     PersSubentManager {
         class_version,
@@ -590,8 +683,7 @@ fn read_static_pers_subent_manager(reader: &mut DwgMergedReader) -> PersSubentMa
         marker_two,
         associative_step_count,
         associative_subent_count,
-        steps,
-        subents,
+        values,
     }
 }
 
@@ -912,9 +1004,24 @@ pub fn read_associative_data(
                 dependency,
                 class_version: reader.read_bit_short(),
                 enabled: reader.read_bit(),
-                persistent_subent: AssocPersistentSubentId {
-                    class_name: reader.read_variable_text(),
-                    dependent_on_compound_object: reader.read_bit(),
+                persistent_subent: {
+                    // Flag, class code, the class's fields, then the
+                    // compound-object bit, which ends the record.
+                    let leading_flag = reader.read_bit();
+                    let class_code = reader.read_bit_long();
+                    let mut values = Vec::new();
+                    while reader.main_remaining_bits() > 1 && values.len() < 64 {
+                        values.push(reader.read_bit_long());
+                    }
+                    AssocPersistentSubentId {
+                        class_name: AssocPersistentSubentId::class_name_for_code(class_code)
+                            .unwrap_or_default()
+                            .to_string(),
+                        dependent_on_compound_object: reader.read_bit(),
+                        class_code,
+                        values,
+                        leading_flag,
+                    }
                 },
             })
         }
@@ -997,25 +1104,16 @@ pub fn read_associative_data(
                 reader.read_bit_long(),
                 reader.read_bit_long(),
             ];
-            let steps = {
-                let count = safe_count(reader.read_bit_long());
-                let mut result = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    result.push(reader.read_bit_long());
-                }
-                result
-            };
-            let subent_count = reader.read_bit_long();
-            let mut subent_data = Vec::new();
+            // The integers run up to the closing flag; their count is not
+            // stored, so the record end bounds them.
+            let mut values = Vec::new();
             while reader.main_remaining_bits() > 1 {
-                subent_data.push(reader.read_bit_long());
+                values.push(reader.read_bit_long());
             }
             AssociativeData::PersSubentManager(AssocPersSubentManager {
                 class_version,
                 markers,
-                steps,
-                subent_count,
-                subent_data,
+                values,
                 final_flag: reader.read_bit(),
             })
         }
@@ -1033,12 +1131,15 @@ pub fn read_associative_data(
                 27 => AssocSubcurveKind::Curve3d,
                 _ => AssocSubcurveKind::None,
             };
+            let mut curve = Vec::new();
+            read_edge_curve(reader, action_type, &mut curve, 0);
             AssociativeData::EdgeActionParam(AssocEdgeActionParam {
                 single_dependency,
                 parameter,
                 has_action,
                 action_type,
                 subcurve_kind,
+                curve,
             })
         }
         "ASSOC2DCONSTRAINTGROUP" => {
@@ -1255,6 +1356,13 @@ pub fn read_associative_data(
         "DIMASSOC" => AssociativeData::DimensionAssociation(read_dimension_association(reader)),
         "PERSUBENTMGR" => {
             AssociativeData::PersSubentManagerStatic(read_static_pers_subent_manager(reader))
+        }
+        "ACDBCENTERMARKACTIONBODY" | "ACDBCENTERLINEACTIONBODY" => {
+            AssociativeData::SmartCenterActionBody(AssocSmartCenterActionBody {
+                action_body: read_action_body(reader),
+                parameter_body: read_parameter_body(reader, version, dxf_version),
+                version: reader.read_bit_long(),
+            })
         }
         "ASSOCVIEWREPACTIONBODY" => AssociativeData::ViewRepActionBody(AssocViewRepActionBody {
             action_body: read_action_body(reader),

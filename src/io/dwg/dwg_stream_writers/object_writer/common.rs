@@ -736,11 +736,16 @@ impl<'a> DwgObjectWriter<'a> {
         if let Some(raw) = self.document.eed_by_handle.get(&handle) {
             eed.raw_dwg_eed = raw.clone();
         }
-        for (app, bytes) in extra_eed {
-            eed.raw_dwg_eed.retain(|(a, _)| *a != app);
-            eed.raw_dwg_eed.push((app, bytes));
+        // XDATA records (from DXF) are encoded for applications that have no
+        // verbatim block.
+        if let Some(xdata) = self.document.object_xdata.get(&handle) {
+            for record in xdata.records() {
+                eed.add_record(record.clone());
+            }
         }
-        self.write_extended_data(&eed);
+        eed.raw_dwg_eed
+            .retain(|(a, _)| !extra_eed.iter().any(|(app, _)| app == a));
+        self.write_extended_data_with(&eed, &extra_eed);
 
         // ── R13-R14 Only: size placeholder (after xdata, before owner) ──
         if self.version.r13_14_only() {
@@ -876,7 +881,41 @@ impl<'a> DwgObjectWriter<'a> {
     /// are encoded into EED bytes and appended for any application not already
     /// carried verbatim, so they survive a save instead of being dropped.
     /// When neither is present a lone BS 0 terminator is written (no EED).
+    pub fn encode_xdata_record(
+        &self,
+        rec: &crate::xdata::ExtendedDataRecord,
+    ) -> Option<(u64, Vec<u8>)> {
+        let app = self.document.app_ids.get(&rec.application_name)?;
+        let code_page =
+            crate::io::dxf::code_page::dwg_code_page_index(&self.document.header.code_page);
+        // The declared DWG page decides the bytes, including its fallback for
+        // pages without a decoder here.
+        let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page);
+        let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
+            self.version.r2007_plus(),
+            &rec.values,
+            encoding,
+            code_page,
+            |name| {
+                self.document
+                    .layers
+                    .get(name)
+                    .map(|l| l.handle.value())
+                    .unwrap_or(0)
+            },
+        );
+        (bytes.len() <= i16::MAX as usize).then_some((app.handle.value(), bytes))
+    }
+
     pub fn write_extended_data(&mut self, xdata: &crate::xdata::ExtendedData) {
+        self.write_extended_data_with(xdata, &[]);
+    }
+
+    pub fn write_extended_data_with(
+        &mut self,
+        xdata: &crate::xdata::ExtendedData,
+        extra: &[(u64, Vec<u8>)],
+    ) {
         // EED string entries (code 0) are code-page encoded pre-R2007 and
         // UTF-16 in R2007+, so verbatim `raw_dwg_eed` bytes captured from a
         // different encoding family garble and desync the record. Drop them on
@@ -904,39 +943,13 @@ impl<'a> DwgObjectWriter<'a> {
         // unregistered app is skipped rather than emitting a dangling handle.
         // An app already present verbatim in `raw_blocks` wins, so a clean DWG
         // round-trip stays byte-for-byte and we never double-write one app.
-        let wide = self.version.r2007_plus();
-        let mut record_blocks: Vec<(u64, Vec<u8>)> = Vec::new();
-        for rec in xdata.records() {
-            let Some(app) = self.document.app_ids.get(&rec.application_name) else {
-                continue;
-            };
-            let app_handle = app.handle.value();
-            if raw_blocks.iter().any(|(a, _)| *a == app_handle) {
-                continue;
-            }
-            let code_page =
-                crate::io::dxf::code_page::dwg_code_page_index(&self.document.header.code_page);
-            let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(code_page);
-            let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
-                wide,
-                &rec.values,
-                encoding,
-                code_page,
-                |name| {
-                    self.document
-                        .layers
-                        .get(name)
-                        .map(|l| l.handle.value())
-                        .unwrap_or(0)
-                },
-            );
-            // The block length is framed as a BS (i16); skip a pathologically
-            // large record rather than overflow and desync the object stream.
-            if bytes.len() > i16::MAX as usize {
-                continue;
-            }
-            record_blocks.push((app_handle, bytes));
-        }
+        let record_blocks: Vec<(u64, Vec<u8>)> = xdata
+            .records()
+            .iter()
+            .filter_map(|rec| self.encode_xdata_record(rec))
+            .filter(|(app, _)| !raw_blocks.iter().chain(extra).any(|(a, _)| a == app))
+            .chain(extra.iter().cloned())
+            .collect();
 
         if raw_blocks.is_empty() && record_blocks.is_empty() {
             // No EED: write BS 0 terminator

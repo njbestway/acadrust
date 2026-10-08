@@ -136,9 +136,9 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_dynamic_offsets(&mut self, value: &BlockActionOffsets) {
-        self.writer.write_bit_double(value.offset_x);
-        self.writer.write_bit_double(value.offset_y);
+        self.writer.write_bit_double(value.distance_multiplier);
         self.writer.write_bit_double(value.angle_offset);
+        self.writer.write_byte(value.flags);
     }
 
     pub(super) fn write_dynamic_angular_constraint_entity(
@@ -157,10 +157,10 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_solid_history_base(&mut self, value: &SolidHistoryNodeBase) {
-        self.write_dynamic_eval(&value.eval);
+        self.write_dynamic_eval(&value.saved_eval());
         self.writer.write_bit_long(value.major);
         self.writer.write_bit_long(value.minor);
-        for item in value.transform {
+        for item in crate::entities::surface::transpose_matrix(value.transform) {
             self.writer.write_bit_double(item);
         }
         self.writer.write_cm_color(&value.color);
@@ -169,58 +169,44 @@ impl<'a> DwgObjectWriter<'a> {
             .write_handle(DwgReferenceType::HardPointer, value.material.value());
     }
 
+    fn write_history_entity(&mut self, entity: Option<&crate::entities::EmbeddedEntity>) {
+        let Some(entity) = entity else {
+            self.writer.write_bit_long(0);
+            return;
+        };
+        // A polyline kept as a wire body writes its modeler block, as in
+        // surface records.
+        self.write_surface_embedded_entity(entity, true);
+    }
+
     fn write_solid_history_sweep(&mut self, value: &SolidHistorySweep) {
         self.write_solid_history_base(&value.base);
         self.writer.write_bit_long(value.operation_major);
         self.writer.write_bit_long(value.operation_minor);
         self.writer.write_3bit_double(value.direction);
-        if let Some(entity) = &value.sweep_entity {
-            let encoded = crate::io::dwg::embedded_entity::encode_embedded_entity(
-                entity,
-                self.version,
-                self.dxf_version,
-            );
-            self.writer.write_bit_long(encoded.type_code);
-            self.writer.write_bit_long(encoded.bytes.len() as i32);
-            crate::io::dwg::embedded_entity::write_embedded_bytes(&mut self.writer, &encoded);
-        } else {
-            self.writer.write_bit_long(0);
-            self.writer.write_bit_long(0);
-        }
-        if let Some(entity) = &value.path_entity {
-            let encoded = crate::io::dwg::embedded_entity::encode_embedded_entity(
-                entity,
-                self.version,
-                self.dxf_version,
-            );
-            self.writer.write_bit_long(encoded.type_code);
-            self.writer.write_bit_long(encoded.bytes.len() as i32);
-            crate::io::dwg::embedded_entity::write_embedded_bytes(&mut self.writer, &encoded);
-        } else {
-            self.writer.write_bit_long(0);
-            self.writer.write_bit_long(0);
-        }
         self.writer.write_bit_double(value.draft_angle);
         self.writer.write_bit_double(value.start_draft_distance);
         self.writer.write_bit_double(value.end_draft_distance);
-        self.writer.write_bit_double(value.scale_factor);
         self.writer.write_bit_double(value.twist_angle);
+        self.writer.write_bit_double(value.scale_factor);
         self.writer.write_bit_double(value.align_angle);
-        for item in value.sweep_entity_transform {
-            self.writer.write_bit_double(item);
-        }
-        for item in value.path_entity_transform {
-            self.writer.write_bit_double(item);
-        }
-        self.writer.write_byte(value.align_option);
-        self.writer.write_byte(value.miter_option);
         self.writer.write_bit(value.has_align_start);
+        self.writer.write_bit_short(value.align_option.into());
+        self.writer.write_bit_short(value.miter_option.into());
+        self.writer.write_bit(value.align_start);
         self.writer.write_bit(value.bank);
-        self.writer.write_bit(value.check_intersections);
-        for item in value.flags_294_296 {
-            self.writer.write_bit(item);
+        self.writer.write_bit(value.flags_294_296[0]);
+        self.writer.write_bit(value.flags_294_296[1]);
+        self.writer.write_3bit_double(value.dwg_vector);
+        self.writer.write_bit(value.flags_294_296[2]);
+        for item in crate::entities::surface::transpose_matrix(value.sweep_entity_transform) {
+            self.writer.write_bit_double(item);
         }
-        self.writer.write_3bit_double(value.reference_point);
+        for item in crate::entities::surface::transpose_matrix(value.path_entity_transform) {
+            self.writer.write_bit_double(item);
+        }
+        self.write_history_entity(value.sweep_entity.as_ref());
+        self.write_history_entity(value.path_entity.as_ref());
     }
 
     fn write_solid_history_operation(&mut self, value: &SolidHistoryOperation) {
@@ -283,10 +269,9 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_long(value.second_operand);
             }
             SolidHistoryOperation::Brep(value) => {
+                // No operation version in the DWG record (DXF has one).
                 self.write_solid_history_base(&value.base);
-                self.writer.write_bit_long(value.operation_major);
-                self.writer.write_bit_long(value.operation_minor);
-                self.write_acis_data(crate::types::Vector3::ZERO, &value.acis_data, &[], &[]);
+                self.write_history_acis_data(&value.acis_data);
             }
             SolidHistoryOperation::Fillet(value) => {
                 self.write_solid_history_base(&value.base);
@@ -301,13 +286,14 @@ impl<'a> DwgObjectWriter<'a> {
                 for item in &value.radii {
                     self.writer.write_bit_double(*item);
                 }
+                // Each setback list directly follows its own count.
                 self.writer
                     .write_bit_long(value.start_setbacks.len() as i32);
-                self.writer.write_bit_long(value.end_setbacks.len() as i32);
-                for item in &value.end_setbacks {
+                for item in &value.start_setbacks {
                     self.writer.write_bit_double(*item);
                 }
-                for item in &value.start_setbacks {
+                self.writer.write_bit_long(value.end_setbacks.len() as i32);
+                for item in &value.end_setbacks {
                     self.writer.write_bit_double(*item);
                 }
             }
@@ -328,45 +314,34 @@ impl<'a> DwgObjectWriter<'a> {
                 self.write_solid_history_sweep(value);
             }
             SolidHistoryOperation::Loft(value) => {
+                // No operation version in the DWG record (DXF has one).
                 self.write_solid_history_base(&value.base);
-                self.writer.write_bit_long(value.operation_major);
-                self.writer.write_bit_long(value.operation_minor);
                 self.writer
                     .write_bit_long(value.cross_sections.len() as i32);
                 for entity in &value.cross_sections {
-                    let encoded = crate::io::dwg::embedded_entity::encode_embedded_entity(
-                        entity,
-                        self.version,
-                        self.dxf_version,
-                    );
-                    self.writer.write_bit_long(encoded.type_code);
-                    self.writer.write_bit_long(encoded.bytes.len() as i32);
-                    crate::io::dwg::embedded_entity::write_embedded_bytes(
-                        &mut self.writer,
-                        &encoded,
-                    );
+                    self.write_history_entity(Some(entity));
                 }
                 self.writer.write_bit_long(value.guides.len() as i32);
                 for entity in &value.guides {
-                    let encoded = crate::io::dwg::embedded_entity::encode_embedded_entity(
-                        entity,
-                        self.version,
-                        self.dxf_version,
-                    );
-                    self.writer.write_bit_long(encoded.type_code);
-                    self.writer.write_bit_long(encoded.bytes.len() as i32);
-                    crate::io::dwg::embedded_entity::write_embedded_bytes(
-                        &mut self.writer,
-                        &encoded,
-                    );
+                    self.write_history_entity(Some(entity));
                 }
+                let (path, options) = value.native();
+                self.write_history_entity(path);
+                self.writer.write_bit_double(options.start_draft_angle);
+                self.writer.write_bit_double(options.end_draft_angle);
+                self.writer.write_bit_double(options.start_magnitude);
+                self.writer.write_bit_double(options.end_magnitude);
+                for flag in options.flags {
+                    self.writer.write_bit(flag);
+                }
+                self.writer.write_bit_long(options.surface_option);
             }
             SolidHistoryOperation::Revolve(value) => {
                 self.write_solid_history_base(&value.base);
                 self.writer.write_bit_long(value.operation_major);
                 self.writer.write_bit_long(value.operation_minor);
                 self.writer.write_3bit_double(value.axis_point);
-                self.writer.write_3raw_double(value.direction);
+                self.writer.write_3bit_double(value.direction);
                 self.writer.write_bit_double(value.revolve_angle);
                 self.writer.write_bit_double(value.start_angle);
                 self.writer.write_bit_double(value.draft_angle);
@@ -375,22 +350,7 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_double(value.twist_angle);
                 self.writer.write_bit(value.flag_290);
                 self.writer.write_bit(value.close_to_axis);
-                if let Some(entity) = &value.sweep_entity {
-                    let encoded = crate::io::dwg::embedded_entity::encode_embedded_entity(
-                        entity,
-                        self.version,
-                        self.dxf_version,
-                    );
-                    self.writer.write_bit_long(encoded.type_code);
-                    self.writer.write_bit_long(encoded.bytes.len() as i32);
-                    crate::io::dwg::embedded_entity::write_embedded_bytes(
-                        &mut self.writer,
-                        &encoded,
-                    );
-                } else {
-                    self.writer.write_bit_long(0);
-                    self.writer.write_bit_long(0);
-                }
+                self.write_history_entity(value.sweep_entity.as_ref());
             }
         }
     }
@@ -466,7 +426,6 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit_long(value.index);
                 self.writer.write_variable_text(&value.lookup_name);
                 self.writer.write_variable_text(&value.lookup_description);
-                self.writer.write_variable_text(&value.unknown_text);
             }
             DynamicBlockData::PointParameter(value) => {
                 self.write_dynamic_one_point(&value.parameter);
@@ -476,13 +435,13 @@ impl<'a> DwgObjectWriter<'a> {
             }
             DynamicBlockData::PolarParameter(value) => {
                 self.write_dynamic_two_point(&value.parameter);
-                self.writer.write_variable_text(&value.angle_name);
-                self.writer.write_variable_text(&value.angle_description);
                 self.writer.write_variable_text(&value.distance_name);
                 self.writer.write_variable_text(&value.distance_description);
+                self.writer.write_variable_text(&value.angle_name);
+                self.writer.write_variable_text(&value.angle_description);
                 self.writer.write_bit_double(value.offset);
-                self.write_dynamic_value_set(&value.angle_value_set);
                 self.write_dynamic_value_set(&value.distance_value_set);
+                self.write_dynamic_value_set(&value.angle_value_set);
             }
             DynamicBlockData::RotationParameter(value) => {
                 self.write_dynamic_two_point(&value.parameter);
@@ -508,10 +467,10 @@ impl<'a> DwgObjectWriter<'a> {
             DynamicBlockData::VisibilityParameter(_) => return,
             DynamicBlockData::XYParameter(value) => {
                 self.write_dynamic_two_point(&value.parameter);
-                self.writer.write_variable_text(&value.x_label);
-                self.writer.write_variable_text(&value.x_label_description);
                 self.writer.write_variable_text(&value.y_label);
+                self.writer.write_variable_text(&value.x_label);
                 self.writer.write_variable_text(&value.y_label_description);
+                self.writer.write_variable_text(&value.x_label_description);
                 self.writer.write_bit_double(value.x_value);
                 self.writer.write_bit_double(value.y_value);
                 self.write_dynamic_value_set(&value.x_value_set);
@@ -573,8 +532,8 @@ impl<'a> DwgObjectWriter<'a> {
                 for connection in &value.connections {
                     self.write_dynamic_connection(connection);
                 }
-                self.writer.write_bit_double(value.column_offset);
                 self.writer.write_bit_double(value.row_offset);
+                self.writer.write_bit_double(value.column_offset);
             }
             DynamicBlockData::LookupAction(value) => {
                 self.write_dynamic_action(&value.action);
@@ -583,12 +542,14 @@ impl<'a> DwgObjectWriter<'a> {
                 for expression in &value.expressions {
                     self.writer.write_variable_text(expression);
                 }
-                for row in &value.rows {
-                    for connection in &row.connections {
-                        self.write_dynamic_connection(connection);
-                    }
-                    self.writer.write_bit(row.flag_282);
-                    self.writer.write_bit(row.flag_281);
+                for column in &value.columns {
+                    self.writer.write_bit_long(column.node_id);
+                    self.writer.write_bit_long(column.value_type);
+                    self.writer.write_bit_long(column.property_type);
+                    self.writer.write_bit(column.lookup_property);
+                    self.writer.write_variable_text(&column.unmatched_name);
+                    self.writer.write_bit(column.writable);
+                    self.writer.write_variable_text(&column.connection_name);
                 }
                 self.writer.write_bit(value.flag_280);
             }
@@ -634,15 +595,30 @@ impl<'a> DwgObjectWriter<'a> {
                     self.writer
                         .write_handle(DwgReferenceType::SoftPointer, handle.value());
                 }
-                for flag in &value.handle_flags {
-                    self.writer.write_bit_short(*flag);
+                self.writer.write_bit_long(value.bindings.len() as i32);
+                for item in &value.bindings {
+                    self.writer
+                        .write_handle(DwgReferenceType::SoftPointer, item.handle.value());
+                    self.writer.write_bit_long(item.indexes.len() as i32);
+                    for index in &item.indexes {
+                        self.writer.write_bit_long(*index);
+                    }
                 }
                 self.writer.write_bit_long(value.codes.len() as i32);
-                for code in &value.codes {
-                    self.writer.write_bit_long(*code);
+                for item in &value.codes {
+                    self.writer.write_bit_long(item.code);
+                    self.writer.write_bit_long(item.indexes.len() as i32);
+                    for index in &item.indexes {
+                        self.writer.write_bit_long(*index);
+                    }
+                }
+                self.writer.write_bit_double(value.distance_multiplier);
+                self.writer.write_bit_double(value.angle_offset);
+                self.writer.write_bit_long(value.extra.len() as i32);
+                for value in &value.extra {
+                    self.writer.write_bit_long(*value);
                 }
             }
-            DynamicBlockData::PropertiesTable => {}
             DynamicBlockData::EvaluationGraph(value) => {
                 self.writer.write_bit_long(value.first_node_id);
                 self.writer.write_bit_long(value.first_node_id_copy);
@@ -652,7 +628,7 @@ impl<'a> DwgObjectWriter<'a> {
                     self.writer.write_bit_long(node.edge_flags);
                     self.writer.write_bit_long(node.next_id);
                     self.writer
-                        .write_handle(DwgReferenceType::HardPointer, node.expression.value());
+                        .write_handle(DwgReferenceType::HardOwnership, node.expression.value());
                     for item in node.node_data {
                         self.writer.write_bit_long(item);
                     }
@@ -690,8 +666,17 @@ impl<'a> DwgObjectWriter<'a> {
             DynamicBlockData::SolidHistory(value) => {
                 self.writer.write_bit_long(value.major);
                 self.writer.write_bit_long(value.minor);
-                self.writer
-                    .write_handle(DwgReferenceType::SoftPointer, value.owner.value());
+                // The root hard-owns its evaluation graph. Histories from
+                // older releases of this crate name the solid here instead.
+                let reference = match self.document.objects.get(&value.owner) {
+                    Some(crate::objects::ObjectType::DynamicBlock(graph))
+                        if matches!(graph.data, DynamicBlockData::EvaluationGraph(_)) =>
+                    {
+                        DwgReferenceType::HardOwnership
+                    }
+                    _ => DwgReferenceType::SoftPointer,
+                };
+                self.writer.write_handle(reference, value.owner.value());
                 self.writer.write_bit_long(value.history_node_id);
                 self.writer.write_bit(value.show_history);
                 self.writer.write_bit(value.record_history);
@@ -701,5 +686,35 @@ impl<'a> DwgObjectWriter<'a> {
             }
         }
         self.register_object(object.handle);
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::{CadDocument, objects::{BlockEvaluationGraph, BlockEvaluationNode}, types::{DxfVersion, Handle}};
+    use crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader;
+
+    #[test]
+    fn evaluation_graph_owns_its_expression_in_the_handle_stream() {
+        let doc = CadDocument::with_version(DxfVersion::AC1032);
+        let mut object = DynamicBlockObject::new("ACAD_EVALUATION_GRAPH", "AcDbEvalGraph");
+        object.handle = Handle::new(0x100);
+        object.owner = Handle::new(0x50);
+        object.data = DynamicBlockData::EvaluationGraph(BlockEvaluationGraph {
+            nodes: vec![BlockEvaluationNode { expression: Handle::new(0x1234), ..Default::default() }],
+            ..Default::default()
+        });
+        let mut writer = DwgObjectWriter::new(&doc).unwrap();
+        writer.write_dynamic_block(&object);
+        let offset = writer.handle_map.iter().find(|(h,_)| *h == 0x100).unwrap().1 as usize;
+        let mut reader = DwgBitReader::new(writer.output[offset..].to_vec(), writer.version, writer.dxf_version);
+        let bytes = reader.read_modular_short() as i64;
+        let handle_bits = reader.read_modular_char() as i64;
+        reader.set_position_in_bits(reader.position_in_bits() + bytes * 8 - handle_bits);
+        let mut kind = DwgReferenceType::Undefined;
+        assert_eq!(reader.read_handle_reference(0x100, &mut kind), 0x50);
+        assert_eq!(reader.read_handle_reference(0x100, &mut kind), 0x1234);
+        assert_eq!(kind, DwgReferenceType::HardOwnership);
     }
 }

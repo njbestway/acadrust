@@ -460,8 +460,7 @@ pub struct Hatch {
     pub mpolygon_hatch_color: Color,
     /// MPOLYGON-only hatch X direction.
     pub mpolygon_x_direction: Vector2,
-    /// MPOLYGON trailer count retained independently from per-path handles.
-    pub mpolygon_boundary_handle_count: i32,
+    pub mpolygon_invalid_loops: Vec<BoundaryPath>,
 }
 
 impl Hatch {
@@ -485,8 +484,8 @@ impl Hatch {
             pixel_size: 0.0,
             gradient_color: HatchGradientPattern::new(),
             mpolygon_hatch_color: Color::ByLayer,
-            mpolygon_x_direction: Vector2::new(1.0, 0.0),
-            mpolygon_boundary_handle_count: 0,
+            mpolygon_x_direction: Vector2::ZERO,
+            mpolygon_invalid_loops: Vec::new(),
         }
     }
 

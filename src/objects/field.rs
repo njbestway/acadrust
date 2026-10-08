@@ -30,6 +30,7 @@ pub struct Field {
     pub value_string: String,
     pub value_string_length: i32,
     pub child_values: Vec<FieldChildValue>,
+    pub xdata: crate::xdata::ExtendedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -42,6 +43,14 @@ pub struct FieldList {
 }
 
 impl Field {
+    pub fn pre2007_format(&self) -> &str {
+        if self.format.is_empty() {
+            &self.value.format
+        } else {
+            &self.format
+        }
+    }
+
     pub(crate) fn visit_handles_mut(&mut self, visit: &mut impl FnMut(&mut Handle)) {
         visit(&mut self.owner);
         for handle in &mut self.child_fields {

@@ -1297,7 +1297,7 @@ mod tests {
 
     #[test]
     fn test_explode_multileader_single_vertex_line() {
-        let parts = EntityType::MultiLeader(callout(&[Vector3::ZERO])).explode();
+        let parts = EntityType::MultiLeader(Box::new(callout(&[Vector3::ZERO]))).explode();
         let arrows = solids(&parts);
         let lines = line_ends(&parts);
 
@@ -1328,7 +1328,7 @@ mod tests {
             .points
             .extend([Vector3::new(5.0, 0.0, 0.0), Vector3::new(10.0, 10.0, 0.0)]);
 
-        let lines = line_ends(&EntityType::MultiLeader(ml).explode());
+        let lines = line_ends(&EntityType::MultiLeader(Box::new(ml)).explode());
 
         assert_eq!(
             lines,
@@ -1343,7 +1343,7 @@ mod tests {
     #[test]
     fn test_explode_multileader_lines_share_one_landing() {
         let ml = callout(&[Vector3::ZERO, Vector3::new(20.0, 0.0, 0.0)]);
-        let parts = EntityType::MultiLeader(ml).explode();
+        let parts = EntityType::MultiLeader(Box::new(ml)).explode();
 
         // One arrowhead per leader line, never one on the landing.
         assert_eq!(solids(&parts).len(), 2);
@@ -1361,7 +1361,7 @@ mod tests {
         second.connection_point = Vector3::new(30.0, 10.0, 0.0);
         ml.context.leader_roots.push(second);
 
-        let parts = EntityType::MultiLeader(ml).explode();
+        let parts = EntityType::MultiLeader(Box::new(ml)).explode();
 
         assert_eq!(solids(&parts).len(), 2);
         assert_eq!(line_ends(&parts).len(), 4);
@@ -1374,7 +1374,7 @@ mod tests {
         ml.context.has_text_contents = true;
         ml.context.text_string = "NOTE".to_string();
 
-        let parts = EntityType::MultiLeader(ml).explode();
+        let parts = EntityType::MultiLeader(Box::new(ml)).explode();
 
         assert_eq!(parts.len(), 1);
         assert!(matches!(&parts[0], EntityType::MText(_)));
@@ -1385,7 +1385,7 @@ mod tests {
         let mut ml = callout(&[Vector3::ZERO]);
         ml.enable_dogleg = false;
 
-        let lines = line_ends(&EntityType::MultiLeader(ml).explode());
+        let lines = line_ends(&EntityType::MultiLeader(Box::new(ml)).explode());
 
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].1, Vector3::new(10.0, 10.0, 0.0));
@@ -1402,7 +1402,7 @@ mod tests {
         line.override_flags = LeaderLinePropertyOverrideFlags::ARROWHEAD;
 
         for ml in [entity_level, line_level] {
-            let parts = EntityType::MultiLeader(ml).explode();
+            let parts = EntityType::MultiLeader(Box::new(ml)).explode();
             assert!(solids(&parts).is_empty());
             // The shaft is not trimmed when no arrowhead covers its start.
             assert_eq!(line_ends(&parts)[0].0, Vector3::ZERO);
@@ -1414,7 +1414,7 @@ mod tests {
         let mut ml = callout(&[Vector3::ZERO]);
         ml.arrowhead_handle = Some(Handle::NULL);
 
-        assert_eq!(solids(&EntityType::MultiLeader(ml).explode()).len(), 1);
+        assert_eq!(solids(&EntityType::MultiLeader(Box::new(ml)).explode()).len(), 1);
     }
 
     #[test]
@@ -1424,7 +1424,7 @@ mod tests {
         line.arrowhead_size = 2.0;
         line.override_flags = LeaderLinePropertyOverrideFlags::ARROWHEAD_SIZE;
 
-        let parts = EntityType::MultiLeader(ml).explode();
+        let parts = EntityType::MultiLeader(Box::new(ml)).explode();
         let base = (solids(&parts)[0].second_corner + solids(&parts)[0].third_corner) * 0.5;
 
         assert!((base.length() - 2.0).abs() < 1e-9);
@@ -1435,7 +1435,7 @@ mod tests {
         let mut ml = callout(&[Vector3::new(9.5, 10.0, 0.0)]);
         ml.context.arrowhead_size = 1.0;
 
-        let parts = EntityType::MultiLeader(ml).explode();
+        let parts = EntityType::MultiLeader(Box::new(ml)).explode();
 
         assert!(solids(&parts).is_empty());
         assert_eq!(line_ends(&parts)[0].0, Vector3::new(9.5, 10.0, 0.0));

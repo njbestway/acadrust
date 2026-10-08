@@ -115,6 +115,8 @@ pub struct UnderlayDefinition {
 
     /// Reactors (entities referencing this definition).
     pub reactors: Vec<Handle>,
+
+    pub unloaded: bool,
 }
 
 impl UnderlayDefinition {
@@ -128,6 +130,7 @@ impl UnderlayDefinition {
             page_name: String::new(),
             name: String::new(),
             reactors: Vec::new(),
+            unloaded: false,
         }
     }
 
@@ -426,7 +429,15 @@ impl Underlay {
 
     /// Sets fade (0-80).
     pub fn set_fade(&mut self, value: u8) {
-        self.fade = value.min(80);
+        self.fade = value.min(100);
+    }
+
+    pub fn display_flags(&self) -> UnderlayDisplayFlags {
+        if self.clip_inverted {
+            self.flags | UnderlayDisplayFlags::CLIP_INSIDE
+        } else {
+            self.flags - UnderlayDisplayFlags::CLIP_INSIDE
+        }
     }
 
     /// Returns the clip boundary vertices in world coordinates.
@@ -789,8 +800,8 @@ mod tests {
         underlay.set_fade(50);
         assert_eq!(underlay.fade, 50);
 
-        underlay.set_fade(100); // Over max
-        assert_eq!(underlay.fade, 80);
+        underlay.set_fade(150); // Over max
+        assert_eq!(underlay.fade, 100);
     }
 
     #[test]

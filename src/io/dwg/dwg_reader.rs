@@ -687,7 +687,7 @@ fn section_name_from_field(name_buf: &[u8; 64]) -> String {
 /// integrity checksums including the AC1021 Header CRC-64.
 /// Read one `T16` string (2-byte character-count prefix). R2007+ stores the
 /// characters as UTF-16LE; earlier versions as one byte per character.
-fn read_t16(cur: &mut &[u8], utf16: bool) -> String {
+fn read_t16(cur: &mut &[u8], utf16: bool, encoding: &'static encoding_rs::Encoding) -> String {
     if cur.len() < 2 {
         *cur = &[];
         return String::new();
@@ -705,26 +705,92 @@ fn read_t16(cur: &mut &[u8], utf16: bool) -> String {
             .trim_end_matches('\0')
             .to_string()
     } else {
+        // Pre-R2007 strings are in the drawing code page
         let bytes = count.min(cur.len());
-        let s = String::from_utf8_lossy(&cur[..bytes]).into_owned();
+        let (s, _) = encoding.decode_without_bom_handling(&cur[..bytes]);
         *cur = &cur[bytes..];
-        s.trim_end_matches('\0').to_string()
+        crate::io::dxf::code_page::decode_legacy_escapes(s.trim_end_matches('\0'))
+    }
+}
+
+fn decode_field_xdata(document: &mut crate::document::CadDocument) {
+    let wide = document.version >= crate::types::DxfVersion::AC1021;
+    let fields: Vec<_> = document
+        .eed_by_handle
+        .keys()
+        .copied()
+        .filter(|h| matches!(document.objects.get(h), Some(crate::objects::ObjectType::Field(_))))
+        .collect();
+    for h in fields {
+        let Some(blocks) = document.eed_by_handle.remove(&h) else { continue };
+        let mut kept = Vec::new();
+        let mut xdata = crate::xdata::ExtendedData::new();
+        for (app, bytes) in blocks {
+            let name = document.app_ids.iter().find(|a| a.handle.value() == app).map(|a| a.name.clone());
+            match (name, crate::io::dwg::eed_codec::decode_values(&bytes, wide, |_| None)) {
+                (Some(name), Some(values)) => {
+                    let mut rec = crate::xdata::ExtendedDataRecord::new(name);
+                    rec.values = values;
+                    xdata.add_record(rec);
+                }
+                _ => kept.push((app, bytes)),
+            }
+        }
+        if !kept.is_empty() {
+            document.eed_by_handle.insert(h, kept);
+        }
+        if let Some(crate::objects::ObjectType::Field(f)) = document.objects.get_mut(&h) {
+            f.xdata = xdata;
+        }
+    }
+}
+
+fn decode_block_units_xdata(document: &mut crate::document::CadDocument) {
+    if document.version >= crate::types::DxfVersion::AC1021 {
+        return;
+    }
+    let Some(acad) = document.app_ids.get("ACAD").map(|app| app.handle.value()) else {
+        return;
+    };
+    for record in document.block_records.iter_mut() {
+        let Some(blocks) = document.eed_by_handle.get_mut(&record.handle) else { continue };
+        blocks.retain(|(app, bytes)| {
+            let units = (*app == acad)
+                .then(|| crate::io::dwg::eed_codec::decode_values(bytes, false, |_| None))
+                .flatten()
+                .and_then(|values| crate::tables::block_record::design_center_units(&values));
+            match units {
+                Some(units) => {
+                    if record.units == 0 {
+                        record.units = units;
+                    }
+                    false
+                }
+                None => true,
+            }
+        });
+        if blocks.is_empty() {
+            document.eed_by_handle.remove(&record.handle);
+        }
     }
 }
 
 /// Parse the decompressed `AcDb:SummaryInfo` section (R2004+): eight fixed
-/// strings, three 8-byte timers, then the custom-property pairs.
-fn parse_summary_info(buf: &[u8], utf16: bool) -> crate::document::SummaryInfo {
+fn parse_summary_info(
+    buf: &[u8],
+    utf16: bool,
+    encoding: &'static encoding_rs::Encoding,
+) -> crate::document::SummaryInfo {
     let mut cur: &[u8] = buf;
     let mut si = crate::document::SummaryInfo {
-        title: read_t16(&mut cur, utf16),
-        subject: read_t16(&mut cur, utf16),
-        author: read_t16(&mut cur, utf16),
-        keywords: read_t16(&mut cur, utf16),
-        comments: read_t16(&mut cur, utf16),
-        last_saved_by: read_t16(&mut cur, utf16),
-        revision_number: read_t16(&mut cur, utf16),
-        hyperlink_base: read_t16(&mut cur, utf16),
+        title: read_t16(&mut cur, utf16, encoding),
+        subject: read_t16(&mut cur, utf16, encoding),
+        author: read_t16(&mut cur, utf16, encoding),
+        keywords: read_t16(&mut cur, utf16, encoding),
+        comments: read_t16(&mut cur, utf16, encoding),
+        last_saved_by: read_t16(&mut cur, utf16, encoding),
+        revision_number: read_t16(&mut cur, utf16, encoding),
+        hyperlink_base: read_t16(&mut cur, utf16, encoding),
         custom_properties: Vec::new(),
     };
     // TDINDWG, TDCREATE, TDUPDATE — each a TIMERLL (2×u32 = 8 bytes).
@@ -735,8 +801,8 @@ fn parse_summary_info(buf: &[u8], utf16: bool) -> crate::document::SummaryInfo {
         let n = u16::from_le_bytes([cur[0], cur[1]]) as usize;
         cur = &cur[2..];
         for _ in 0..n.min(256) {
-            let tag = read_t16(&mut cur, utf16);
-            let val = read_t16(&mut cur, utf16);
+            let tag = read_t16(&mut cur, utf16, encoding);
+            let val = read_t16(&mut cur, utf16, encoding);
             if tag.is_empty() && val.is_empty() {
                 break;
             }
@@ -1247,6 +1313,10 @@ impl<R: Read + Seek> DwgReader<R> {
         // Record the source path (Filename / FilePath fields) when opened from a
         // file rather than a bare stream.
         document.source_path = self.source_path.clone();
+        decode_field_xdata(&mut document);
+        decode_block_units_xdata(&mut document);
+        crate::objects::restore_visual_style_roundtrip(&mut document);
+        crate::objects::restore_table_style_roundtrip(&mut document);
 
         // Document summary information (Author/Title/Subject/… → the
         // Document-category dynamic-text fields).
@@ -1254,7 +1324,8 @@ impl<R: Read + Seek> DwgReader<R> {
             let utf16 = crate::io::dwg::dwg_version::DwgVersion::from_dxf_version(dxf_version)
                 .map(|v| v.r2007_plus())
                 .unwrap_or(true);
-            document.summary_info = parse_summary_info(&buf, utf16);
+            let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page);
+            document.summary_info = parse_summary_info(&buf, utf16, encoding);
         }
 
         // R2000/R14 down-saved gradient hatches store their gradient in the
@@ -1312,6 +1383,10 @@ impl<R: Read + Seek> DwgReader<R> {
         // Record the source path (Filename / FilePath fields) when opened from a
         // file rather than a bare stream.
         document.source_path = self.source_path.clone();
+        decode_field_xdata(&mut document);
+        decode_block_units_xdata(&mut document);
+        crate::objects::restore_visual_style_roundtrip(&mut document);
+        crate::objects::restore_table_style_roundtrip(&mut document);
 
         // Document summary information (Author/Title/Subject/… → the
         // Document-category dynamic-text fields).
@@ -1319,7 +1394,8 @@ impl<R: Read + Seek> DwgReader<R> {
             let utf16 = crate::io::dwg::dwg_version::DwgVersion::from_dxf_version(dxf_version)
                 .map(|v| v.r2007_plus())
                 .unwrap_or(true);
-            document.summary_info = parse_summary_info(&buf, utf16);
+            let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page);
+            document.summary_info = parse_summary_info(&buf, utf16, encoding);
         }
 
         // Transfer reader notifications to the document so callers can

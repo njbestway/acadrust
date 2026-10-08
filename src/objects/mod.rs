@@ -37,7 +37,7 @@ pub use class_object::{
     GeoMapImage, GradientBackground, GroundPlaneBackground, IblBackground, ImageBackground,
     LayerFilter, LightList, LightListEntry, MentalRayRenderSettings, ModelDocViewStyle, MotionPath,
     NavisworksModelDefinition, PartialViewingIndex, PartialViewingIndexEntry,
-    PersistentSubentityManager, PointCloudColorMap, PointCloudColorRamp, PointCloudDefinition,
+    PersistentSubentityManager, PointCloudColorMap, PointCloudColorRamp, PointCloudDefinition, PointCloudRampColor,
     PointCloudDefinitionReactor, PointPath, RapidRtRenderSettings, RenderEntry, RenderEnvironment,
     RenderGlobal, RenderSettings, SectionGeometrySettings, SectionManager, SectionSettings,
     SectionTypeSettings, SectionViewStyle, SkyLightBackground, SolidBackground, SpatialIndex, Sun,
@@ -64,14 +64,14 @@ pub use dynamic_block::{
     BlockDistanceConstraintParameter, BlockElement, BlockEvalExpression, BlockEvaluationEdge,
     BlockEvaluationGraph, BlockEvaluationNode, BlockFlipAction, BlockFlipGrip, BlockFlipParameter,
     BlockGrip, BlockGripExpression, BlockLinearConstraintParameter, BlockLinearParameter,
-    BlockLookupAction, BlockLookupParameter, BlockLookupRow, BlockMoveAction,
+    BlockLookupAction, BlockLookupColumn, BlockLookupParameter, BlockMoveAction,
     BlockOnePointParameter, BlockOrientedGrip, BlockParameter, BlockParameterDependencyBody,
     BlockParameterProperty, BlockParameterValueSet, BlockPointParameter, BlockPolarParameter,
     BlockPolarStretchAction, BlockRepresentationData, BlockRotationParameter, BlockStretchAction,
     BlockStretchCode, BlockStretchHandle, BlockTwoPointParameter, BlockUserParameter,
     BlockXYParameter, DynamicBlockData, DynamicBlockObject, SolidHistory, SolidHistoryBoolean,
     SolidHistoryBox, SolidHistoryBrep, SolidHistoryChamfer, SolidHistoryCone, SolidHistoryCylinder,
-    SolidHistoryFillet, SolidHistoryLoft, SolidHistoryLoftParameters, SolidHistoryNodeBase,
+    SolidHistoryFillet, SolidHistoryLoft, SolidHistoryLoftOptions, SolidHistoryLoftParameters, SolidHistoryNodeBase,
     SolidHistoryOperation, SolidHistoryPyramid, SolidHistoryRevolve, SolidHistorySphere,
     SolidHistorySweep, SolidHistoryTorus,
 };
@@ -104,6 +104,8 @@ pub use semantic_property::{
     ProxyReferenceKind, RegisteredClassObject, SemanticProperty, SemanticPropertyValue,
 };
 pub use sort_entities_table::{SortEntitiesTable, SortEntsEntry};
+pub(crate) use stub_objects::{restore_visual_style_roundtrip, store_visual_style_roundtrip};
+pub(crate) use table_style::{restore_table_style_roundtrip, store_table_style_roundtrip};
 pub use stub_objects::{
     BookColor, DictionaryWithDefault, GeoData, GeoDataMeshFace, GeoDataMeshPoint, Material,
     MaterialColor, MaterialMap, MaterialProceduralValue, MaterialTexture, PlaceHolder,

@@ -241,11 +241,11 @@ fn build_rich_document(version: DxfVersion) -> (CadDocument, usize) {
     }
 
     // ── MultiLeader ────────────────────────────────────────────────
-    doc.add_entity(EntityType::MultiLeader(MultiLeader::with_text(
+    doc.add_entity(EntityType::MultiLeader(Box::new(MultiLeader::with_text(
         "Label",
         Vector3::new(20.0, 20.0, 0.0),
         vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 10.0, 0.0)],
-    )))
+    ))))
     .unwrap();
     count += 1;
 
@@ -679,6 +679,12 @@ fn normalize_entity_for_comparison(entity: &mut EntityType) {
         EntityType::MText(m) => {
             m.dwg_x_direction = None;
         }
+        EntityType::Spline(s) => {
+            s.dwg_scenario = None;
+        }
+        EntityType::Helix(h) => {
+            h.spline.dwg_scenario = None;
+        }
         // MultiLeader: many handle fields at multiple levels
         EntityType::MultiLeader(mld) => {
             mld.style_handle = None;
@@ -919,7 +925,9 @@ fn dxf_acis_preserves_tokens_and_splits_at_utf8_boundaries() {
     doc.add_entity(EntityType::Solid3D(solid)).unwrap();
 
     let output = String::from_utf8(DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
-    let expected = format!("  1\r\n{first_chunk}\r\n  3\r\n{remainder}\r\n");
+    // The long line wraps at its first space; the 2050-byte head is then
+    // split before the two-byte `é`.
+    let expected = format!("  1\r\n{first_chunk}\r\n  3\r\né\r\n  1\r\n compact_bool F\r\n");
     assert!(output.contains(&expected));
 }
 

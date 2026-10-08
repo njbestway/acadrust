@@ -253,8 +253,44 @@ impl<'a> DwgObjectWriter<'a> {
         self.write_assoc_parameter_body(&value.parameter_body);
         self.writer.write_bit_long(value.version);
         self.writer.write_variable_text(&value.parameter_block);
+        self.writer.write_bit_long(value.item_list_version);
+        self.writer.write_bit_long(value.items.len() as i32);
+        self.writer.write_variable_text(&value.item_class);
+        for item in &value.items {
+            self.write_assoc_array_item(item);
+        }
         for item in value.transform {
             self.writer.write_bit_double(item);
+        }
+    }
+
+    fn write_assoc_array_item(&mut self, item: &AssocArrayItem) {
+        self.writer.write_bit_long(item.class_version);
+        for location in item.location {
+            self.writer.write_bit_long(location);
+        }
+        self.writer.write_bit_long(item.flags);
+        if item.uses_default_transform {
+            self.writer.write_3bit_double(item.x_direction);
+        } else {
+            for value in item.transform {
+                self.writer.write_bit_double(value);
+            }
+        }
+        if let Some(matrix) = item.relative_transform {
+            for value in matrix {
+                self.writer.write_bit_double(value);
+            }
+        }
+        self.write_assoc_handle(
+            DwgReferenceType::SoftPointer,
+            item.first_handle.unwrap_or(Handle::NULL),
+        );
+        if item.flags & 0x10 != 0 {
+            self.write_assoc_handle(
+                DwgReferenceType::SoftPointer,
+                item.second_handle.unwrap_or(Handle::NULL),
+            );
         }
     }
 
@@ -358,15 +394,8 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(value.marker_two);
         self.writer.write_bit_long(value.associative_step_count);
         self.writer.write_bit_long(value.associative_subent_count);
-        self.writer.write_bit_long(value.steps.len() as i32);
-        for step in &value.steps {
-            self.writer.write_bit_long(*step);
-        }
-        if value.associative_subent_count != 0 || !value.subents.is_empty() {
-            self.writer.write_bit_long(value.subents.len() as i32);
-            for subent in &value.subents {
-                self.writer.write_bit_long(*subent);
-            }
+        for item in &value.values {
+            self.writer.write_bit_long(*item);
         }
     }
 
@@ -737,10 +766,16 @@ impl<'a> DwgObjectWriter<'a> {
                 self.write_assoc_dependency(&value.dependency);
                 self.writer.write_bit_short(value.class_version);
                 self.writer.write_bit(value.enabled);
-                self.writer
-                    .write_variable_text(&value.persistent_subent.class_name);
-                self.writer
-                    .write_bit(value.persistent_subent.dependent_on_compound_object);
+                let subent = &value.persistent_subent;
+                self.writer.write_bit(subent.leading_flag);
+                self.writer.write_bit_long(
+                    AssocPersistentSubentId::code_for_class_name(&subent.class_name)
+                        .unwrap_or(subent.class_code),
+                );
+                for item in &subent.values {
+                    self.writer.write_bit_long(*item);
+                }
+                self.writer.write_bit(subent.dependent_on_compound_object);
             }
             AssociativeData::SurfaceActionBody(value) => self.write_assoc_surface(value),
             AssociativeData::Action(value) => self.write_assoc_action(value),
@@ -769,12 +804,7 @@ impl<'a> DwgObjectWriter<'a> {
                 for marker in value.markers {
                     self.writer.write_bit_long(marker);
                 }
-                self.writer.write_bit_long(value.steps.len() as i32);
-                for step in &value.steps {
-                    self.writer.write_bit_long(*step);
-                }
-                self.writer.write_bit_long(value.subent_count);
-                for item in &value.subent_data {
+                for item in &value.values {
                     self.writer.write_bit_long(*item);
                 }
                 self.writer.write_bit(value.final_flag);
@@ -784,6 +814,14 @@ impl<'a> DwgObjectWriter<'a> {
                 self.write_assoc_handle(DwgReferenceType::HardOwnership, value.parameter);
                 self.writer.write_bit(value.has_action);
                 self.writer.write_bit_long(value.action_type);
+                for item in &value.curve {
+                    match item {
+                        AssocCurveValue::Bool(value) => self.writer.write_bit(*value),
+                        AssocCurveValue::Int(value) => self.writer.write_bit_long(*value),
+                        AssocCurveValue::Real(value) => self.writer.write_bit_double(*value),
+                        AssocCurveValue::Point(value) => self.writer.write_3bit_double(*value),
+                    }
+                }
             }
             AssociativeData::ConstraintGroup(value) => {
                 self.write_assoc_action(&value.action);
@@ -941,6 +979,11 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_3bit_double(value.normal);
                 self.writer.write_bit_long(value.hatch_index);
                 self.writer.write_bit_long(value.flags);
+            }
+            AssociativeData::SmartCenterActionBody(value) => {
+                self.write_assoc_action_body(&value.action_body);
+                self.write_assoc_parameter_body(&value.parameter_body);
+                self.writer.write_bit_long(value.version);
             }
             AssociativeData::ViewLabelActionParam(value) => {
                 self.write_assoc_single_dependency(&value.single_dependency);

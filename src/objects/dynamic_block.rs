@@ -87,7 +87,6 @@ pub enum DynamicBlockData {
     LookupAction(BlockLookupAction),
     StretchAction(BlockStretchAction),
     PolarStretchAction(BlockPolarStretchAction),
-    PropertiesTable,
     AlignmentParameterEntity,
     BasePointParameterEntity,
     FlipParameterEntity,
@@ -178,7 +177,6 @@ impl DynamicBlockData {
     pub(crate) fn visit_handles_mut(&mut self, visit: &mut impl FnMut(&mut Handle)) {
         match self {
             Self::Unknown
-            | Self::PropertiesTable
             | Self::AlignmentParameterEntity
             | Self::BasePointParameterEntity
             | Self::FlipParameterEntity
@@ -285,6 +283,9 @@ impl DynamicBlockData {
                 visit_block_action(&mut value.action, visit);
                 for handle in &mut value.handles {
                     visit(handle);
+                }
+                for item in &mut value.bindings {
+                    visit(&mut item.handle);
                 }
             }
             Self::AngularConstraintParameterEntity(value) => {
@@ -407,7 +408,7 @@ fn visit_solid_history_operation(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockEvalExpression {
     pub parent_id: i32,
@@ -416,6 +417,23 @@ pub struct BlockEvalExpression {
     pub value_code: i16,
     pub value: BlockEvalValue,
     pub node_id: i32,
+}
+
+impl BlockEvalExpression {
+    pub const NO_PARENT: i32 = -1;
+}
+
+impl Default for BlockEvalExpression {
+    fn default() -> Self {
+        Self {
+            parent_id: Self::NO_PARENT,
+            major: 0,
+            minor: 0,
+            value_code: 0,
+            value: BlockEvalValue::default(),
+            node_id: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -530,9 +548,9 @@ pub struct BlockAction {
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockActionOffsets {
-    pub offset_x: f64,
-    pub offset_y: f64,
+    pub distance_multiplier: f64,
     pub angle_offset: f64,
+    pub flags: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -652,7 +670,6 @@ pub struct BlockLookupParameter {
     pub index: i32,
     pub lookup_name: String,
     pub lookup_description: String,
-    pub unknown_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -754,10 +771,14 @@ pub struct BlockArrayAction {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct BlockLookupRow {
-    pub connections: [BlockConnection; 3],
-    pub flag_282: bool,
-    pub flag_281: bool,
+pub struct BlockLookupColumn {
+    pub node_id: i32,
+    pub value_type: i32,
+    pub property_type: i32,
+    pub lookup_property: bool,
+    pub unmatched_name: String,
+    pub writable: bool,
+    pub connection_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -767,7 +788,7 @@ pub struct BlockLookupAction {
     pub row_count: i32,
     pub column_count: i32,
     pub expressions: Vec<String>,
-    pub rows: Vec<BlockLookupRow>,
+    pub columns: Vec<BlockLookupColumn>,
     pub flag_280: bool,
 }
 
@@ -803,8 +824,11 @@ pub struct BlockPolarStretchAction {
     pub connections: [BlockConnection; 6],
     pub points: Vec<Vector2>,
     pub handles: Vec<Handle>,
-    pub handle_flags: Vec<i16>,
-    pub codes: Vec<i32>,
+    pub bindings: Vec<BlockStretchHandle>,
+    pub codes: Vec<BlockStretchCode>,
+    pub distance_multiplier: f64,
+    pub angle_offset: f64,
+    pub extra: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -862,10 +886,15 @@ pub struct SolidHistoryNodeBase {
 }
 
 impl SolidHistoryNodeBase {
+    pub const ROOT_PARENT: i32 = BlockEvalExpression::NO_PARENT;
+    pub const NO_VALUE: i16 = -9999;
+
     pub fn new(step_id: i32) -> Self {
         Self {
             eval: BlockEvalExpression {
+                parent_id: Self::ROOT_PARENT,
                 major: 1,
+                value_code: Self::NO_VALUE,
                 node_id: step_id,
                 ..BlockEvalExpression::default()
             },
@@ -876,6 +905,17 @@ impl SolidHistoryNodeBase {
             step_id,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn saved_eval(&self) -> BlockEvalExpression {
+        let mut eval = self.eval.clone();
+        if eval.parent_id == 0 {
+            eval.parent_id = Self::ROOT_PARENT;
+        }
+        if eval.value_code == 0 && eval.value == BlockEvalValue::None {
+            eval.value_code = Self::NO_VALUE;
+        }
+        eval
     }
 }
 
@@ -1079,7 +1119,7 @@ pub struct SolidHistoryChamfer {
     pub base_face: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SolidHistorySweep {
     pub base: SolidHistoryNodeBase,
@@ -1099,10 +1139,46 @@ pub struct SolidHistorySweep {
     pub align_option: u8,
     pub miter_option: u8,
     pub has_align_start: bool,
+    pub align_start: bool,
     pub bank: bool,
-    pub check_intersections: bool,
     pub flags_294_296: [bool; 3],
     pub reference_point: Vector3,
+    #[cfg_attr(feature = "serde", serde(default = "unit_xyz"))]
+    pub dwg_vector: Vector3,
+}
+
+#[cfg(feature = "serde")]
+fn unit_xyz() -> Vector3 {
+    Vector3::new(1.0, 1.0, 1.0)
+}
+
+impl Default for SolidHistorySweep {
+    fn default() -> Self {
+        Self {
+            base: Default::default(),
+            operation_major: 0,
+            operation_minor: 0,
+            direction: Vector3::ZERO,
+            sweep_entity: None,
+            path_entity: None,
+            draft_angle: 0.0,
+            start_draft_distance: 0.0,
+            end_draft_distance: 0.0,
+            scale_factor: 0.0,
+            twist_angle: 0.0,
+            align_angle: 0.0,
+            sweep_entity_transform: [0.0; 16],
+            path_entity_transform: [0.0; 16],
+            align_option: 0,
+            miter_option: 0,
+            has_align_start: false,
+            align_start: true,
+            bank: false,
+            flags_294_296: [false; 3],
+            reference_point: Vector3::ZERO,
+            dwg_vector: Vector3::new(1.0, 1.0, 1.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1117,6 +1193,57 @@ pub struct SolidHistoryLoft {
     /// The native history stream remains unchanged for other consumers.
     #[cfg_attr(feature = "serde", serde(default))]
     pub parameters: Option<SolidHistoryLoftParameters>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub path_entity: Option<crate::entities::EmbeddedEntity>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub options: SolidHistoryLoftOptions,
+}
+
+impl SolidHistoryLoft {
+    pub(crate) fn native(
+        &self,
+    ) -> (
+        Option<&crate::entities::EmbeddedEntity>,
+        SolidHistoryLoftOptions,
+    ) {
+        let mut options = self.options.clone();
+        let Some(parameters) = &self.parameters else {
+            return (self.path_entity.as_ref(), options);
+        };
+        options.start_draft_angle = parameters.start_draft_angle;
+        options.end_draft_angle = parameters.end_draft_angle;
+        options.start_magnitude = parameters.start_magnitude;
+        options.end_magnitude = parameters.end_magnitude;
+        (
+            parameters.path_entity.as_ref().or(self.path_entity.as_ref()),
+            options,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
+pub struct SolidHistoryLoftOptions {
+    pub surface_option: i32,
+    pub start_draft_angle: f64,
+    pub end_draft_angle: f64,
+    pub start_magnitude: f64,
+    pub end_magnitude: f64,
+    pub flags: [bool; 8],
+}
+
+impl Default for SolidHistoryLoftOptions {
+    fn default() -> Self {
+        Self {
+            surface_option: 0,
+            start_draft_angle: std::f64::consts::FRAC_PI_2,
+            end_draft_angle: std::f64::consts::FRAC_PI_2,
+            start_magnitude: 0.0,
+            end_magnitude: 0.0,
+            flags: [false, true, true, true, false, true, false, true],
+        }
+    }
 }
 
 /// Parametric loft settings. Angles are radians; magnitudes are nonnegative.

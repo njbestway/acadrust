@@ -10,6 +10,8 @@ pub struct SatWriter;
 impl SatWriter {
     /// Write a [`SatDocument`] to SAT text format.
     pub fn write(doc: &SatDocument) -> String {
+        let completed = doc.completed_for_restore();
+        let doc = completed.as_ref().unwrap_or(doc);
         let mut output = String::new();
 
         // Classic SAT 7.0 uses zero here. Modern SAT exports carry the actual
@@ -172,7 +174,8 @@ impl SatWriter {
 /// small or very large values, matching the ACIS convention.
 fn format_float(v: f64) -> String {
     if v == 0.0 {
-        "0".to_string()
+        // A negative zero keeps its sign, as the reference application writes it.
+        if v.is_sign_negative() { "-0" } else { "0" }.to_string()
     } else if v.fract() == 0.0 && v.abs() < 1e15 && !v.is_infinite() && !v.is_nan() {
         format!("{}", v as i64)
     } else if v.abs() < 1e-3 || v.abs() >= 1e15 {
@@ -721,6 +724,10 @@ impl SatDocument {
                 let name = support.entity_type.strip_suffix("-surface").unwrap();
                 let mut tokens = vec![id(name)];
                 tokens.extend_from_slice(&support.tokens[1..]);
+                // Kernel-built surfaces gain their parameter sense and
+                // interval markers only when the document is completed;
+                // the embedded copy needs them now.
+                tokens.extend(SatDocument::missing_tail(support).unwrap_or_default());
                 tokens
             }
             _ => panic!(

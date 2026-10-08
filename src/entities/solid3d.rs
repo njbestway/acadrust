@@ -87,10 +87,10 @@ impl Wire {
     /// Creates a new wire with default transform.
     pub fn new() -> Self {
         Self {
-            acis_index: 0,
-            wire_type: WireType::Unknown,
-            selection_marker: 0,
-            color: Color::ByLayer,
+            acis_index: -1,
+            wire_type: WireType::VisibleEdge,
+            selection_marker: -1,
+            color: Color::ByBlock,
             points: Vec::new(),
             has_transform: false,
             has_rotation: false,
@@ -440,6 +440,18 @@ impl AcisData {
     /// Creates ACIS data from a [`SatDocument`].
     pub fn from_sat_document(doc: &crate::entities::acis::SatDocument) -> Self {
         Self::from_sat(&doc.to_sat_string())
+    }
+
+    pub(crate) fn sab_for_save(&self) -> std::borrow::Cow<'_, [u8]> {
+        use crate::entities::acis::{SabReader, SabWriter, SatHeader};
+        let id = SatHeader::new().product_id;
+        // Magic (15) and four header ints (16) precede the tagged product id.
+        let ours = self.sab_data.get(31..33) == Some(&[0x07, id.len() as u8][..])
+            && self.sab_data.get(33..33 + id.len()) == Some(id.as_bytes());
+        match ours.then(|| SabReader::read(&self.sab_data).ok()).flatten() {
+            Some(doc) => std::borrow::Cow::Owned(SabWriter::write(&doc)),
+            None => std::borrow::Cow::Borrowed(&self.sab_data),
+        }
     }
 
     /// Parse the ACIS payload into a [`SatDocument`], decoding binary SAB via
@@ -1242,7 +1254,7 @@ mod tests {
     #[test]
     fn test_wire_creation() {
         let wire = Wire::new();
-        assert_eq!(wire.wire_type, WireType::Unknown);
+        assert_eq!(wire.wire_type, WireType::VisibleEdge);
         assert!(wire.points.is_empty());
         assert!(!wire.has_transform);
     }

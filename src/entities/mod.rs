@@ -468,7 +468,7 @@ pub enum EntityType {
     /// Spline entity
     Spline(Spline),
     /// Helix entity (spline-derived 3D spiral)
-    Helix(Helix),
+    Helix(Box<Helix>),
     /// Dimension entity
     Dimension(Dimension),
     /// Hatch entity
@@ -496,7 +496,7 @@ pub enum EntityType {
     /// Leader entity
     Leader(Leader),
     /// MultiLeader entity
-    MultiLeader(MultiLeader),
+    MultiLeader(Box<MultiLeader>),
     /// MLine (multiline) entity
     MLine(MLine),
     /// Mesh entity
@@ -510,9 +510,9 @@ pub enum EntityType {
     /// Body entity
     Body(Body),
     /// Surface entity (ACAD_SURFACE family: lofted/swept/extruded/etc.)
-    Surface(Surface),
+    Surface(Box<Surface>),
     /// Table entity
-    Table(Table),
+    Table(Box<Table>),
     /// Tolerance entity (geometric tolerancing)
     Tolerance(Tolerance),
     /// PolyfaceMesh entity
@@ -534,7 +534,7 @@ pub enum EntityType {
     SectionSymbol(SectionSymbol),
     ViewBorder(ViewBorder),
     /// Structured class-based and legacy entities.
-    Extended(ExtendedEntity),
+    Extended(Box<ExtendedEntity>),
     /// Unknown / unsupported entity type (common fields only)
     Unknown(UnknownEntity),
 }
@@ -574,7 +574,7 @@ impl EntityType {
             EntityType::Text(e) => e,
             EntityType::MText(e) => e,
             EntityType::Spline(e) => e,
-            EntityType::Helix(e) => e,
+            EntityType::Helix(e) => e.as_ref(),
             EntityType::Dimension(e) => e,
             EntityType::Hatch(e) => e,
             EntityType::Solid(e) => e,
@@ -588,15 +588,15 @@ impl EntityType {
             EntityType::AttributeDefinition(e) => e,
             EntityType::AttributeEntity(e) => e,
             EntityType::Leader(e) => e,
-            EntityType::MultiLeader(e) => e,
+            EntityType::MultiLeader(e) => e.as_ref(),
             EntityType::MLine(e) => e,
             EntityType::Mesh(e) => e,
             EntityType::RasterImage(e) => e,
             EntityType::Solid3D(e) => e,
             EntityType::Region(e) => e,
             EntityType::Body(e) => e,
-            EntityType::Surface(e) => e,
-            EntityType::Table(e) => e,
+            EntityType::Surface(e) => e.as_ref(),
+            EntityType::Table(e) => e.as_ref(),
             EntityType::Tolerance(e) => e,
             EntityType::PolyfaceMesh(e) => e,
             EntityType::Wipeout(e) => e,
@@ -608,7 +608,7 @@ impl EntityType {
             EntityType::Light(e) => e,
             EntityType::SectionSymbol(e) => e,
             EntityType::ViewBorder(e) => e,
-            EntityType::Extended(e) => e,
+            EntityType::Extended(e) => e.as_ref(),
             EntityType::Unknown(e) => e,
         }
     }
@@ -628,7 +628,7 @@ impl EntityType {
             EntityType::MText(e) => e,
             EntityType::Text(e) => e,
             EntityType::Spline(e) => e,
-            EntityType::Helix(e) => e,
+            EntityType::Helix(e) => e.as_mut(),
             EntityType::Dimension(e) => e,
             EntityType::Hatch(e) => e,
             EntityType::Solid(e) => e,
@@ -642,15 +642,15 @@ impl EntityType {
             EntityType::AttributeDefinition(e) => e,
             EntityType::AttributeEntity(e) => e,
             EntityType::Leader(e) => e,
-            EntityType::MultiLeader(e) => e,
+            EntityType::MultiLeader(e) => e.as_mut(),
             EntityType::MLine(e) => e,
             EntityType::Mesh(e) => e,
             EntityType::RasterImage(e) => e,
             EntityType::Solid3D(e) => e,
             EntityType::Region(e) => e,
             EntityType::Body(e) => e,
-            EntityType::Surface(e) => e,
-            EntityType::Table(e) => e,
+            EntityType::Surface(e) => e.as_mut(),
+            EntityType::Table(e) => e.as_mut(),
             EntityType::Tolerance(e) => e,
             EntityType::PolyfaceMesh(e) => e,
             EntityType::Wipeout(e) => e,
@@ -662,7 +662,7 @@ impl EntityType {
             EntityType::Light(e) => e,
             EntityType::SectionSymbol(e) => e,
             EntityType::ViewBorder(e) => e,
-            EntityType::Extended(e) => e,
+            EntityType::Extended(e) => e.as_mut(),
             EntityType::Unknown(e) => e,
         }
     }
@@ -804,5 +804,11 @@ mod storage_data_tests {
         assert_eq!(edited.common.graphic_data, Some(vec![1, 2, 3]));
         assert_eq!(edited.raw_dwg_data, Some(vec![4, 5, 6]));
         assert_eq!(edited.raw_dxf_codes, Some(vec![(100, "payload".into())]));
+    }
+
+    #[test]
+    fn entity_type_stays_narrow() {
+        let size = std::mem::size_of::<EntityType>();
+        assert!(size <= 856, "EntityType is {size} bytes");
     }
 }

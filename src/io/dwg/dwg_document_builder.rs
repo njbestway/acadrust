@@ -478,6 +478,51 @@ impl DwgDocumentBuilder {
     /// 2. Read entities and objects → resolve handle references
     ///
     /// Returns collected notifications (skipped records, warnings).
+    fn hydrate_block_markers(document: &mut CadDocument) {
+        let records: Vec<(Handle, String, crate::types::Vector3)> = document
+            .block_records
+            .iter()
+            .filter(|record| !record.block_entity_handle.is_null())
+            .map(|record| (record.block_entity_handle, record.name.clone(), record.base_point))
+            .collect();
+        for (handle, name, base_point) in records {
+            if let Some(EntityType::Block(marker)) = document.get_entity_mut(handle) {
+                marker.name = name;
+                marker.base_point = base_point;
+            }
+        }
+    }
+
+    fn block_marker_name(&self, handle: u64) -> Option<String> {
+        let offset = self.obj_reader.offset_for(handle)?;
+        let offset = usize::try_from(offset).ok()?;
+        let raw = self.obj_reader.type_code_at(offset).ok()?;
+        if raw != OBJ_BLOCK {
+            return None;
+        }
+        let (_, mut reader) = self.obj_reader.read_record_at(offset).ok()?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = self.obj_reader.read_common_entity_data(&mut reader, OBJ_BLOCK);
+            reader.read_variable_text()
+        }))
+        .ok()
+    }
+
+    fn number_active_viewports(document: &mut CadDocument) {
+        let Some(paper) = document.block_records.get("*Paper_Space") else {
+            return;
+        };
+        let mut next_id = 1i16;
+        for handle in paper.entity_handles.clone() {
+            if let Some(EntityType::Viewport(viewport)) = document.get_entity_mut(handle) {
+                if viewport.id == 0 {
+                    viewport.id = next_id;
+                }
+                next_id = next_id.saturating_add(1);
+            }
+        }
+    }
+
     pub fn build(self, document: &mut CadDocument) -> NotificationCollection {
         self.build_with_stats(document).notifications
     }
@@ -1002,6 +1047,33 @@ impl DwgDocumentBuilder {
                     }
                 })
                 .collect();
+
+            // The BLOCK begin marker stores the definition's full name
+            // ("*U25", "*Paper_Space3") where the record keeps only the bare
+            // prefix. Reconstructing the suffix from control order drifts
+            // past null or erased slots (#55, #66), so the marker's name wins
+            // whenever it extends the record's own.
+            for (idx, h, name) in &block_info {
+                if !name.starts_with('*') {
+                    continue;
+                }
+                let ParsedEntry::Block(_, ref data) = parsed_entries[*idx] else {
+                    continue;
+                };
+                let Some(marker) = self.block_marker_name(data.block_entity_handle) else {
+                    continue;
+                };
+                let extends = marker.len() > name.len()
+                    && marker.is_char_boundary(name.len())
+                    && marker[..name.len()].eq_ignore_ascii_case(name)
+                    && marker[name.len()..].bytes().all(|b| b.is_ascii_digit());
+                if extends {
+                    if let ParsedEntry::Block(_, ref mut data) = parsed_entries[*idx] {
+                        data.name = marker.clone();
+                    }
+                    maps.blocks.insert(*h, marker);
+                }
+            }
 
             let anonymous_names = anonymous_block_names(&block_control_entries, &maps.blocks);
             for (idx, h, _) in &block_info {
@@ -1550,7 +1622,8 @@ impl DwgDocumentBuilder {
         // from the canonical entity_handles read from the DWG binary
         // (R2004+).  This is needed because entity_mode=1 only says
         // "paper space" without specifying WHICH paper space.
-        let mut binary_entity_owner: ahash::AHashMap<Handle, Handle> = ahash::AHashMap::new();
+        let mut binary_entity_owner: foldhash::HashMap<Handle, Handle> =
+            foldhash::HashMap::default();
         for entry in &parsed_entries {
             if let ParsedEntry::Block(h, data) = entry {
                 let br_handle = Handle::from(*h);
@@ -1636,7 +1709,8 @@ impl DwgDocumentBuilder {
                     .is_some_and(|value| value.trim() == "2")
         });
         document.reserve_loaded_entities(pass2_records.len());
-        document.objects.reserve(pass2_records.len().min(16_384));
+        // Pass 2 also contains graphical entities. Reserve non-entity storage
+        // from decoded object batches below, rather than from all record handles.
 
         let source_version = document.version;
         let model_space_block_handle = document.header.model_space_block_handle;
@@ -1676,7 +1750,11 @@ impl DwgDocumentBuilder {
                             continue;
                         }
                     };
-                    if capture_raw {
+                    if capture_raw
+                        || class_names.dxf.get(&raw_type_code).is_some_and(|name| {
+                            matches!(name.as_str(), "ACSH_EXTRUSION_CLASS" | "DIMASSOC")
+                        })
+                    {
                         chunk.raw_records.push((
                             handle,
                             raw_type_code,
@@ -2166,7 +2244,7 @@ impl DwgDocumentBuilder {
             record_catalog
                 .iter()
                 .map(|(handle, offset, _, _)| (Handle::from(*handle), *offset))
-                .collect::<ahash::AHashMap<_, _>>()
+                .collect::<foldhash::HashMap<_, _>>()
         });
         Self::rebuild_block_membership(
             document,
@@ -2494,6 +2572,44 @@ impl DwgDocumentBuilder {
             );
         }
 
+        // ── Unloaded underlay definitions: NOLOAD in their ACAD EED ──
+        // The flag moves onto the definition (and out of the raw EED) so the
+        // model is its one source; the writer emits it back from there.
+        if let Some(acad) = document.app_ids.get("ACAD").map(|a| a.handle.value()) {
+            let wide = self.obj_reader.version().r2007_plus();
+            let is_noload = |bytes: &[u8]| {
+                crate::io::dwg::eed_codec::decode_values(bytes, wide, |_| None).is_some_and(
+                    |values| {
+                        matches!(values.as_slice(), [crate::xdata::XDataValue::String(s)]
+                            if s.eq_ignore_ascii_case("NOLOAD"))
+                    },
+                )
+            };
+            let unloaded: Vec<Handle> = document
+                .objects
+                .iter()
+                .filter(|(_, object)| {
+                    matches!(object, crate::objects::ObjectType::UnderlayDefinition(_))
+                })
+                .map(|(handle, _)| *handle)
+                .filter(|handle| {
+                    document.eed_by_handle.get(handle).is_some_and(|blocks| {
+                        blocks.iter().any(|(app, bytes)| *app == acad && is_noload(bytes))
+                    })
+                })
+                .collect();
+            for handle in unloaded {
+                if let Some(blocks) = document.eed_by_handle.get_mut(&handle) {
+                    blocks.retain(|(app, bytes)| !(*app == acad && is_noload(bytes)));
+                }
+                if let Some(crate::objects::ObjectType::UnderlayDefinition(definition)) =
+                    document.objects.get_mut(&handle)
+                {
+                    definition.unloaded = true;
+                }
+            }
+        }
+
         let annotative_started = web_time::Instant::now();
         // ── Annotative flag from `AcadAnnotative` EED (STYLE / DIMSTYLE) ──
         // These records have no native annotative field; the flag is stored as
@@ -2528,6 +2644,31 @@ impl DwgDocumentBuilder {
                 }
             }
         }
+        // ── TrueType typeface from `ACAD` EED (STYLE) ──
+        // The typeface lives in the field from here on; its EED block is
+        // dropped so a save writes the field back instead of the stale blob.
+        if let Some(acad) = document.app_ids.get("ACAD").map(|a| a.handle.value()) {
+            let wide = self.obj_reader.version().r2007_plus();
+            let handles: Vec<Handle> = document.text_styles.iter().map(|s| s.handle).collect();
+            for handle in handles {
+                let Some(blocks) = document.eed_by_handle.get_mut(&handle) else {
+                    continue;
+                };
+                let Some(index) = blocks.iter().position(|(app, _)| *app == acad) else {
+                    continue;
+                };
+                let Some((typeface, flags)) =
+                    crate::io::dwg::typeface_eed::decode(&blocks[index].1, wide)
+                else {
+                    continue;
+                };
+                blocks.remove(index);
+                if let Some(style) = document.text_styles.iter_mut().find(|s| s.handle == handle) {
+                    style.true_type_font = typeface;
+                    style.true_type_font_flags = flags;
+                }
+            }
+        }
         if perf {
             eprintln!(
                 "[perf] dwg-build annotative={:.1}ms",
@@ -2557,12 +2698,12 @@ impl DwgDocumentBuilder {
         // still emits it verbatim; the writer prefers raw over records per app.
         {
             let wide = self.obj_reader.version().r2007_plus();
-            let app_name_by_handle: ahash::AHashMap<u64, String> = document
+            let app_name_by_handle: foldhash::HashMap<u64, String> = document
                 .app_ids
                 .iter()
                 .map(|a| (a.handle.value(), a.name.clone()))
                 .collect();
-            let layer_name_by_handle: ahash::AHashMap<u64, String> = document
+            let layer_name_by_handle: foldhash::HashMap<u64, String> = document
                 .layers
                 .iter()
                 .map(|l| (l.handle.value(), l.name.clone()))
@@ -2614,6 +2755,35 @@ impl DwgDocumentBuilder {
                         }
                     }
                 });
+                // Objects keep their EED in `eed_by_handle`; decode it the
+                // same way so the DXF writer can write it after the object.
+                let mut object_xdata = HashMap::new();
+                for (handle, blocks) in &document.eed_by_handle {
+                    match document.objects.get(handle) {
+                        // FIELD decodes its XDATA onto `Field::xdata` itself.
+                        None | Some(crate::objects::ObjectType::Field(_)) => continue,
+                        Some(_) => {}
+                    }
+                    let mut xdata = crate::xdata::ExtendedData::default();
+                    for (app_handle, bytes) in blocks {
+                        let Some(name) = app_name_by_handle.get(app_handle) else {
+                            continue;
+                        };
+                        if let Some(values) =
+                            crate::io::dwg::eed_codec::decode_values(bytes, wide, |h| {
+                                layer_name_by_handle.get(&h).cloned()
+                            })
+                        {
+                            let mut record = crate::xdata::ExtendedDataRecord::new(name.clone());
+                            record.values = values;
+                            xdata.add_record(record);
+                        }
+                    }
+                    if !xdata.is_empty() {
+                        object_xdata.insert(*handle, xdata);
+                    }
+                }
+                document.object_xdata = object_xdata;
             }
         }
         if perf {
@@ -2991,6 +3161,21 @@ impl DwgDocumentBuilder {
         // rather than the "1:1" default.
         Self::reflect_annotation_scale(document);
 
+        // A DWG BLOCK entity record carries only the name: the base point
+        // lives on the BLOCK_HEADER. The marker was published with a zero
+        // base point, which reads as an authoritative origin and contradicts
+        // its own BlockRecord. Copy the record's value across now that both
+        // are assembled.
+        Self::hydrate_block_markers(document);
+        Self::number_active_viewports(document);
+        document.ensure_model_layout();
+
+        document.original_objects = document
+            .objects
+            .iter()
+            .filter(|(handle, _)| document.raw_records.contains_key(&handle.value()))
+            .map(|(handle, object)| (*handle, object.clone()))
+            .collect();
         if perf {
             eprintln!(
                 "[perf] dwg-build repair={:.1}ms",
@@ -3052,10 +3237,10 @@ impl DwgDocumentBuilder {
 
     fn rebuild_block_membership(
         document: &mut CadDocument,
-        binary_entity_owner: Option<&ahash::AHashMap<Handle, Handle>>,
-        source_record_order: Option<&ahash::AHashMap<Handle, usize>>,
+        binary_entity_owner: Option<&foldhash::HashMap<Handle, Handle>>,
+        source_record_order: Option<&foldhash::HashMap<Handle, usize>>,
     ) {
-        let valid_owners: ahash::AHashSet<Handle> = document
+        let valid_owners: foldhash::HashSet<Handle> = document
             .block_records
             .iter()
             .map(|record| record.handle)
@@ -3093,8 +3278,11 @@ impl DwgDocumentBuilder {
                 }
                 valid_owners.contains(&owner).then_some((owner, handle))
             });
-        let mut by_owner: ahash::AHashMap<Handle, Vec<Handle>> =
-            ahash::AHashMap::with_capacity(document.block_records.len());
+        let mut by_owner: foldhash::HashMap<Handle, Vec<Handle>> =
+            foldhash::HashMap::with_capacity_and_hasher(
+                document.block_records.len(),
+                Default::default(),
+            );
         for (owner, handle) in memberships.into_iter().flatten() {
             by_owner.entry(owner).or_default().push(handle);
         }
@@ -3107,7 +3295,7 @@ impl DwgDocumentBuilder {
                 .get(&record.handle)
                 .filter(|canonical| !canonical.is_empty())
             {
-                let order: ahash::AHashMap<Handle, usize> = canonical
+                let order: foldhash::HashMap<Handle, usize> = canonical
                     .iter()
                     .copied()
                     .enumerate()
@@ -3272,10 +3460,10 @@ impl DwgDocumentBuilder {
                         ),
                         _ => unreachable!(),
                     };
-                    let _ = document.add_entity(EntityType::Extended(ExtendedEntity {
+                    let _ = document.add_entity(EntityType::Extended(Box::new(ExtendedEntity {
                         common: entity_common,
                         data,
-                    }));
+                    })));
                 }
                 OBJ_ARC => {
                     let data = entities::read_arc(&mut reader);
@@ -3364,11 +3552,19 @@ impl DwgDocumentBuilder {
                 // ── Moderate entities ──────────────────────────────
                 OBJ_INSERT => {
                     let data = entities::read_insert(&mut reader, self.obj_reader.version());
+                    // Both subclasses follow the block handle with the viewport
+                    // they are drawn in. Inventor's model-space view blocks overlap,
+                    // so the link is what keeps each view inside its own viewport;
+                    // its sheet-level references carry a null handle.
                     let view_rep_handle = class_names
                         .dxf
                         .get(&raw_type_code)
-                        .filter(|name| name.eq_ignore_ascii_case("ACDBVIEWREPBLOCKREFERENCE"))
-                        .map(|_| Handle::from(reader.read_handle()));
+                        .filter(|name| {
+                            name.eq_ignore_ascii_case("ACDBVIEWREPBLOCKREFERENCE")
+                                || name.eq_ignore_ascii_case("ACIDBLOCKREFERENCE")
+                        })
+                        .map(|_| Handle::from(reader.read_handle()))
+                        .filter(|handle| !handle.is_null());
                     let block_name = maps.block_name(data.block_handle);
                     let mut e = Insert::new(block_name, data.insert_point);
                     e.common = entity_common;
@@ -3449,7 +3645,7 @@ impl DwgDocumentBuilder {
                     e.legacy_border_colors = data.legacy_border_colors;
                     e.legacy_border_line_weights = data.legacy_border_line_weights;
                     e.legacy_border_visibility = data.legacy_border_visibility;
-                    let _ = document.add_entity(EntityType::Table(e));
+                    let _ = document.add_entity(EntityType::Table(Box::new(e)));
                 }
                 OBJ_LWPOLYLINE => {
                     let data = entities::read_lwpolyline(&mut reader, self.obj_reader.version());
@@ -3498,6 +3694,7 @@ impl DwgDocumentBuilder {
                     e.knot_parameterization = data.knot_param;
                     e.cv_frame_visible = data.flags1 & 2 != 0;
                     e.dwg_flags1 = data.flags1;
+                    e.dwg_scenario = Some(data.scenario);
                     let _ = document.add_entity(EntityType::Spline(e));
                 }
                 OBJ_HELIX => {
@@ -3525,6 +3722,7 @@ impl DwgDocumentBuilder {
                     e.spline.knot_parameterization = data.knot_param;
                     e.spline.cv_frame_visible = data.flags1 & 2 != 0;
                     e.spline.dwg_flags1 = data.flags1;
+                    e.spline.dwg_scenario = Some(data.scenario);
                     // AcDbHelix parameters follow the spline record.
                     e.major_version = reader.read_bit_long();
                     e.maintenance_version = reader.read_bit_long();
@@ -3536,7 +3734,7 @@ impl DwgDocumentBuilder {
                     e.turn_height = reader.read_bit_double();
                     e.handedness = reader.read_bit();
                     e.constraint = crate::entities::HelixConstraint::from_code(reader.read_byte());
-                    let _ = document.add_entity(EntityType::Helix(e));
+                    let _ = document.add_entity(EntityType::Helix(Box::new(e)));
                 }
                 OBJ_TEXT => {
                     let data = entities::read_text(&mut reader, self.obj_reader.version());
@@ -3690,7 +3888,11 @@ impl DwgDocumentBuilder {
                     e.seed_points = data.seed_points;
                     e.mpolygon_hatch_color = data.mpolygon_hatch_color;
                     e.mpolygon_x_direction = data.mpolygon_x_direction;
-                    e.mpolygon_boundary_handle_count = data.mpolygon_boundary_handle_count;
+                    e.mpolygon_invalid_loops = data
+                        .mpolygon_invalid_loops
+                        .into_iter()
+                        .map(boundary_path_from_dwg)
+                        .collect();
                     // Map gradient data
                     e.gradient_color.enabled = data.gradient_enabled;
                     e.gradient_color.reserved = data.gradient_reserved;
@@ -3844,9 +4046,10 @@ impl DwgDocumentBuilder {
                     e.flags.closed = (data.closed_flag & 1) != 0;
                     // smooth_type was decoded by the reader but the builder used
                     // to drop it (spline/curve-fit 3D polylines lost their fit).
-                    e.smooth_type = crate::entities::polyline3d::SmoothSurfaceType::from_value(
-                        data.smooth_type as i16,
-                    );
+                    e.smooth_type =
+                        crate::entities::polyline3d::SmoothSurfaceType::from_dwg_code(
+                            data.smooth_type,
+                        );
                     e.flags.spline_fit = data.smooth_type != 0;
                     let h = e.common.handle.value();
                     pending.polylines.push((h, EntityType::Polyline3D(e)));
@@ -4170,7 +4373,7 @@ impl DwgDocumentBuilder {
                         TextAttachmentType::from(data.text_bottom_attachment);
                     e.text_top_attachment = TextAttachmentType::from(data.text_top_attachment);
                     e.extend_leader_to_text = data.extend_leader_to_text;
-                    let _ = document.add_entity(EntityType::MultiLeader(e));
+                    let _ = document.add_entity(EntityType::MultiLeader(Box::new(e)));
                 }
 
                 // ── Attribute entities ─────────────────────────────
@@ -4694,7 +4897,7 @@ impl DwgDocumentBuilder {
                     e.surface_data = data.surface_data;
                     e.history_handle =
                         (data.history_handle != 0).then(|| Handle::from(data.history_handle));
-                    let _ = document.add_entity(EntityType::Surface(e));
+                    let _ = document.add_entity(EntityType::Surface(Box::new(e)));
                 }
 
                 // ── Catch-all ──────────────────────────────────────
@@ -4717,15 +4920,15 @@ impl DwgDocumentBuilder {
                                 value.raw_dwg_version = Some(document.version);
                             }
                             let _ = document.add_entity(EntityType::Extended(
-                                ExtendedEntity {
+                                Box::new(ExtendedEntity {
                                     common: entity_common,
                                     data,
-                                },
+                                }),
                             ));
                         }
                         "mcsDbObjectFormat" => {
                             let _ = document.add_entity(EntityType::Extended(
-                                ExtendedEntity {
+                                Box::new(ExtendedEntity {
                                     common: entity_common,
                                     data: ExtendedEntityData::Format(
                                         crate::entities::FormatData {
@@ -4740,7 +4943,7 @@ impl DwgDocumentBuilder {
                                             raw_dxf_codes: None,
                                         },
                                     ),
-                                },
+                                }),
                             ));
                         }
                         "AcDbBlockAngularConstraintParameterEntity" => {
@@ -4751,10 +4954,10 @@ impl DwgDocumentBuilder {
                                 )
                             {
                                 let _ = document.add_entity(EntityType::Extended(
-                                    ExtendedEntity {
+                                    Box::new(ExtendedEntity {
                                         common: entity_common,
                                         data: ExtendedEntityData::DynamicBlock(data),
-                                    },
+                                    }),
                                 ));
                             }
                         }
@@ -4777,7 +4980,7 @@ impl DwgDocumentBuilder {
                                     entity_common.handle.value(),
                                 );
                             let _ = document.add_entity(EntityType::Extended(
-                                ExtendedEntity {
+                                Box::new(ExtendedEntity {
                                     common: entity_common,
                                     data: ExtendedEntityData::RegisteredClass(
                                         crate::entities::RegisteredClassEntityData {
@@ -4788,7 +4991,7 @@ impl DwgDocumentBuilder {
                                             object_ids,
                                         },
                                     ),
-                                },
+                                }),
                             ));
                         }
                         name @ (
@@ -4818,10 +5021,10 @@ impl DwgDocumentBuilder {
                                 )
                             {
                                 let _ = document.add_entity(EntityType::Extended(
-                                    ExtendedEntity {
+                                    Box::new(ExtendedEntity {
                                         common: entity_common,
                                         data: ExtendedEntityData::DynamicBlock(data),
-                                    },
+                                    }),
                                 ));
                             }
                         }
@@ -5855,8 +6058,8 @@ impl DwgDocumentBuilder {
                     obj.front_clip = data.front_clip;
                     obj.back_clip = data.back_clip;
                     obj.inverse_block_transform =
-                        matrix_from_row_major(&data.inverse_block_transform);
-                    obj.clip_bound_transform = matrix_from_row_major(&data.clip_bound_transform);
+                        matrix_from_column_major(&data.inverse_block_transform);
+                    obj.clip_bound_transform = matrix_from_column_major(&data.clip_bound_transform);
                     document.objects.insert(
                         Handle::from(handle),
                         crate::objects::ObjectType::SpatialFilter(obj),
@@ -5991,7 +6194,14 @@ impl DwgDocumentBuilder {
                                             xdictionary_handle: non_entity_data
                                                 .xdictionary_handle
                                                 .map(Handle::from),
-                                            dxf_name: dxf_name.to_string(),
+                                            // The class name as registered (DXF object
+                                            // names such as AcDbCenterMarkActionBody are
+                                            // case sensitive); matching uses upper case.
+                                            dxf_name: class_names
+                                                .dxf
+                                                .get(&type_code)
+                                                .cloned()
+                                                .unwrap_or_else(|| dxf_name.to_string()),
                                             cpp_class_name,
                                             data,
                                             source_version: Some(document.version),
@@ -7011,6 +7221,26 @@ mod tests {
             "IRD_OBJ_RECORD"
         );
     }
+
+    #[test]
+    fn spatial_filter_matrix_is_column_major() {
+        let v = [
+            1.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, //
+            0.0, 0.0, 1.0, //
+            -500.0, 0.0, 0.0,
+        ];
+        let m = matrix_from_column_major(&v);
+        assert_eq!(
+            m.m,
+            [
+                [1.0, 0.0, 0.0, -500.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        );
+    }
 }
 
 fn read_registered_payload(
@@ -7354,12 +7584,12 @@ mod dedupe_block_names_tests {
     }
 }
 
-fn matrix_from_row_major(v: &[f64; 12]) -> crate::types::Matrix4 {
+fn matrix_from_column_major(v: &[f64; 12]) -> crate::types::Matrix4 {
     crate::types::Matrix4 {
         m: [
-            [v[0], v[1], v[2], v[3]],
-            [v[4], v[5], v[6], v[7]],
-            [v[8], v[9], v[10], v[11]],
+            [v[0], v[3], v[6], v[9]],
+            [v[1], v[4], v[7], v[10]],
+            [v[2], v[5], v[8], v[11]],
             [0.0, 0.0, 0.0, 1.0],
         ],
     }
