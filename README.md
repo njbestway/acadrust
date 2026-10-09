@@ -7,14 +7,13 @@
 **A pure Rust crate for reading, writing, and inspecting CAD files.**
 
 acadrust handles ASCII and binary DXF plus native binary DWG without requiring
-an installed CAD application. File support spans DXF R12 through R2018+ and DWG
-R13 through R2018+.
+an installed CAD application. File support spans DXF and DWG R12 through R2018+.
 
 ## Quick Start
 
 ```toml
 [dependencies]
-acadrust = "0.6.1"
+acadrust = "0.6.3"
 ```
 
 ```rust
@@ -43,13 +42,13 @@ Enable optional features as needed:
 
 ```toml
 [dependencies]
-acadrust = { version = "0.6.1", features = ["serde", "import"] }
+acadrust = { version = "0.6.3", features = ["serde", "import"] }
 ```
 
 ## Features
 
 - **DXF I/O** — ASCII and binary formats, R12 through R2018+
-- **DWG I/O** — Native binary formats, R13 through R2018+
+- **DWG I/O** — Native binary formats, R12 through R2018+
 - **Broad entity coverage** — 48 top-level `EntityType` variants covering 2D
   geometry, annotations, dimensions, meshes, underlays, viewports, 3D solids,
   regions, bodies, and native surfaces
@@ -69,7 +68,7 @@ acadrust = { version = "0.6.1", features = ["serde", "import"] }
 
 | File code | Release era | DXF | DWG |
 |-----------|-----------------|-----|-----|
-| AC1009 | R12 | R/W | — |
+| AC1009 | R12 | R/W | R/W |
 | AC1012 | R13 | R/W | R/W |
 | AC1014 | R14 | R/W | R/W |
 | AC1015 | 2000 | R/W | R/W |
@@ -222,6 +221,7 @@ cargo check --all-targets --all-features
 
 ## Used By
 - [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) An open-source (GPLv3) CAD application that uses acadrust as its core native DWG/DXF engine for read/write operations and 3D modeling.
+- [CADCraft](https://github.com/storytold/cadcraft) An open-source, AutoCAD-style drafting application written in Rust that uses acadrust for DWG read/write operations.
 
 ## Support & Sponsorship
 
