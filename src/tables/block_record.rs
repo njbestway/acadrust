@@ -169,6 +169,31 @@ impl BlockRecord {
     }
 }
 
+const DESIGN_CENTER_DATA: &str = "DesignCenter Data";
+
+pub(crate) fn design_center_units_values(units: i16) -> Vec<crate::xdata::XDataValue> {
+    use crate::xdata::XDataValue;
+    vec![
+        XDataValue::String(DESIGN_CENTER_DATA.to_string()),
+        XDataValue::ControlString("{".to_string()),
+        XDataValue::Integer16(1),
+        XDataValue::Integer16(units),
+        XDataValue::ControlString("}".to_string()),
+    ]
+}
+
+pub(crate) fn design_center_units(values: &[crate::xdata::XDataValue]) -> Option<i16> {
+    use crate::xdata::XDataValue;
+    match values {
+        [XDataValue::String(name), XDataValue::ControlString(_), XDataValue::Integer16(_), XDataValue::Integer16(units), ..]
+            if name == DESIGN_CENTER_DATA =>
+        {
+            Some(*units)
+        }
+        _ => None,
+    }
+}
+
 impl TableEntry for BlockRecord {
     fn handle(&self) -> Handle {
         self.handle

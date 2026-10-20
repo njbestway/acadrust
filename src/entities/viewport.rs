@@ -7,7 +7,12 @@ use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vecto
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ViewportStatusFlags {
-    /// Viewport is on (visible)
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub non_rectangular_clipping: bool,
+    /// Explicit viewport-off flag (0x20000), independent of the legacy on bit.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_off: bool,
+    /// Legacy on flag (0x8000); the explicit off flag takes precedence for visibility.
     pub is_on: bool,
     /// Perspective mode active
     pub perspective: bool,
@@ -55,6 +60,8 @@ impl ViewportStatusFlags {
     /// bits are viewport-locked(0x4000) and viewport-on/visible(0x8000).
     pub fn from_bits(bits: i32) -> Self {
         Self {
+            non_rectangular_clipping: (bits & 0x10000) != 0,
+            is_off: (bits & 0x20000) != 0,
             perspective: (bits & (1 << 0)) != 0,
             front_clipping: (bits & (1 << 1)) != 0,
             back_clipping: (bits & (1 << 2)) != 0,
@@ -77,6 +84,12 @@ impl ViewportStatusFlags {
     /// Convert to the DWG/DXF viewport status bit-coded flags (group 90).
     pub fn to_bits(&self) -> i32 {
         let mut bits = 0;
+        if self.is_off {
+            bits |= 0x20000;
+        }
+        if self.non_rectangular_clipping {
+            bits |= 0x10000;
+        }
         if self.perspective {
             bits |= 1 << 0;
         }
@@ -251,6 +264,14 @@ pub struct Viewport {
     pub status: ViewportStatusFlags,
     /// Viewport ID (unique within the drawing)
     pub id: i16,
+    /// DXF group 68 status/stacking value when it was present in the source.
+    ///
+    /// `None` means the viewport was created in memory or came from a format
+    /// that does not expose the DXF value. In that case the DXF writer derives
+    /// the legacy value from `status.is_on`, `off_screen`, and `id`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_status: Option<i16>,
+    pub off_screen: bool,
     /// View center point (DCS - Display Coordinate System)
     pub view_center: Vector3,
     /// Snap base point
@@ -345,6 +366,8 @@ impl Viewport {
             height: 210.0, // A4 height in mm
             status: ViewportStatusFlags::default_on(),
             id: 0,
+            dxf_status: None,
+            off_screen: false,
             view_center: Vector3::ZERO,
             snap_base: Vector3::ZERO,
             snap_spacing: Vector3::new(10.0, 10.0, 0.0),
@@ -459,16 +482,18 @@ impl Viewport {
     /// Turn viewport on
     pub fn turn_on(&mut self) {
         self.status.is_on = true;
+        self.status.is_off = false;
     }
 
     /// Turn viewport off
     pub fn turn_off(&mut self) {
         self.status.is_on = false;
+        self.status.is_off = true;
     }
 
     /// Check if viewport is on
     pub fn is_on(&self) -> bool {
-        self.status.is_on
+        self.status.is_on && !self.status.is_off
     }
 
     /// Add a frozen layer by handle

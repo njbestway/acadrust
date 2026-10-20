@@ -13,6 +13,7 @@ pub struct DxfTextWriter<W: Write> {
     writer: W,
     /// Reusable stack buffer for formatting numbers without heap allocation.
     fmt_buf: [u8; 64],
+    encoding: Option<crate::io::dxf::code_page::LegacyEncoding>,
 }
 
 impl<W: Write> DxfTextWriter<W> {
@@ -21,6 +22,21 @@ impl<W: Write> DxfTextWriter<W> {
         Self {
             writer,
             fmt_buf: [0u8; 64],
+            encoding: None,
+        }
+    }
+
+    /// Select the declared code page for a pre-2007 DXF.
+    pub fn set_encoding(&mut self, encoding: crate::io::dxf::code_page::LegacyEncoding) {
+        self.encoding = Some(encoding);
+    }
+
+    fn write_text_crlf(&mut self, value: &str) -> Result<()> {
+        if let Some(encoding) = self.encoding {
+            let bytes = crate::io::dxf::code_page::encode_legacy_string(value, encoding);
+            self.write_value_crlf(&bytes)
+        } else {
+            self.write_value_crlf(value.as_bytes())
         }
     }
 
@@ -143,6 +159,24 @@ impl<W: Write> DxfStreamWriter for DxfTextWriter<W> {
     #[inline]
     fn write_string(&mut self, code: i32, value: &str) -> Result<()> {
         self.write_code(code)?;
+        // A literal caret is written as "^ ": a bare "^x" is read as a control
+        // character (`\AcExpr (2^3)` would lose its operator). A caret already
+        // followed by a space is escaped (the SAT cipher writes it that way).
+        let caret;
+        let value = if value.contains('^') {
+            let mut escaped = String::with_capacity(value.len() + 4);
+            let mut chars = value.chars().peekable();
+            while let Some(c) = chars.next() {
+                escaped.push(c);
+                if c == '^' && chars.peek() != Some(&' ') {
+                    escaped.push(' ');
+                }
+            }
+            caret = escaped;
+            caret.as_str()
+        } else {
+            value
+        };
         // DXF text format is line-based: literal newlines in string values
         // would corrupt the file.  Replace them with the MText paragraph
         // marker \P which is the standard convention in DXF/DWG ecosystems.
@@ -151,9 +185,9 @@ impl<W: Write> DxfStreamWriter for DxfTextWriter<W> {
                 .replace("\r\n", "\\P")
                 .replace('\r', "\\P")
                 .replace('\n', "\\P");
-            self.write_value_crlf(sanitized.as_bytes())?;
+            self.write_text_crlf(&sanitized)?;
         } else {
-            self.write_value_crlf(value.as_bytes())?;
+            self.write_text_crlf(value)?;
         }
         Ok(())
     }
@@ -166,7 +200,7 @@ impl<W: Write> DxfStreamWriter for DxfTextWriter<W> {
             .replace('\r', "^M")
             .replace('\n', "^J")
             .replace('\t', "^I");
-        self.write_value_crlf(escaped.as_bytes())?;
+        self.write_text_crlf(&escaped)?;
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 //!
 //! A pure Rust library for reading, writing, and inspecting CAD files in DXF
 //! (ASCII and binary) and native binary DWG formats. DXF support spans R12
-//! through R2018+; DWG support spans R13 through R2018+.
+//! through R2018+; DWG support spans R12 through R2018+.
 //!
 //! ## Highlights
 //!
@@ -27,7 +27,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! acadrust = { version = "0.5.5", features = ["serde", "import"] }
+//! acadrust = { version = "0.6.5", features = ["serde", "import"] }
 //! ```
 //!
 //! ## Quick Start — DXF
@@ -128,6 +128,7 @@
 //! |--------|----------|
 //! | [`document`] | [`CadDocument`] — central drawing container |
 //! | [`entities`] | 48 top-level entity variants |
+//! | [`entities::modification`] | Entity explosion, mirroring, transforms, and translation |
 //! | [`tables`] | Table entries such as [`Layer`] and [`LineType`] |
 //! | [`objects`] | Non-graphical objects, dictionaries, layouts, and styles |
 //! | [`types`] | Primitives such as [`Vector3`], [`Color`], and [`DxfVersion`] |
@@ -139,7 +140,7 @@
 //!
 //! | Code | AutoCAD | DXF | DWG |
 //! |------|---------|-----|-----|
-//! | AC1009 | R12 | R/W | — |
+//! | AC1009 | R11/R12 | R/W | R/W |
 //! | AC1012 | R13 | R/W | R/W |
 //! | AC1014 | R14 | R/W | R/W |
 //! | AC1015 | 2000 | R/W | R/W |
@@ -149,11 +150,16 @@
 //! | AC1027 | 2013 | R/W | R/W |
 //! | AC1032 | 2018+ | R/W | R/W |
 //!
+//! DXF R11/R12 is written as R13 unless requested explicitly with
+//! [`DxfWriter::with_version`](io::dxf::DxfWriter::with_version), which emits a
+//! genuine R12 file and converts newer entities to R12 entities.
+//!
 //! `R/W` describes the format-level reader and writer paths. Entity
 //! availability varies by file version. See the
-//! [per-version compatibility matrix](https://github.com/hakanaktt/acadrust/blob/main/src/docs/entity_status_matrix.md),
-//! which records tested fixtures and CAD-engine audit results rather than a
-//! guarantee for every possible drawing.
+//! [R11/R12 support status](https://github.com/hakanaktt/acadrust/blob/main/src/docs/ac1009_support.md)
+//! for confirmed AC1009 fidelity gaps. DXF export promotes R11/R12 documents to
+//! R13 or later. Compatibility results describe tested fixtures and CAD-engine
+//! audits rather than a guarantee for every possible drawing.
 
 #![allow(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
@@ -187,6 +193,7 @@
 
 pub mod classes;
 pub mod compound_file;
+pub mod count;
 pub mod document;
 mod current_transparency;
 pub mod nested_copy;
@@ -197,6 +204,8 @@ pub mod io;
 pub mod layer_state;
 pub mod notification;
 pub mod objects;
+pub mod plot_style;
+pub mod sheet_set;
 pub mod tables;
 pub mod types;
 pub mod vba;
@@ -204,6 +213,10 @@ pub mod xdata;
 pub mod mvt;
 
 // Re-export commonly used types
+pub use audit::{
+    AuditIssue, AuditIssueCode, AuditLocation, AuditReport, AuditSeverity, RepairAction,
+    RepairReport,
+};
 pub use error::{DxfError, Result};
 pub use types::{
     BoundingBox2D, BoundingBox3D, Color, DxfVersion, Handle, LineWeight, Transparency, Vector2,
@@ -224,9 +237,10 @@ pub use tables::{
 
 // Re-export document
 pub use document::{
-    CadDocument, Preview, PreviewFormat, SemanticEntityV1, SemanticInventoryV1, SemanticNodeV1,
-    SemanticObjectV1, SemanticPartV1, SemanticReferenceV1, SemanticRelationshipKindV1,
-    SemanticTableRecordV1, SolidHistoryGraph, SEMANTIC_INVENTORY_VERSION,
+    BlockGraph, CadDocument, Preview, PreviewFormat, SemanticEntityV1, SemanticInventoryV1,
+    SemanticNodeV1, SemanticObjectV1, SemanticPartV1, SemanticReferenceV1,
+    SemanticRelationshipKindV1, SemanticTableRecordV1, SolidHistoryGraph,
+    SEMANTIC_INVENTORY_VERSION,
 };
 pub use layer_state::{LayerState, LayerStateLayer, LayerStateMask};
 
@@ -237,6 +251,7 @@ pub use io::read::{
     push_read_diagnostic, ReadDiagnostic, ReadOutcome, ReadStage, ReadStats, SourceFormat,
     MAX_READ_DIAGNOSTICS,
 };
+pub use io::recover::RecoverOutcome;
 
 // Re-export ACIS types
 pub use entities::acis::primitives;
@@ -252,6 +267,8 @@ pub use io::import::{
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod audit;
 
 #[cfg(test)]
 mod tests {

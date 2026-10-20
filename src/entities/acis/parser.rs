@@ -561,8 +561,12 @@ impl<'a> SatTokenizer<'a> {
         // Number or negative index or identifier
         let raw = self.next_raw_token()?;
 
-        // Try integer
+        // Try integer. A signed zero (`-0`) is a double whose sign the binary
+        // form keeps, so it must not collapse into the integer 0.
         if let Ok(v) = raw.parse::<i64>() {
+            if v == 0 && raw.starts_with('-') {
+                return Some(SatToken::Float(-0.0));
+            }
             return Some(SatToken::Integer(v));
         }
 
@@ -1040,11 +1044,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs examples/sat v7 samples/sample_sat_1.sat"]
     fn test_parse_sample_sat_1() {
         let path = "examples/sat v7 samples/sample_sat_1.sat";
-        let Ok(sat) = std::fs::read_to_string(path) else {
-            return;
-        };
+        let sat = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let doc = SatDocument::parse(&sat).unwrap();
 
         assert_eq!(doc.header.version, SatVersion::V7_0);
@@ -1083,11 +1086,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs examples/sat v7 samples/sample_sat_2.sat"]
     fn test_parse_sample_sat_2() {
         let path = "examples/sat v7 samples/sample_sat_2.sat";
-        let Ok(sat) = std::fs::read_to_string(path) else {
-            return;
-        };
+        let sat = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let doc = SatDocument::parse(&sat).unwrap();
 
         assert_eq!(doc.header.version, SatVersion::V7_0);

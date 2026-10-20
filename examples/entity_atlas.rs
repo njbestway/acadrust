@@ -294,7 +294,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
         })
         .collect();
     helix.spline = Spline::from_control_points(1, points);
-    s.add("HELIX", AC1021, EntityType::Helix(helix));
+    s.add("HELIX", AC1021, EntityType::Helix(Box::new(helix)));
     s.add(
         "TEXT",
         AC1012,
@@ -303,7 +303,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
     let mut mt = MText::with_value("Text\\P{\\C1;Red} and {\\C3;green}", p(12., 65.));
     mt.height = 4.;
     mt.rectangle_width = 110.;
-    s.add("MTEXT", AC1012, EntityType::MText(mt));
+    s.add("MTEXT", AC1012, EntityType::MText(Box::new(mt)));
     let mut ad = AttributeDefinition::constant("TAG", "ATTDEF");
     ad.insertion_point = p(20., 40.);
     ad.height = 5.;
@@ -316,57 +316,57 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
     s.add(
         "DIM_LINEAR",
         AC1012,
-        EntityType::Dimension(Dimension::Linear(d)),
+        EntityType::Dimension(Box::new(Dimension::Linear(d))),
     );
     let mut d = DimensionAligned::new(p(20., 20.), p(80., 40.));
     d.set_offset(20.);
     s.add(
         "DIM_ALIGNED",
         AC1012,
-        EntityType::Dimension(Dimension::Aligned(d)),
+        EntityType::Dimension(Box::new(Dimension::Aligned(d))),
     );
     s.add(
         "DIM_RADIUS",
         AC1012,
-        EntityType::Dimension(Dimension::Radius(DimensionRadius::new(
+        EntityType::Dimension(Box::new(Dimension::Radius(DimensionRadius::new(
             p(50., 35.),
             p(75., 55.),
-        ))),
+        )))),
     );
     s.add(
         "DIM_DIAMETER",
         AC1012,
-        EntityType::Dimension(Dimension::Diameter(DimensionDiameter::new(
+        EntityType::Dimension(Box::new(Dimension::Diameter(DimensionDiameter::new(
             p(25., 30.),
             p(85., 60.),
-        ))),
+        )))),
     );
     s.add(
         "DIM_ANGULAR2",
         AC1012,
-        EntityType::Dimension(Dimension::Angular2Ln(DimensionAngular2Ln::new(
+        EntityType::Dimension(Box::new(Dimension::Angular2Ln(DimensionAngular2Ln::new(
             p(30., 25.),
             p(95., 25.),
             p(65., 65.),
-        ))),
+        )))),
     );
     s.add(
         "DIM_ANGULAR3",
         AC1012,
-        EntityType::Dimension(Dimension::Angular3Pt(DimensionAngular3Pt::new(
+        EntityType::Dimension(Box::new(Dimension::Angular3Pt(DimensionAngular3Pt::new(
             p(30., 25.),
             p(95., 25.),
             p(65., 65.),
-        ))),
+        )))),
     );
     s.add(
         "DIM_ORDINATE",
         AC1012,
-        EntityType::Dimension(Dimension::Ordinate(DimensionOrdinate::new(
+        EntityType::Dimension(Box::new(Dimension::Ordinate(DimensionOrdinate::new(
             p(35., 25.),
             p(85., 60.),
             true,
-        ))),
+        )))),
     );
     let d = DimensionArc {
         center_point: p(45., 30.),
@@ -376,7 +376,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
         arc_end_parameter: FRAC_PI_2,
         ..Default::default()
     };
-    s.add("DIM_ARC", AC1018, EntityType::Dimension(Dimension::Arc(d)));
+    s.add("DIM_ARC", AC1018, EntityType::Dimension(Box::new(Dimension::Arc(d))));
     let d = DimensionLargeRadial {
         definition_point: p(20., 25.),
         chord_point: p(100., 60.),
@@ -388,7 +388,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
     s.add(
         "DIM_JOGGED",
         AC1018,
-        EntityType::Dimension(Dimension::LargeRadial(d)),
+        EntityType::Dimension(Box::new(Dimension::LargeRadial(d))),
     );
     s.add(
         "SOLID",
@@ -426,7 +426,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
                 dash_lengths: vec![],
             });
         }
-        s.add(name, AC1012, EntityType::Hatch(hatch));
+        s.add(name, AC1012, EntityType::Hatch(Box::new(hatch)));
     }
     s.add(
         "LEADER",
@@ -440,11 +440,11 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
     s.add(
         "MULTILEADER",
         AC1021,
-        EntityType::MultiLeader(MultiLeader::with_text(
+        EntityType::MultiLeader(Box::new(MultiLeader::with_text(
             "Leader",
             p(70., 55.),
             vec![p(20., 20.), p(50., 55.)],
-        )),
+        ))),
     );
     s.add(
         "MLINE",
@@ -499,7 +499,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
         row.cells[0] = TableCell::text(&format!("Row {i}"));
         row.cells[1] = TableCell::text(&format!("{}", i * 10));
     }
-    s.add("TABLE", AC1018, EntityType::Table(table));
+    s.add("TABLE", AC1018, EntityType::Table(Box::new(table)));
     for (name, sat) in [
         (
             "3DSOLID_BOX",
@@ -552,7 +552,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
         s.add(
             &format!("SURFACE_{kind:?}").to_uppercase(),
             AC1021,
-            EntityType::Surface(surface),
+            EntityType::Surface(Box::new(surface)),
         );
     }
     for (name, kind) in [("LIGHT_POINT", 2), ("LIGHT_SPOT", 3), ("LIGHT_DISTANT", 1)] {
@@ -564,7 +564,7 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
         light.plot_glyph = true;
         light.hotspot_angle = PI / 6.;
         light.falloff_angle = PI / 4.;
-        s.add(name, AC1021, EntityType::Light(light));
+        s.add(name, AC1021, EntityType::Light(Box::new(light)));
     }
     let mut style = TextStyle::new("ATLAS_SHAPES");
     style.handle = s.doc.allocate_handle();
@@ -667,17 +667,17 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
         let mut common = EntityCommon::default();
         common.layer = layer;
         s.doc
-            .add_entity(EntityType::Extended(ExtendedEntity {
+            .add_entity(EntityType::Extended(Box::new(ExtendedEntity {
                 common,
                 data: ExtendedEntityData::Camera { view_handle: vh },
-            }))
+            })))
             .unwrap();
         s.cases.last_mut().unwrap()["expected"] = json!(["CAMERA"]);
     }
     s.add(
         "SECTIONOBJECT",
         AC1021,
-        EntityType::Extended(ExtendedEntity {
+        EntityType::Extended(Box::new(ExtendedEntity {
             common: Default::default(),
             data: ExtendedEntityData::SectionObject(SectionObjectData {
                 state: 1,
@@ -692,12 +692,12 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
                 back_line_vertices: vec![],
                 settings_handle: Handle::NULL,
             }),
-        }),
+        })),
     );
     s.add(
         "RTEXT",
         AC1014,
-        EntityType::Extended(ExtendedEntity {
+        EntityType::Extended(Box::new(ExtendedEntity {
             common: Default::default(),
             data: ExtendedEntityData::RemoteText(RemoteTextData {
                 position: p(20., 40.),
@@ -709,12 +709,12 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
                 flags: 0,
                 text: "Remote text".into(),
             }),
-        }),
+        })),
     );
     s.add(
         "POSITIONMARKER",
         AC1027,
-        EntityType::Extended(ExtendedEntity {
+        EntityType::Extended(Box::new(ExtendedEntity {
             common: Default::default(),
             data: ExtendedEntityData::GeoPositionMarker(GeoPositionMarkerData {
                 class_version: 0,
@@ -727,12 +727,12 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
                 enable_frame_text: false,
                 embedded_mtext: None,
             }),
-        }),
+        })),
     );
     s.add(
         "ARCALIGNEDTEXT",
         AC1014,
-        EntityType::Extended(ExtendedEntity {
+        EntityType::Extended(Box::new(ExtendedEntity {
             common: Default::default(),
             data: ExtendedEntityData::ArcAlignedText(ArcAlignedTextData {
                 text: "Arc text".into(),
@@ -764,20 +764,20 @@ fn build(version: DxfVersion, assets: &Path) -> Sheet {
                 wizard_flag: false,
                 arc_handle: Handle::NULL,
             }),
-        }),
+        })),
     );
     let (layer, _, _) = s.slot("VIEWPORT", AC1012, "Located on Layout1 in paper space");
     let mut overall = Viewport::new();
     overall.id = 1;
     overall.common.owner_handle = s.doc.header.paper_space_block_handle;
-    s.doc.add_entity(EntityType::Viewport(overall)).unwrap();
+    s.doc.add_entity(EntityType::Viewport(Box::new(overall))).unwrap();
     let mut viewport = Viewport::with_size(p(100., 80.), 160., 110.);
     viewport.id = 2;
     viewport.common.layer = layer;
     viewport.common.owner_handle = s.doc.header.paper_space_block_handle;
     viewport.view_height = 1100.;
     viewport.view_target = p(500., -400.);
-    s.doc.add_entity(EntityType::Viewport(viewport)).unwrap();
+    s.doc.add_entity(EntityType::Viewport(Box::new(viewport))).unwrap();
     s.cases.last_mut().unwrap()["expected"] = json!(["VIEWPORT"]);
     s.add(
         "RAY",

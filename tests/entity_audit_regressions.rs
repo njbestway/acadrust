@@ -138,7 +138,7 @@ fn insert_children_have_nonzero_unique_handles() {
 fn missing_table_block_is_serialized_without_mutating_source() {
     let mut doc = CadDocument::with_version(DxfVersion::AC1021);
     let handle = doc
-        .add_entity(EntityType::Table(Table::new(Vector3::ZERO, 2, 2)))
+        .add_entity(EntityType::Table(Box::new(Table::new(Vector3::ZERO, 2, 2))))
         .unwrap();
     let bytes = DwgWriter::write_to_vec(&doc).unwrap();
     let loaded = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
@@ -171,7 +171,7 @@ fn existing_table_block_gets_missing_record_and_marker_handles() {
     let mut table = Table::new(Vector3::ZERO, 2, 2);
     table.block_name = "*T1".into();
     table.block_record_handle = Some(Handle::NULL);
-    let handle = doc.add_entity(EntityType::Table(table)).unwrap();
+    let handle = doc.add_entity(EntityType::Table(Box::new(table))).unwrap();
     let loaded = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
         .read()
         .unwrap();
@@ -246,10 +246,10 @@ fn mline_and_wipeout_use_valid_dxf_references_and_subclasses() {
 #[test]
 fn light_binary_field_widths_and_viewport_id_match_group_codes() {
     let mut doc = CadDocument::with_version(DxfVersion::AC1021);
-    let light = doc.add_entity(EntityType::Light(Light::new())).unwrap();
+    let light = doc.add_entity(EntityType::Light(Box::new(Light::new()))).unwrap();
     let mut viewport = Viewport::new();
     viewport.id = 7;
-    let viewport = doc.add_entity(EntityType::Viewport(viewport)).unwrap();
+    let viewport = doc.add_entity(EntityType::Viewport(Box::new(viewport))).unwrap();
     let data = DxfWriter::new_binary(&doc).write_to_vec().unwrap();
     let loaded = DxfReader::from_reader(Cursor::new(data))
         .unwrap()
@@ -371,7 +371,7 @@ fn legacy_mtext_omits_post_r14_spacing_fields() {
         let mut text = MText::new();
         text.value = "Legacy paragraphs\\PSecond line".into();
         text.line_spacing_factor = 1.5;
-        let handle = doc.add_entity(EntityType::MText(text)).unwrap();
+        let handle = doc.add_entity(EntityType::MText(Box::new(text))).unwrap();
         let loaded = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
             .read()
             .unwrap();
@@ -440,7 +440,7 @@ fn legacy_viewport_eed_and_header_ids_roundtrip_without_mutating_source() {
         let mut doc = CadDocument::with_version(version);
         let mut overview = Viewport::new();
         overview.id = 1;
-        doc.add_paper_space_entity(EntityType::Viewport(overview))
+        doc.add_paper_space_entity(EntityType::Viewport(Box::new(overview)))
             .unwrap();
         let mut layer = acadrust::tables::Layer::new("FROZEN_TEST");
         layer.handle = doc.allocate_handle();
@@ -454,7 +454,7 @@ fn legacy_viewport_eed_and_header_ids_roundtrip_without_mutating_source() {
         viewport.status.grid_on = true;
         viewport.frozen_layers.push(layer_handle);
         let handle = doc
-            .add_paper_space_entity(EntityType::Viewport(viewport))
+            .add_paper_space_entity(EntityType::Viewport(Box::new(viewport)))
             .unwrap();
         let loaded = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
             .read()
@@ -526,10 +526,10 @@ fn arc_text_numeric_strings_roundtrip_in_every_dwg_version() {
         let mut doc = CadDocument::with_version(version);
         let data = ExtendedEntityData::ArcAlignedText(arc_text_fixture());
         let handle = doc
-            .add_entity(EntityType::Extended(ExtendedEntity {
+            .add_entity(EntityType::Extended(Box::new(ExtendedEntity {
                 common: EntityCommon::default(),
                 data: data.clone(),
-            }))
+            })))
             .unwrap();
         let bytes = DwgWriter::write_to_vec(&doc).unwrap();
         let mut input = DwgReader::from_stream(Cursor::new(bytes));
@@ -567,10 +567,10 @@ fn arc_text_dxf_angles_use_degrees_and_api_uses_radians() {
     let mut doc = CadDocument::new();
     let data = arc_text_fixture();
     let handle = doc
-        .add_entity(EntityType::Extended(ExtendedEntity {
+        .add_entity(EntityType::Extended(Box::new(ExtendedEntity {
             common: EntityCommon::default(),
             data: ExtendedEntityData::ArcAlignedText(data.clone()),
-        }))
+        })))
         .unwrap();
     let pairs = pairs(&doc);
     let start = pairs
@@ -666,9 +666,9 @@ fn surface_and_light_dxf_common_properties_survive_all_encodings() {
             SurfaceKind::Nurb,
         ]
         .into_iter()
-        .map(|kind| EntityType::Surface(Surface::new(kind)))
+        .map(|kind| EntityType::Surface(Box::new(Surface::new(kind))))
         .collect();
-        entities.push(EntityType::Light(Light::new()));
+        entities.push(EntityType::Light(Box::new(Light::new())));
         let mut handles = Vec::new();
         for (index, mut entity) in entities.into_iter().enumerate() {
             let layer_name = format!("COMMON_TEST_{index}");

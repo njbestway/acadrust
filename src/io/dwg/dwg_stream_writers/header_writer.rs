@@ -49,7 +49,7 @@ struct SectionWriter {
 }
 
 impl SectionWriter {
-    fn with_encoding(version: DxfVersion, encoding: &'static encoding_rs::Encoding) -> Self {
+    fn with_encoding(version: DxfVersion, encoding: crate::io::dxf::code_page::LegacyEncoding) -> Self {
         let dwg = DwgVersion::from_dxf_version(version).unwrap_or(DwgVersion::AC15);
 
         let inner = if version >= DxfVersion::AC1021 {
@@ -223,9 +223,9 @@ pub fn write_header_with_encoding(
     version: DxfVersion,
     header: &HeaderVariables,
     maintenance_version: u8,
-    encoding: &'static encoding_rs::Encoding,
+    encoding: impl Into<crate::io::dxf::code_page::LegacyEncoding>,
 ) -> Vec<u8> {
-    let mut w = SectionWriter::with_encoding(version, encoding);
+    let mut w = SectionWriter::with_encoding(version, encoding.into());
     write_header_fields(&mut w, version, header);
     let section_data = w.finalize();
     wrap_with_sentinels_and_crc(version, maintenance_version, &section_data)
@@ -493,9 +493,10 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     w.write_variable_text(&h.menu_name);
 
     // ── Date/time (Common) ──
-    let (cd, cms) = julian_to_day_ms(h.create_date_julian);
+    // DWG stores universal time.
+    let (cd, cms) = julian_to_day_ms(h.universal_create_or_local());
     w.write_datetime(cd, cms);
-    let (ud, ums) = julian_to_day_ms(h.update_date_julian);
+    let (ud, ums) = julian_to_day_ms(h.universal_update_or_local());
     w.write_datetime(ud, ums);
 
     if r2004_plus(v) {
@@ -647,10 +648,11 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
 
     // R2007+ dimension extras
     if r2007_plus(v) {
-        w.write_bit_double(0.0);       // DIMFXL
-        w.write_bit_double(std::f64::consts::FRAC_PI_4);    // DIMJOGANG (default 45°)
-        w.write_bit_short(0);          // DIMTFILL
-        w.write_cm_color(&Color::ByBlock); // DIMTFILLCLR
+        w.write_bit_double(h.dim_fixed_ext_line_length);
+        // DIMJOGANG valid range is 5°..90°
+        w.write_bit_double(h.dim_jog_angle.clamp(0.0872665, std::f64::consts::FRAC_PI_2));
+        w.write_bit_short(h.dim_text_fill);
+        w.write_cm_color(&h.dim_text_fill_color);
     }
 
     // R2000+ dimension flags
@@ -887,13 +889,14 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
 
         w.write_bit_double(h.steps_per_second);
         w.write_bit_double(h.step_size);
-        w.write_bit_double(2.0); // 3DDWFPREC — valid range 1..6
+        w.write_bit_double(h.dwf_3d_precision.clamp(1.0, 6.0)); // 3DDWFPREC
         w.write_bit_double(h.lens_length);
         w.write_bit_double(h.camera_height);
         w.write_byte(u8::from(h.record_solid_history));
         w.write_byte(h.show_solid_history.clamp(0, 2) as u8);
-        w.write_bit_double(0.25); // PSOLWIDTH — valid range >0
-        w.write_bit_double(0.25); // PSOLHEIGHT
+        // PSOLWIDTH / PSOLHEIGHT must be positive
+        w.write_bit_double(if h.polysolid_width > 0.0 { h.polysolid_width } else { 0.25 });
+        w.write_bit_double(if h.polysolid_height > 0.0 { h.polysolid_height } else { 4.0 });
         w.write_bit_double(h.loft_angle1);
         w.write_bit_double(h.loft_angle2);
         w.write_bit_double(h.loft_magnitude1);
@@ -904,14 +907,14 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
         w.write_bit_double(h.longitude);
         w.write_bit_double(h.north_direction);
         w.write_bit_long(h.timezone);
-        w.write_byte(0); // LIGHTGLYPHDISPLAY
-        w.write_byte(1); // TILEMODELIGHTSYNCH — valid range 0..1
-        w.write_byte(0); // DWFFRAME
-        w.write_byte(0); // DGNFRAME
+        w.write_byte(h.light_glyph_display.min(1));
+        w.write_byte(h.tile_model_light_synch.min(1));
+        w.write_byte(h.dwf_frame.clamp(0, 2) as u8);
+        w.write_byte(h.dgn_frame.clamp(0, 2) as u8);
 
-        w.write_bit(false); // unknown
+        w.write_bit(h.real_world_scale);
 
-        w.write_cm_color(&Color::from_index(h.intersection_color));
+        w.write_cm_color(&h.interference_color);
 
         w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // INTERFEREOBJVS
         w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // INTERFEREVPVS

@@ -4,7 +4,9 @@
 //! as reference images in a drawing.
 
 use crate::entities::{Entity, EntityCommon};
-use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vector2, Vector3};
+use crate::types::{
+    BoundingBox3D, Color, Handle, LineWeight, Matrix3, Transparency, Vector2, Vector3,
+};
 
 use bitflags::bitflags;
 
@@ -115,6 +117,8 @@ pub struct UnderlayDefinition {
 
     /// Reactors (entities referencing this definition).
     pub reactors: Vec<Handle>,
+
+    pub unloaded: bool,
 }
 
 impl UnderlayDefinition {
@@ -128,6 +132,7 @@ impl UnderlayDefinition {
             page_name: String::new(),
             name: String::new(),
             reactors: Vec::new(),
+            unloaded: false,
         }
     }
 
@@ -426,13 +431,22 @@ impl Underlay {
 
     /// Sets fade (0-80).
     pub fn set_fade(&mut self, value: u8) {
-        self.fade = value.min(80);
+        self.fade = value.min(100);
+    }
+
+    pub fn display_flags(&self) -> UnderlayDisplayFlags {
+        if self.clip_inverted {
+            self.flags | UnderlayDisplayFlags::CLIP_INSIDE
+        } else {
+            self.flags - UnderlayDisplayFlags::CLIP_INSIDE
+        }
     }
 
     /// Returns the clip boundary vertices in world coordinates.
     pub fn world_clip_boundary(&self) -> Vec<Vector3> {
         let cos_r = self.rotation.cos();
         let sin_r = self.rotation.sin();
+        let ocs = Matrix3::arbitrary_axis(self.normal);
 
         self.clip_boundary_vertices
             .iter()
@@ -441,7 +455,7 @@ impl Underlay {
                 let y = v.y * self.y_scale;
                 let rx = x * cos_r - y * sin_r;
                 let ry = x * sin_r + y * cos_r;
-                self.insertion_point + Vector3::new(rx, ry, 0.0)
+                self.insertion_point + ocs * Vector3::new(rx, ry, 0.0)
             })
             .collect()
     }
@@ -541,6 +555,10 @@ impl Entity for Underlay {
 
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_underlay(self, transform);
+    }
+
+    fn apply_mirror(&mut self, transform: &crate::types::Transform) {
+        super::mirror::mirror_underlay(self, transform);
     }
 }
 
@@ -789,8 +807,8 @@ mod tests {
         underlay.set_fade(50);
         assert_eq!(underlay.fade, 50);
 
-        underlay.set_fade(100); // Over max
-        assert_eq!(underlay.fade, 80);
+        underlay.set_fade(150); // Over max
+        assert_eq!(underlay.fade, 100);
     }
 
     #[test]

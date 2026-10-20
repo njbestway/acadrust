@@ -134,6 +134,7 @@ pub struct DwgObjectWriter<'a> {
     pub(super) linetype_handles: std::collections::HashMap<String, Handle>,
     /// Cached fallback for owners without a direct extension-dictionary handle.
     pub(super) xdic_owner_index: std::sync::Arc<std::collections::HashMap<Handle, Handle>>,
+    pub(super) block_users: std::sync::Arc<std::collections::HashMap<Handle, Vec<Handle>>>,
 }
 
 struct ParallelEntityBatch {
@@ -273,7 +274,43 @@ impl<'a> DwgObjectWriter<'a> {
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
             xdic_owner_index: std::sync::Arc::new(Self::build_xdic_owner_index(document)),
+            block_users: std::sync::Arc::new(Self::build_block_users(document)),
         })
+    }
+
+    fn build_block_users(document: &CadDocument) -> std::collections::HashMap<Handle, Vec<Handle>> {
+        let mut users: std::collections::HashMap<Handle, Vec<Handle>> = std::collections::HashMap::new();
+        for entity in document.entities() {
+            let record = match entity {
+                EntityType::Insert(insert) => document.block_records.get(&insert.block_name).map(|r| r.handle),
+                EntityType::Table(table) => table
+                    .block_record_handle
+                    .or_else(|| document.block_records.get(&table.block_name).map(|r| r.handle)),
+                _ => None,
+            };
+            if let Some(record) = record.filter(|h| !h.is_null()) {
+                users.entry(record).or_default().push(entity.common().handle);
+            }
+        }
+        for list in users.values_mut() {
+            list.sort();
+        }
+        users
+    }
+
+    fn block_insert_handles(&self, record: &BlockRecord) -> Vec<Handle> {
+        let mut out: Vec<Handle> = record
+            .insert_handles
+            .iter()
+            .copied()
+            .filter(|h| self.document.get_entity(*h).is_some())
+            .collect();
+        for h in self.block_users.get(&record.handle).into_iter().flatten() {
+            if !out.contains(h) {
+                out.push(*h);
+            }
+        }
+        out
     }
 
     /// Index the fallback ownership lookup used by `extension_dictionary_handle`.
@@ -750,16 +787,13 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_layer(&mut self, layer: &crate::tables::Layer) {
         let transparency_app = self.document.app_ids.get("AcCmTransparency");
-        let had_transparency_eed = transparency_app.is_some_and(|app| {
-            self.document
-                .eed_by_handle
-                .get(&layer.handle)
-                .is_some_and(|blocks| {
-                    blocks
-                        .iter()
-                        .any(|(app_handle, _)| *app_handle == app.handle.value())
+        let had_transparency_eed = self
+            .existing_xdata_values(layer.handle, "AcCmTransparency")
+            .is_some_and(|values| {
+                values.iter().any(|value| {
+                    matches!(value, crate::xdata::XDataValue::Integer32(_))
                 })
-        });
+            });
         let transparency_eed = transparency_app.and_then(|app| {
             (!layer.transparency.is_opaque() || had_transparency_eed).then(|| {
                 let mut bytes = vec![71];
@@ -776,7 +810,14 @@ impl<'a> DwgObjectWriter<'a> {
             .app_ids
             .get(crate::tables::layer::LAYER_DESCRIPTION_APP)
             .and_then(|app| {
-                (!layer.description.is_empty()).then(|| {
+                let had_description = self
+                    .existing_xdata_values(layer.handle, crate::tables::layer::LAYER_DESCRIPTION_APP)
+                    .is_some_and(|values| {
+                        values.iter().filter(|value| {
+                            matches!(value, crate::xdata::XDataValue::String(_))
+                        }).count() >= 2
+                    });
+                (!layer.description.is_empty() || had_description).then(|| {
                     let code_page = crate::io::dxf::code_page::dwg_code_page_index(
                         &self.document.header.code_page,
                     );
@@ -906,14 +947,28 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_text_style(&mut self, style: &crate::tables::TextStyle) {
-        let anno = self.annotative_eed_block(style.annotative);
+        let mut eed: Vec<(u64, Vec<u8>)> =
+            self.annotative_eed_block_for_handle(style.handle, style.annotative).into_iter().collect();
+        // The TrueType typeface goes in `ACAD` EED; the record has no field.
+        if !style.true_type_font.trim().is_empty() {
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                eed.push((
+                    app.handle.value(),
+                    crate::io::dwg::typeface_eed::encode(
+                        self.version.r2007_plus(),
+                        style.true_type_font.trim(),
+                        style.true_type_font_flags,
+                    ),
+                ));
+            }
+        }
         self.write_common_non_entity_data_eed(
             common::OBJ_STYLE,
             style.handle,
             self.document.text_styles.handle(),
             &[],
             &None,
-            anno.into_iter().collect(),
+            eed,
         );
 
         // Entry name
@@ -1028,7 +1083,8 @@ impl<'a> DwgObjectWriter<'a> {
             // Build DWG flags: 0x01=abs rot, 0x02=text, 0x04=shape
             // (per de-facto DWG convention; OpenDesign spec has these reversed)
             let flags = if let Some(ref cx) = c {
-                let mut f: i16 = 0;
+                let mut f: i16 = cx.source_flags as i16;
+                f &= !(0x01 | 0x02 | 0x04);
                 if cx.is_absolute_rotation() {
                     f |= 0x01;
                 }
@@ -1494,7 +1550,7 @@ impl<'a> DwgObjectWriter<'a> {
         let dimtfillclr_color = ds
             .dimtfillclr_true_color
             .unwrap_or_else(|| crate::types::Color::from_index(ds.dimtfillclr));
-        let anno = self.annotative_eed_block(ds.annotative);
+        let anno = self.annotative_eed_block_for_handle(ds.handle, ds.annotative);
         self.write_common_non_entity_data_eed(
             common::OBJ_DIMSTYLE,
             ds.handle,
@@ -1655,7 +1711,8 @@ impl<'a> DwgObjectWriter<'a> {
             // DIMFXL BD 49
             self.writer.write_bit_double(ds.dimfxl);
             // DIMJOGANG BD 50 — clamp to valid range [5°..90°]
-            self.writer.write_bit_double(ds.dimjogang.clamp(5.0_f64.to_radians(), std::f64::consts::FRAC_PI_2));
+            self.writer
+                .write_bit_double(ds.dimjogang.clamp(0.0873, 1.5708));
             // DIMTFILL BS 69
             self.writer.write_bit_short(ds.dimtfill);
             // DIMTFILLCLR CMC 70
@@ -1931,7 +1988,7 @@ impl<'a> DwgObjectWriter<'a> {
                             i += 1;
                         }
                         let run = &handles[start..i];
-                        let mut unique = ahash::AHashSet::new();
+                        let mut unique = foldhash::HashSet::default();
                         let safe_to_batch = run.len() >= 1_024
                             && run.iter().all(|handle| {
                                 !self.registered_handles.contains(&handle.value())
@@ -2029,6 +2086,7 @@ impl<'a> DwgObjectWriter<'a> {
             registered_handles: HashSet::with_capacity(handles.len()),
             raw_excluded_handles: self.raw_excluded_handles.clone(),
             xdic_owner_index: self.xdic_owner_index.clone(),
+            block_users: self.block_users.clone(),
             owner_overrides: std::collections::HashMap::new(),
             linetype_handles: std::collections::HashMap::new(),
         };
@@ -2073,12 +2131,29 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Write a BLOCK_HEADER (block record) object with explicit entity handles.
     fn write_block_header_with_handles(&mut self, record: &BlockRecord, entity_handles: &[Handle]) {
-        self.write_common_non_entity_data(
+        // Before R2007 the block record has no insertion-units field; the
+        // units travel in the ACAD `DesignCenter Data` EED (version 1).
+        let had_units = self
+            .existing_xdata_values(record.handle, "ACAD")
+            .is_some_and(|values| {
+                values.iter().any(|value| {
+                    matches!(value, crate::xdata::XDataValue::String(label) if label == "DesignCenter Data")
+                })
+            });
+        let extra = if self.version.r2007_plus() || (record.units == 0 && !had_units) {
+            Vec::new()
+        } else {
+            let mut units = crate::xdata::ExtendedDataRecord::new("ACAD");
+            units.values = crate::tables::block_record::design_center_units_values(record.units);
+            self.encode_xdata_record(&units).into_iter().collect()
+        };
+        self.write_common_non_entity_data_eed(
             common::OBJ_BLOCK_HEADER,
             record.handle,
             self.document.block_records.handle(),
             &[],
             &None,
+            extra,
         );
 
         // Entry name (DWG uses bare names without numeric suffixes)
@@ -2096,7 +2171,7 @@ impl<'a> DwgObjectWriter<'a> {
                 Some(EntityType::AttributeDefinition(_))
             )
         });
-        self.writer.write_bit(has_attributes);
+        self.writer.write_bit(record.flags.has_attributes || has_attributes);
         // Is xref
         self.writer.write_bit(record.flags.is_xref);
         // Is xref overlay
@@ -2136,8 +2211,10 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2000+: insert count bytes + block description + preview data
         if self.version.r2000_plus() {
-            // Insert count bytes (non-zero bytes followed by zero terminator)
-            for &b in &record.insert_count_bytes {
+            // Insert count bytes: one non-zero byte per insert handle written
+            // below, then a zero terminator.
+            for (i, _) in self.block_insert_handles(record).iter().enumerate() {
+                let b = record.insert_count_bytes.get(i).copied().filter(|b| *b != 0).unwrap_or(1);
                 self.writer.write_byte(b);
             }
             self.writer.write_byte(0);
@@ -2201,7 +2278,7 @@ impl<'a> DwgObjectWriter<'a> {
         // desyncs the handle stream for any block that is referenced by an
         // insert, making AutoCAD discard the block record (eWrongObjectType).
         if self.version.r2000_plus() {
-            for &ih in &record.insert_handles {
+            for ih in self.block_insert_handles(record) {
                 self.writer
                     .write_handle(DwgReferenceType::SoftPointer, ih.value());
             }

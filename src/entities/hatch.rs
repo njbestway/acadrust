@@ -357,13 +357,19 @@ impl HatchPattern {
 }
 
 /// Gradient color with value
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GradientColorEntry {
     /// Gradient value (position 0.0 - 1.0)
     pub value: f64,
     /// Color at this position
     pub color: Color,
+    /// Optional authored color name from a DWG CMC value.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_name: Option<String>,
+    /// Optional authored color-book name from a DWG CMC value.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub book_name: Option<String>,
 }
 
 /// Gradient color pattern
@@ -409,7 +415,12 @@ impl HatchGradientPattern {
 
     /// Add a color to the gradient
     pub fn add_color(&mut self, value: f64, color: Color) {
-        self.colors.push(GradientColorEntry { value, color });
+        self.colors.push(GradientColorEntry {
+            value,
+            color,
+            color_name: None,
+            book_name: None,
+        });
     }
 }
 
@@ -460,8 +471,7 @@ pub struct Hatch {
     pub mpolygon_hatch_color: Color,
     /// MPOLYGON-only hatch X direction.
     pub mpolygon_x_direction: Vector2,
-    /// MPOLYGON trailer count retained independently from per-path handles.
-    pub mpolygon_boundary_handle_count: i32,
+    pub mpolygon_invalid_loops: Vec<BoundaryPath>,
 }
 
 impl Hatch {
@@ -485,8 +495,8 @@ impl Hatch {
             pixel_size: 0.0,
             gradient_color: HatchGradientPattern::new(),
             mpolygon_hatch_color: Color::ByLayer,
-            mpolygon_x_direction: Vector2::new(1.0, 0.0),
-            mpolygon_boundary_handle_count: 0,
+            mpolygon_x_direction: Vector2::ZERO,
+            mpolygon_invalid_loops: Vec::new(),
         }
     }
 
@@ -701,5 +711,13 @@ impl Entity for Hatch {
 
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
         super::mirror::mirror_hatch(self, transform);
+    }
+
+    fn apply_mirror_with_options(
+        &mut self,
+        transform: &crate::types::Transform,
+        options: super::MirrorOptions,
+    ) {
+        super::mirror::mirror_hatch_with_options(self, transform, options);
     }
 }

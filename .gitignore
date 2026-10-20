@@ -25,6 +25,7 @@ output*/*
 *.dxf
 *.dxb
 *.dwg
+!/tests/fixtures/r12/cad-created/*.dxf
 *.dwl
 *.dwl2
 *.dmp
@@ -32,8 +33,17 @@ output*/*
 output_*.json
 
 
+
 # Documentation
 /docs/site/
+
+# Local CAD oracle material (kept outside the tracked tree).
+/src/docs/OpenDesign_Specification_for_.dwg_files.pdf
+/src/docs/explode_audit.md
+/tests/autocad/
+/tests/bricscad/
+/tests/acad/
+/tests/bcad/
 
 
 .qoder/

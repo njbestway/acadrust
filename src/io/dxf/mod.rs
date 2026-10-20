@@ -23,11 +23,13 @@ pub mod code_page;
 mod dxf_code;
 mod group_code_value;
 mod reader;
+mod spline_flags;
 mod writer;
 
 pub use dxf_code::DxfCode;
 pub use group_code_value::GroupCodeValueType;
 pub use reader::{DxfReader, DxfReaderConfiguration};
+pub(crate) use reader::{DxfStreamReader, DxfTextReader};
 pub use writer::{value_type_for_code, write_binary_dxf, write_dxf};
 pub use writer::{
     DxfBinaryWriter, DxfStreamWriter, DxfStreamWriterExt, DxfTextWriter, DxfWriter, SectionWriter,
@@ -52,5 +54,19 @@ pub(crate) fn join_color_book_name(
         (Some(book_name), None) => Some(format!("{book_name}$")),
         (None, Some(color_name)) => Some(color_name.to_string()),
         (None, None) => None,
+    }
+}
+
+pub(crate) fn object_has_own_dxf_xdata(object: &crate::objects::ObjectType) -> bool {
+    use crate::objects::ObjectType;
+    match object {
+        ObjectType::XRecord(_)
+        | ObjectType::TableStyle(_)
+        | ObjectType::UnderlayDefinition(_)
+        | ObjectType::Field(_) => true,
+        ObjectType::SortEntitiesTable(table) => table.raw_dxf_codes.is_some(),
+        // Unknown objects are written only from their raw groups.
+        ObjectType::Unknown { .. } => true,
+        _ => false,
     }
 }

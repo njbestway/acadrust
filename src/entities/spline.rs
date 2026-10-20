@@ -68,15 +68,24 @@ pub struct Spline {
     pub begin_tangent: Vector3,
     /// End tangent vector (DXF 13/23/33); zero when unset.
     pub end_tangent: Vector3,
-    /// Knot parameterization method (R2013+ DWG): 0=Chord, 1=SquareRoot,
-    /// 2=Uniform, 15=Custom. Zero for splines saved before R2013.
+    /// Knot parameterization method: 0=Chord, 1=SquareRoot, 2=Uniform,
+    /// 15=Custom. Read from R2013+ DWG and DXF group 70; zero when the
+    /// source format does not specify it.
     pub knot_parameterization: i32,
-    /// Show the control-vertex frame (R2013+ DWG flag).
+    /// Show the control-vertex frame (R2013+ DWG flag / DXF group 70 bit 512).
     pub cv_frame_visible: bool,
     /// Complete R2013+ spline flag word, including flags not otherwise
     /// represented by this API.
     pub dwg_flags1: i32,
-    /// Complete DXF spline flag word; geometry flags are refreshed when written.
+    /// DWG storage scenario: 1 = control points, 2 = fit points. `None` for
+    /// splines not read from DWG. Fit-point records do not state `periodic`;
+    /// before R2013 they do not state `closed` either, so the corresponding
+    /// `flags` values are defaults rather than values read from the file.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dwg_scenario: Option<i32>,
+    /// Complete DXF spline flag word. Geometry, knot parameterization, frame
+    /// visibility and creation-method bits are refreshed from typed fields
+    /// when written; unrelated bits are retained.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dxf_flags: i16,
 }
@@ -101,6 +110,7 @@ impl Spline {
             knot_parameterization: 0,
             cv_frame_visible: false,
             dwg_flags1: 0,
+            dwg_scenario: None,
             dxf_flags: 0,
         }
     }
@@ -260,6 +270,10 @@ impl Entity for Spline {
 
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_spline(self, transform);
+    }
+
+    fn apply_mirror(&mut self, transform: &crate::types::Transform) {
+        super::mirror::mirror_spline(self, transform);
     }
 }
 

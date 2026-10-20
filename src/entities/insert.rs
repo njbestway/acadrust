@@ -60,6 +60,12 @@ pub struct Insert {
 }
 
 impl Insert {
+    /// Hard upper bound for detached MINSERT expansion.  AutoCAD's command
+    /// refuses MINSERT references; the context-free helper keeps support for
+    /// ordinary arrays while refusing pathological work that would otherwise
+    /// materialize billions of transforms or entities.
+    const MAX_EXPLODE_ARRAY_INSTANCES: usize = 1_000_000;
+
     /// Create a new insert entity
     pub fn new(block_name: impl Into<String>, insert_point: Vector3) -> Self {
         Self {
@@ -211,25 +217,25 @@ impl Insert {
 
     /// Get all insertion points for array instances
     pub fn array_points(&self) -> Vec<Vector3> {
+        if self.instance_count() > Self::MAX_EXPLODE_ARRAY_INSTANCES {
+            return Vec::new();
+        }
         let mut points = Vec::with_capacity(self.array_capacity_hint());
 
         for row in 0..self.row_count {
             for col in 0..self.column_count {
-                let offset_x = col as f64 * self.column_spacing;
-                let offset_y = row as f64 * self.row_spacing;
-
-                // Apply rotation to the offset
-                let cos_r = self.rotation.cos();
-                let sin_r = self.rotation.sin();
-                let rotated_x = offset_x * cos_r - offset_y * sin_r;
-                let rotated_y = offset_x * sin_r + offset_y * cos_r;
-
-                let point = self.insert_point + Vector3::new(rotated_x, rotated_y, 0.0);
-                points.push(point);
+                points.push(self.array_point(row, col));
             }
         }
 
         points
+    }
+
+    fn array_point(&self, row: u16, column: u16) -> Vector3 {
+        let x = column as f64 * self.column_spacing;
+        let y = row as f64 * self.row_spacing;
+        let (sin, cos) = self.rotation.sin_cos();
+        self.insert_point + Vector3::new(x * cos - y * sin, x * sin + y * cos, 0.0)
     }
 
     /// Check if the insert has uniform scale
@@ -330,19 +336,42 @@ impl Insert {
     /// - `LineWeight::ByBlock` inherits the Insert's line weight.
     /// - Empty/ByLayer linetype with ByBlock semantic: not changed (already
     ///   resolved to ByLayer at the entity level).
+    /// - Transparency `ByBlock` inherits the Insert's transparency.
+    /// - Linetype `ByBlock` inherits the Insert's linetype (name + handle).
     fn resolve_properties(&self, common: &mut EntityCommon) {
         // Layer "0" → inherit insert's layer
         if common.layer == "0" {
             common.layer = self.common.layer.clone();
+            common.layer_handle = self.common.layer_handle;
         }
         // Color ByBlock → inherit insert's color
         if common.color == Color::ByBlock {
             common.color = self.common.color;
+            common.color_name = self.common.color_name.clone();
+            common.color_book_handle = self.common.color_book_handle;
         }
         // LineWeight ByBlock → inherit insert's line weight
         if common.line_weight == LineWeight::ByBlock {
             common.line_weight = self.common.line_weight;
         }
+        // Transparency ByBlock → inherit the insert's transparency
+        if common.transparency.is_by_block() {
+            common.transparency = self.common.transparency;
+        }
+        // Linetype ByBlock → inherit the insert's linetype. The name and
+        // handle move; the entity keeps its own linetype scale, which is a
+        // separate property of the resulting entity.
+        if common.linetype.eq_ignore_ascii_case("byblock") {
+            common.linetype = self.common.linetype.clone();
+            common.linetype_handle = self.common.linetype_handle;
+        }
+    }
+
+    /// Apply this INSERT's layer/color/linetype inheritance to a detached
+    /// member.  Document-level fallback blocks use this after baking nested
+    /// geometry so inheritance is resolved through every containing INSERT.
+    pub(crate) fn resolve_exploded_properties(&self, common: &mut EntityCommon) {
+        self.resolve_properties(common);
     }
 
     // ── Explode ─────────────────────────────────────────────────
@@ -354,13 +383,17 @@ impl Insert {
     /// are positioned in world space.
     ///
     /// `block_entities` should be the `entities` vec from the corresponding
-    /// [`BlockRecord`](crate::tables::BlockRecord).  Block/BlockEnd markers
-    /// and attribute definitions are skipped.
+    /// [`BlockRecord`](crate::tables::BlockRecord), relative to the block's
+    /// base point. Block/BlockEnd markers are skipped. Attribute definitions
+    /// are restored as transformed definitions; instance attribute values
+    /// are not included.
     ///
     /// **Property inheritance** (AutoCAD convention):
     /// - Entities on layer `"0"` → inherit the Insert's layer.
     /// - `Color::ByBlock` → inherit the Insert's color.
     /// - `LineWeight::ByBlock` → inherit the Insert's line weight.
+    /// - `Transparency::ByBlock` → inherits the Insert's transparency.
+    /// - Linetype `ByBlock` → inherits the Insert's linetype (name + handle).
     ///
     /// **MINSERT arrays**: When `column_count > 1` or `row_count > 1`,
     /// a full copy of every entity is produced at each array position.
@@ -387,8 +420,9 @@ impl Insert {
 
         for transform in &transforms {
             for entity in block_entities {
-                if let Some(exploded) = self.explode_single(entity, transform) {
-                    result.push(exploded);
+                for mut part in self.explode_single_many(entity, transform) {
+                    Self::detach_exploded_identity(&mut part);
+                    result.push(part);
                 }
             }
         }
@@ -440,10 +474,62 @@ impl Insert {
         result
     }
 
+    /// Clear source database identities from a detached clone.  Geometry and
+    /// visual properties remain intact, while ownership, reactors, raw DWG
+    /// provenance and embedded INSERT child IDs are regenerated by callers.
+    pub(crate) fn detach_exploded_identity(entity: &mut EntityType) {
+        let common = entity.common_mut();
+        common.handle = Handle::NULL;
+        common.owner_handle = Handle::NULL;
+        common.xdictionary_handle = None;
+        common.reactors.clear();
+        common.graphic_data = None;
+        common.raw_record = None;
+        if let EntityType::Insert(insert) = entity {
+            for attribute in &mut insert.attributes {
+                attribute.common.handle = Handle::NULL;
+                attribute.common.owner_handle = Handle::NULL;
+                attribute.common.xdictionary_handle = None;
+                attribute.common.reactors.clear();
+                attribute.common.graphic_data = None;
+                attribute.common.raw_record = None;
+            }
+            insert.view_rep_handle = None;
+            insert.seqend_handle = None;
+        }
+    }
+
+    /// Expand block members using one already-composed world transform.
+    ///
+    /// This is used by the document-aware EXPLODE path after it has resolved
+    /// the block base point and validated the reference.  It deliberately
+    /// bypasses MINSERT array generation; the caller has already applied
+    /// AutoCAD's refusal rules for array references.
+    pub(crate) fn explode_with_transform(
+        &self,
+        block_entities: &[EntityType],
+        transform: &Transform,
+        detach: bool,
+    ) -> Vec<EntityType> {
+        let mut result = Vec::new();
+        for entity in block_entities {
+            for mut part in self.explode_single_many(entity, transform) {
+                if detach {
+                    Self::detach_exploded_identity(&mut part);
+                }
+                result.push(part);
+            }
+        }
+        result
+    }
+
     /// Build a transform for each array cell (single transform when not MINSERT).
     fn array_transforms(&self) -> Vec<Transform> {
         if !self.is_minsert() {
             return vec![self.get_transform()];
+        }
+        if self.instance_count() > Self::MAX_EXPLODE_ARRAY_INSTANCES {
+            return Vec::new();
         }
 
         let ocs = Matrix4::from_matrix3(Matrix3::arbitrary_axis(self.normal));
@@ -453,13 +539,7 @@ impl Insert {
         let mut transforms = Vec::with_capacity(self.array_capacity_hint());
         for row in 0..self.row_count {
             for col in 0..self.column_count {
-                let offset_x = col as f64 * self.column_spacing;
-                let offset_y = row as f64 * self.row_spacing;
-                let cell_pt = Vector3::new(
-                    self.insert_point.x + offset_x,
-                    self.insert_point.y + offset_y,
-                    self.insert_point.z,
-                );
+                let cell_pt = self.array_point(row, col);
                 let translation = Matrix4::translation(cell_pt.x, cell_pt.y, cell_pt.z);
                 transforms.push(Transform::from_matrix(ocs * translation * rotation * scale));
             }
@@ -472,17 +552,11 @@ impl Insert {
     fn explode_single(&self, entity: &EntityType, transform: &Transform) -> Option<EntityType> {
         match entity {
             // Skip structural / meta entities
-            EntityType::Block(_) | EntityType::BlockEnd(_) | EntityType::AttributeDefinition(_) => {
-                None
-            }
+            EntityType::Block(_) | EntityType::BlockEnd(_) => None,
 
             // Arc handling — uniform XY keeps Arc, non-uniform → Ellipse
             EntityType::Arc(arc) => {
-                let sx = self.x_scale.abs();
-                let sy = self.y_scale.abs();
-                let is_uniform_xy = (sx - sy).abs() < 1e-10;
-
-                if is_uniform_xy {
+                if Self::plane_is_similarity(transform, arc.normal) {
                     Some(self.explode_arc_uniform(arc, transform))
                 } else {
                     Some(self.explode_arc_to_ellipse(arc, transform))
@@ -493,19 +567,27 @@ impl Insert {
             EntityType::Circle(circle) => {
                 // CIRCLE stores `center` in OCS; ELLIPSE is a WCS entity —
                 // convert on the way in (identity for the Z-up normal).
-                let ocs_to_wcs = Matrix3::arbitrary_axis(circle.normal);
-                let mut ellipse = Ellipse {
-                    common: circle.common.clone(),
-                    center: ocs_to_wcs * circle.center,
-                    major_axis: ocs_to_wcs * (Vector3::UNIT_X * circle.radius),
-                    minor_axis_ratio: 1.0,
-                    start_parameter: 0.0,
-                    end_parameter: std::f64::consts::TAU,
-                    normal: circle.normal,
-                };
-                Self::apply_full_ellipse_transform(&mut ellipse, transform);
-                self.resolve_properties(&mut ellipse.common);
-                Some(EntityType::Ellipse(ellipse))
+                if Self::plane_is_similarity(transform, circle.normal) {
+                    let mut transformed = circle.clone();
+                    super::transform::transform_circle(&mut transformed, transform);
+                    transformed.thickness *= transform.apply_rotation(circle.normal).length();
+                    self.resolve_properties(&mut transformed.common);
+                    Some(EntityType::Circle(transformed))
+                } else {
+                    let ocs_to_wcs = Matrix3::arbitrary_axis(circle.normal);
+                    let mut ellipse = Ellipse {
+                        common: circle.common.clone(),
+                        center: ocs_to_wcs * circle.center,
+                        major_axis: ocs_to_wcs * (Vector3::UNIT_X * circle.radius),
+                        minor_axis_ratio: 1.0,
+                        start_parameter: 0.0,
+                        end_parameter: std::f64::consts::TAU,
+                        normal: circle.normal,
+                    };
+                    super::transform::transform_ellipse(&mut ellipse, transform);
+                    self.resolve_properties(&mut ellipse.common);
+                    Some(EntityType::Ellipse(ellipse))
+                }
             }
 
             // Default path — clone + transform
@@ -516,6 +598,101 @@ impl Insert {
                 Some(cloned)
             }
         }
+    }
+
+    /// Expand bulged polylines before applying a non-uniform block transform.
+    /// A retained bulge would still describe a circular arc after stretching,
+    /// while AutoCAD emits an exact elliptical segment.
+    fn explode_single_many(&self, entity: &EntityType, transform: &Transform) -> Vec<EntityType> {
+        // Modeler entities are explodable when the block transform is a
+        // rigid transform or uniform scale.  Under those transforms their
+        // native region decomposition remains exact; non-uniform cases are
+        // handled by the document-aware anonymous *E fallback instead.
+        if matches!(entity, EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_))
+            && Self::linear_is_similarity(transform)
+        {
+            return entity
+                .explode()
+                .into_iter()
+                .map(|mut piece| {
+                    piece.as_entity_mut().apply_transform(transform);
+                    piece
+                })
+                .collect();
+        }
+        let normal = match entity {
+            EntityType::LwPolyline(polyline) => polyline.normal,
+            EntityType::Polyline2D(polyline) => polyline.normal,
+            _ => Vector3::UNIT_Z,
+        };
+        let has_bulge = match entity {
+            EntityType::LwPolyline(polyline) => polyline
+                .vertices
+                .iter()
+                .any(|vertex| vertex.bulge.abs() > 1e-10),
+            EntityType::Polyline2D(polyline) => polyline
+                .vertices
+                .iter()
+                .any(|vertex| vertex.bulge.abs() > 1e-10),
+            _ => false,
+        };
+        if has_bulge && !Self::plane_is_similarity(transform, normal) {
+            return entity
+                .explode()
+                .iter()
+                .filter_map(|piece| self.explode_single(piece, transform))
+                .collect();
+        }
+        self.explode_single(entity, transform).into_iter().collect()
+    }
+
+    /// Return true when a linear transform preserves circles in a plane.  The
+    /// two transformed OCS basis vectors must remain perpendicular and have
+    /// equal length; this also handles tilted source planes correctly.
+    fn plane_is_similarity(transform: &Transform, normal: Vector3) -> bool {
+        let basis = Matrix3::arbitrary_axis(normal);
+        let x = transform.apply_rotation(basis * Vector3::UNIT_X);
+        let y = transform.apply_rotation(basis * Vector3::UNIT_Y);
+        let lx = x.length();
+        let ly = y.length();
+        lx > SCALE_EPSILON
+            && ly > SCALE_EPSILON
+            && (lx - ly).abs() <= 1e-10 * lx.max(ly)
+            && x.dot(&y).abs() <= 1e-10 * lx * ly
+    }
+
+    fn linear_is_similarity(transform: &Transform) -> bool {
+        let x = transform.apply_rotation(Vector3::UNIT_X);
+        let y = transform.apply_rotation(Vector3::UNIT_Y);
+        let z = transform.apply_rotation(Vector3::UNIT_Z);
+        let vectors = [x, y, z];
+        let lengths = vectors.map(|vector| vector.length());
+        lengths.iter().all(|length| *length > SCALE_EPSILON)
+            && (lengths[0] - lengths[1]).abs() <= 1e-10 * lengths[0].max(lengths[1])
+            && (lengths[1] - lengths[2]).abs() <= 1e-10 * lengths[1].max(lengths[2])
+            && x.dot(&y).abs() <= 1e-10 * lengths[0] * lengths[1]
+            && x.dot(&z).abs() <= 1e-10 * lengths[0] * lengths[2]
+            && y.dot(&z).abs() <= 1e-10 * lengths[1] * lengths[2]
+    }
+
+    /// Whether a linear transform introduces shear relative to an INSERT's
+    /// orthogonal local axes.  INSERT can encode three signed scales and one
+    /// rotation, so non-orthogonal transformed basis vectors require an
+    /// anonymous fallback block in the document-aware EXPLODE path.
+    pub(crate) fn has_unrepresentable_shear(transform: &Transform) -> bool {
+        let x = transform.apply_rotation(Vector3::UNIT_X);
+        let y = transform.apply_rotation(Vector3::UNIT_Y);
+        let z = transform.apply_rotation(Vector3::UNIT_Z);
+        let vectors = [x, y, z];
+        for i in 0..vectors.len() {
+            for j in (i + 1)..vectors.len() {
+                let scale = vectors[i].length() * vectors[j].length();
+                if scale > SCALE_EPSILON && vectors[i].dot(&vectors[j]).abs() > 1e-10 * scale {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Explode an arc with uniform XY scale — keeps it as an Arc.
@@ -577,6 +754,7 @@ impl Insert {
             new_end_angle,
         );
         new_arc.normal = new_normal;
+        new_arc.thickness = arc.thickness * transform.apply_rotation(arc.normal).length();
         new_arc.common = arc.common.clone();
         self.resolve_properties(&mut new_arc.common);
         EntityType::Arc(new_arc)
@@ -610,90 +788,24 @@ impl Insert {
             end_parameter: arc.end_angle,
             normal: arc.normal,
         };
-        Self::apply_full_ellipse_transform(&mut ellipse, transform);
+        super::transform::transform_ellipse(&mut ellipse, transform);
         self.resolve_properties(&mut ellipse.common);
         EntityType::Ellipse(ellipse)
     }
 
-    /// Apply transform to an Ellipse with correct minor_axis_ratio recalculation.
-    ///
-    /// Unlike the default Ellipse::apply_transform (which leaves minor_axis_ratio
-    /// unchanged), this properly computes the new ratio by transforming both
-    /// major and minor axis directions independently. The new normal is derived
-    /// from `new_major × new_minor`, which automatically encodes any handedness
-    /// flip introduced by a reflective transform (det < 0), preserving the
-    /// original sweep direction.
-    ///
-    /// ELLIPSE is one of the few WCS entities in DXF: `center` (code 10) and
-    /// `major_axis` (code 11) are world coordinates, NOT OCS — so the transform
-    /// applies to the stored values directly and the results are stored back
-    /// as-is. (An earlier revision round-tripped them through the
-    /// arbitrary-axis OCS, which made files with a non-Z-up result — e.g. a
-    /// mirrored explode — read wrong in other CAD applications.)
-    fn apply_full_ellipse_transform(ellipse: &mut Ellipse, transform: &Transform) {
-        let center_wcs = ellipse.center;
-        let major_wcs = ellipse.major_axis;
-
-        // Original minor axis vector (WCS, perpendicular to major in the ellipse plane).
-        let original_minor_dir = ellipse.normal.cross(&major_wcs).normalize();
-        let original_minor_len = major_wcs.length() * ellipse.minor_axis_ratio;
-        let original_minor = original_minor_dir * original_minor_len;
-
-        // Transform center in WCS
-        let new_center_wcs = transform.apply(center_wcs);
-
-        // Transform both axes through the 3×3 portion (direction + scale, no translation)
-        let new_major_wcs = transform.apply_rotation(major_wcs);
-        let new_minor_wcs = transform.apply_rotation(original_minor);
-
-        let new_major_len = new_major_wcs.length();
-        let new_minor_len = new_minor_wcs.length();
-
-        // DXF convention: major_axis must be the longer axis.
-        // If the minor became longer, swap them.
-        let (final_major_wcs, final_minor_wcs, swapped) = if new_minor_len > new_major_len + 1e-12 {
-            (new_minor_wcs, new_major_wcs, true)
-        } else {
-            (new_major_wcs, new_minor_wcs, false)
-        };
-
-        // Derive normal from major × minor so handedness follows the geometry:
-        // a reflective transform automatically produces a flipped normal, and the
-        // CCW parameter sweep (around the new normal) traces the mirrored shape.
-        let cross = final_major_wcs.cross(&final_minor_wcs);
-        let cross_len = cross.length();
-        let new_normal = if cross_len > 1e-12 {
-            cross * (1.0 / cross_len)
-        } else {
-            Self::transform_normal(transform, ellipse.normal)
-        };
-
-        ellipse.center = new_center_wcs;
-        ellipse.major_axis = final_major_wcs;
-        ellipse.minor_axis_ratio = if final_major_wcs.length() > 1e-12 {
-            final_minor_wcs.length() / final_major_wcs.length()
-        } else {
-            1.0
-        };
-        ellipse.normal = new_normal;
-
-        if swapped {
-            // When axes swap, parameters need to shift by π/2
-            ellipse.start_parameter -= std::f64::consts::FRAC_PI_2;
-            ellipse.end_parameter -= std::f64::consts::FRAC_PI_2;
-        }
-    }
-
     /// Convenience wrapper that looks up the block in a
     /// [`CadDocument`](crate::document::CadDocument) by `block_name` and
-    /// calls [`explode`](Self::explode).
+    /// calls [`explode`](Self::explode) with contents relative to its base point.
     ///
     /// Nested INSERT entities (block references within the block) are
     /// recursively expanded so that all geometry is flattened into the
     /// returned list.  Circular references are detected and broken to
     /// prevent infinite recursion.
     ///
-    /// Returns an empty `Vec` when the block record is not found.
+    /// AutoCAD's EXPLODE command refuses array inserts and external
+    /// references.  The context-aware document API applies the same rules.
+    ///
+    /// Returns an empty `Vec` when the block record is not found or refuses explosion.
     pub fn explode_from_document(
         &self,
         document: &crate::document::CadDocument,
@@ -749,6 +861,11 @@ impl Insert {
             return Vec::new();
         }
 
+        // AutoCAD refuses array inserts
+        if self.is_minsert() {
+            return Vec::new();
+        }
+
         // Build a transform-aware cache key: same block with different
         // transforms must produce different cache entries.
         let cache_key = format!(
@@ -770,20 +887,35 @@ impl Insert {
         // Direct expansion: explode() applies this INSERT's transform
         // to the block's entities.
         let result_owned: Vec<EntityType> = match document.block_records.get(&self.block_name) {
-            Some(br) => {
+            Some(br)
+                if br.explodable
+                    && !br.flags.is_xref
+                    && !br.flags.is_xref_overlay
+                    && !br.flags.is_external
+                    && br.xref_path.is_empty() =>
+            {
+                let base = document
+                    .get_entity(br.block_entity_handle)
+                    .and_then(|entity| match entity {
+                        EntityType::Block(block) => Some(block.base_point),
+                        _ => None,
+                    })
+                    .unwrap_or(br.base_point);
+                let to_base = Transform::from_translation(base * -1.0);
                 let entities: Vec<EntityType> = br
                     .entity_handles
                     .iter()
                     .filter_map(|h| {
-                        document
-                            .entity_index
-                            .get(h)
-                            .map(|&idx| document.entities[idx].as_ref().clone())
+                        document.entity_index.get(h).map(|&idx| {
+                            let mut entity = document.entities[idx].as_ref().clone();
+                            entity.as_entity_mut().apply_transform(&to_base);
+                            entity
+                        })
                     })
                     .collect();
                 self.explode(&entities)
             }
-            None => Vec::new(),
+            _ => Vec::new(),
         };
 
         // Wrap in Arc (cheap: heap alloc + move, ~50ns per entity).
@@ -939,6 +1071,14 @@ impl Entity for Insert {
     fn apply_transform(&mut self, transform: &Transform) {
         super::transform::transform_insert(self, transform);
     }
+
+    fn apply_mirror(&mut self, transform: &Transform) {
+        super::mirror::mirror_insert(self, transform);
+    }
+
+    fn apply_mirror_with_options(&mut self, transform: &Transform, options: super::MirrorOptions) {
+        super::mirror::mirror_insert_with_options(self, transform, options);
+    }
 }
 
 #[cfg(test)]
@@ -954,6 +1094,8 @@ mod tests {
         insert.column_count = u16::MAX;
         assert_eq!(insert.instance_count(), 65535 * 65535);
         assert!(insert.array_capacity_hint() <= 4096);
+        assert!(insert.array_points().is_empty());
+        assert!(insert.explode(&[EntityType::Line(Line::new())]).is_empty());
     }
 
     /// Helper – approximate equality for f64
@@ -976,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn explode_skips_block_markers_and_attdefs() {
+    fn explode_skips_block_markers_and_restores_attdefs() {
         let block_entities = vec![
             EntityType::Block(Block::new("TestBlock", Vector3::ZERO)),
             EntityType::Line(Line::from_points(
@@ -991,12 +1133,126 @@ mod tests {
             EntityType::BlockEnd(BlockEnd::new()),
         ];
 
-        let insert = Insert::new("TestBlock", Vector3::ZERO);
+        let mut insert = Insert::new("TestBlock", Vector3::ZERO);
+        insert
+            .attributes
+            .push(crate::entities::AttributeEntity::new(
+                "TAG".into(),
+                "instance value".into(),
+            ));
         let result = insert.explode(&block_entities);
 
-        // Only the Line should survive
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 2);
         assert!(matches!(result[0], EntityType::Line(_)));
+        let EntityType::AttributeDefinition(definition) = &result[1] else {
+            panic!("expected the attribute definition");
+        };
+        assert_eq!(definition.default_value, "default");
+        assert_eq!(insert.attributes[0].get_value(), "instance value");
+    }
+
+    #[test]
+    fn explode_minsert_transforms_attdefs_at_every_cell() {
+        let mut definition =
+            AttributeDefinition::new("TAG".into(), "Prompt".into(), "Default".into());
+        definition.insertion_point = Vector3::new(2.0, 3.0, 0.0);
+        definition.alignment_point = Vector3::new(4.0, 3.0, 0.0);
+        definition.height = 1.5;
+        definition.common.color = Color::ByBlock;
+        definition.common.line_weight = LineWeight::ByBlock;
+        definition.flags.constant = true;
+        let input = vec![EntityType::AttributeDefinition(definition.clone())];
+        let mut insert = Insert::new("B", Vector3::new(100.0, 100.0, 0.0))
+            .with_uniform_scale(2.0)
+            .with_rotation(FRAC_PI_2)
+            .with_array(2, 2, 10.0, 20.0);
+        insert.common.layer = "Labels".into();
+        insert.common.color = Color::from_index(3);
+        insert.common.line_weight = LineWeight::from_value(50);
+
+        let pieces = insert.explode(&input);
+        assert_eq!(pieces.len(), 4);
+        let expected = [(94.0, 104.0), (94.0, 114.0), (74.0, 104.0), (74.0, 114.0)];
+        for (piece, (x, y)) in pieces.iter().zip(expected) {
+            let EntityType::AttributeDefinition(actual) = piece else {
+                panic!("expected an attribute definition in every array cell");
+            };
+            assert!(approx_vec(actual.insertion_point, Vector3::new(x, y, 0.0)));
+            assert!(approx_vec(
+                actual.alignment_point,
+                Vector3::new(x, y + 4.0, 0.0)
+            ));
+            assert!(approx(actual.height, 3.0));
+            assert!(approx(actual.rotation, FRAC_PI_2));
+            assert_eq!(actual.common.layer, "Labels");
+            assert_eq!(actual.common.color, insert.common.color);
+            assert_eq!(actual.common.line_weight, insert.common.line_weight);
+            assert!(actual.flags.constant);
+            assert_eq!(actual.tag, "TAG");
+            assert_eq!(actual.prompt, "Prompt");
+            assert_eq!(actual.default_value, "Default");
+        }
+        let EntityType::AttributeDefinition(unchanged) = &input[0] else {
+            unreachable!()
+        };
+        assert_eq!(unchanged.insertion_point, definition.insertion_point);
+        assert_eq!(unchanged.height, definition.height);
+        assert_eq!(unchanged.common.layer, definition.common.layer);
+    }
+
+    #[test]
+    fn explode_from_document_uses_block_base_and_explodable_flag() {
+        let mut document = crate::CadDocument::new();
+        let mut record = crate::tables::BlockRecord::new("B");
+        record.handle = document.allocate_handle();
+        record.base_point = Vector3::new(40.0, 50.0, 0.0);
+        let owner = record.handle;
+        document.block_records.add(record).unwrap();
+        let mut block = Block::new("B", Vector3::new(10.0, 5.0, 0.0));
+        block.common.owner_handle = owner;
+        let marker = document.add_entity(EntityType::Block(block)).unwrap();
+        document
+            .block_records
+            .get_mut("B")
+            .unwrap()
+            .block_entity_handle = marker;
+        let mut definition =
+            AttributeDefinition::new("TAG".into(), "Prompt".into(), "Default".into());
+        definition.common.owner_handle = owner;
+        definition.insertion_point = Vector3::new(12.0, 8.0, 0.0);
+        document
+            .add_entity(EntityType::AttributeDefinition(definition))
+            .unwrap();
+        let insert = Insert::new("b", Vector3::new(100.0, 100.0, 0.0))
+            .with_uniform_scale(2.0)
+            .with_rotation(FRAC_PI_2);
+        let pieces = insert.explode_from_document(&document);
+        assert_eq!(pieces.len(), 1);
+        let EntityType::AttributeDefinition(actual) = &*pieces[0] else {
+            panic!("expected an attribute definition");
+        };
+        assert!(approx_vec(
+            actual.insertion_point,
+            Vector3::new(94.0, 104.0, 0.0)
+        ));
+        document
+            .block_records
+            .get_mut("B")
+            .unwrap()
+            .block_entity_handle = Handle::NULL;
+        let fallback = insert.explode_from_document(&document);
+        let EntityType::AttributeDefinition(actual) = &*fallback[0] else {
+            panic!("expected an attribute definition using the record base");
+        };
+        assert!(approx_vec(
+            actual.insertion_point,
+            Vector3::new(184.0, 44.0, 0.0)
+        ));
+        document.block_records.get_mut("B").unwrap().explodable = false;
+        assert!(insert.explode_from_document(&document).is_empty());
+        assert!(Insert::new("missing", Vector3::ZERO)
+            .explode_from_document(&document)
+            .is_empty());
     }
 
     // ── identity insert ─────────────────────────────────────────
@@ -1091,7 +1347,7 @@ mod tests {
     // ── Circle → Ellipse conversion ─────────────────────────────
 
     #[test]
-    fn explode_circle_becomes_ellipse() {
+    fn explode_circle_uniform_preserves_circle() {
         let circle = Circle::from_center_radius(Vector3::ZERO, 5.0);
         let block_entities = vec![EntityType::Circle(circle)];
 
@@ -1099,13 +1355,12 @@ mod tests {
         let result = insert.explode(&block_entities);
 
         assert_eq!(result.len(), 1);
-        assert!(matches!(result[0], EntityType::Ellipse(_)));
+        assert!(matches!(result[0], EntityType::Circle(_)));
 
-        if let EntityType::Ellipse(e) = &result[0] {
-            assert!(approx(e.start_parameter, 0.0));
-            assert!(approx(e.end_parameter, TAU));
+        if let EntityType::Circle(e) = &result[0] {
+            assert!(approx(e.radius, 5.0));
         } else {
-            panic!("expected Ellipse");
+            panic!("expected Circle");
         }
     }
 
@@ -1243,7 +1498,7 @@ mod tests {
 
         assert_eq!(result.len(), 3);
         assert!(matches!(result[0], EntityType::Line(_)));
-        assert!(matches!(result[1], EntityType::Ellipse(_))); // circle → ellipse
+        assert!(matches!(result[1], EntityType::Circle(_))); // uniform circle is preserved
         assert!(matches!(result[2], EntityType::Arc(_))); // uniform scale → stays Arc
     }
 
@@ -1318,6 +1573,87 @@ mod tests {
         assert_eq!(result[0].common().color, Color::from_index(3));
     }
 
+    #[test]
+    fn explode_byblock_transparency_inherits_insert_transparency() {
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.transparency = Transparency::ByBlock;
+        let block_entities = vec![EntityType::Line(line)];
+
+        let mut insert = Insert::new("B", Vector3::ZERO);
+        insert.common.transparency = Transparency::new(96);
+        let result = insert.explode(&block_entities);
+
+        assert_eq!(result[0].common().transparency, Transparency::new(96));
+    }
+
+    #[test]
+    fn explode_byblock_linetype_inherits_insert_linetype() {
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.linetype = "ByBlock".to_string();
+        let block_entities = vec![EntityType::Line(line)];
+
+        let mut insert = Insert::new("B", Vector3::ZERO);
+        insert.common.linetype = "DASHED".to_string();
+        let result = insert.explode(&block_entities);
+
+        assert_eq!(result[0].common().linetype, "DASHED");
+    }
+
+    #[test]
+    fn explode_byblock_linetype_matches_name_case_insensitively() {
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.linetype = "byblock".to_string();
+        let block_entities = vec![EntityType::Line(line)];
+
+        let mut insert = Insert::new("B", Vector3::ZERO);
+        insert.common.linetype = "DASHED".to_string();
+        let result = insert.explode(&block_entities);
+
+        assert_eq!(result[0].common().linetype, "DASHED");
+    }
+
+    #[test]
+    fn explode_byblock_linetype_keeps_the_entities_own_scale() {
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.linetype = "ByBlock".to_string();
+        line.common.linetype_scale = 2.0;
+        let block_entities = vec![EntityType::Line(line)];
+
+        let mut insert = Insert::new("B", Vector3::ZERO);
+        insert.common.linetype = "DASHED".to_string();
+        insert.common.linetype_scale = 0.5;
+        let result = insert.explode(&block_entities);
+
+        assert_eq!(result[0].common().linetype, "DASHED");
+        assert_eq!(result[0].common().linetype_scale, 2.0);
+    }
+
+    #[test]
+    fn explode_non_byblock_transparency_preserved() {
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.transparency = Transparency::new(25);
+        let block_entities = vec![EntityType::Line(line)];
+
+        let mut insert = Insert::new("B", Vector3::ZERO);
+        insert.common.transparency = Transparency::new(96);
+        let result = insert.explode(&block_entities);
+
+        assert_eq!(result[0].common().transparency, Transparency::new(25));
+    }
+
+    #[test]
+    fn explode_non_byblock_linetype_preserved() {
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.linetype = "CONTINUOUS".to_string();
+        let block_entities = vec![EntityType::Line(line)];
+
+        let mut insert = Insert::new("B", Vector3::ZERO);
+        insert.common.linetype = "DASHED".to_string();
+        let result = insert.explode(&block_entities);
+
+        assert_eq!(result[0].common().linetype, "CONTINUOUS");
+    }
+
     // ── MINSERT array ───────────────────────────────────────────
 
     #[test]
@@ -1355,6 +1691,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn explode_minsert_positions_follow_rotated_spacing_without_scaling_it() {
+        let input = vec![EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::ZERO,
+        ))];
+        let insert = Insert::new("B", Vector3::new(100.0, 100.0, 0.0))
+            .with_rotation(FRAC_PI_2)
+            .with_uniform_scale(3.0)
+            .with_array(2, 2, 10.0, 20.0);
+        let pieces = insert.explode(&input);
+        assert_eq!(pieces.len(), 4);
+        for (piece, (x, y)) in
+            pieces
+                .iter()
+                .zip([(100.0, 100.0), (100.0, 110.0), (80.0, 100.0), (80.0, 110.0)])
+        {
+            let EntityType::Line(line) = piece else {
+                panic!("expected LINE");
+            };
+            assert!(approx_vec(line.start, Vector3::new(x, y, 0.0)));
+        }
+    }
+
     // ── Arc + Circle property inheritance ───────────────────────
 
     #[test]
@@ -1380,10 +1740,10 @@ mod tests {
         insert.common.color = Color::from_index(5); // Blue
         let result = insert.explode(&block_entities);
 
-        if let EntityType::Ellipse(e) = &result[0] {
+        if let EntityType::Circle(e) = &result[0] {
             assert_eq!(e.common.color, Color::from_index(5));
         } else {
-            panic!("expected Ellipse");
+            panic!("expected Circle");
         }
     }
 

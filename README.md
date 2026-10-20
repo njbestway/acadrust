@@ -1,5 +1,6 @@
 # acadrust
 
+[![CI](https://github.com/hakanaktt/acadrust/actions/workflows/ci.yml/badge.svg)](https://github.com/hakanaktt/acadrust/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/acadrust.svg)](https://crates.io/crates/acadrust)
 [![Documentation](https://docs.rs/acadrust/badge.svg)](https://docs.rs/acadrust)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
@@ -7,14 +8,13 @@
 **A pure Rust crate for reading, writing, and inspecting CAD files.**
 
 acadrust handles ASCII and binary DXF plus native binary DWG without requiring
-an installed CAD application. File support spans DXF R12 through R2018+ and DWG
-R13 through R2018+.
+an installed CAD application. File support spans DXF and DWG R12 through R2018+.
 
 ## Quick Start
 
 ```toml
 [dependencies]
-acadrust = "0.5.5"
+acadrust = "0.6.5"
 ```
 
 ```rust
@@ -43,13 +43,13 @@ Enable optional features as needed:
 
 ```toml
 [dependencies]
-acadrust = { version = "0.5.5", features = ["serde", "import"] }
+acadrust = { version = "0.6.5", features = ["serde", "import"] }
 ```
 
 ## Features
 
 - **DXF I/O** — ASCII and binary formats, R12 through R2018+
-- **DWG I/O** — Native binary formats, R13 through R2018+
+- **DWG I/O** — Native binary formats, R12 through R2018+
 - **Broad entity coverage** — 48 top-level `EntityType` variants covering 2D
   geometry, annotations, dimensions, meshes, underlays, viewports, 3D solids,
   regions, bodies, and native surfaces
@@ -69,7 +69,7 @@ acadrust = { version = "0.5.5", features = ["serde", "import"] }
 
 | File code | Release era | DXF | DWG |
 |-----------|-----------------|-----|-----|
-| AC1009 | R12 | R/W | — |
+| AC1009 | R11/R12 | R/W | R/W |
 | AC1012 | R13 | R/W | R/W |
 | AC1014 | R14 | R/W | R/W |
 | AC1015 | 2000 | R/W | R/W |
@@ -80,6 +80,10 @@ acadrust = { version = "0.5.5", features = ["serde", "import"] }
 | AC1032 | 2018+ | R/W | R/W |
 
 `R/W` means read and write support. Entity availability varies by file version.
+AC1009 is the shared native DWG format used by AutoCAD Release 11 and Release
+12. See the [R11/R12 support status](src/docs/ac1009_support.md) for native
+fixture coverage and known format limits. DXF export of R11/R12 documents is
+promoted to R13 or later.
 
 ## Examples
 
@@ -218,10 +222,21 @@ cargo test --all-features
 cargo check --all-targets --all-features
 ```
 
+GitHub Actions runs these checks with stable Rust on Linux, Windows, and macOS
+for pull requests and pushes to `main`. It also checks default and all-feature
+library builds for `wasm32-unknown-unknown`.
+
+Tests that need drawings which are not in the repository are `#[ignore]`d,
+with the missing file as the reason, so `cargo test` reports them as ignored.
+If you have a file, run its tests with `--ignored`, for example
+`cargo test --test table_dwg_read -- --ignored`; a test whose file is missing
+then fails and names it.
+
 ---
 
 ## Used By
 - [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) An open-source (GPLv3) CAD application that uses acadrust as its core native DWG/DXF engine for read/write operations and 3D modeling.
+- [CADCraft](https://github.com/storytold/cadcraft) An open-source, AutoCAD-style drafting application written in Rust that uses acadrust for DWG read/write operations.
 
 ## Support & Sponsorship
 

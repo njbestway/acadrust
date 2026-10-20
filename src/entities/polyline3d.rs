@@ -103,6 +103,22 @@ impl SmoothSurfaceType {
     pub fn to_value(&self) -> i16 {
         *self as i16
     }
+
+    pub fn from_dwg_code(code: u8) -> Self {
+        match code {
+            1 => SmoothSurfaceType::QuadraticBSpline,
+            2 => SmoothSurfaceType::CubicBSpline,
+            _ => SmoothSurfaceType::None,
+        }
+    }
+
+    pub fn to_dwg_code(&self) -> u8 {
+        match self {
+            SmoothSurfaceType::QuadraticBSpline => 1,
+            SmoothSurfaceType::CubicBSpline => 2,
+            _ => 0,
+        }
+    }
 }
 
 /// 3D Vertex for Polyline3D

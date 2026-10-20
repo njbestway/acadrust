@@ -112,10 +112,10 @@ fn build_rich_document(version: DxfVersion) -> (CadDocument, usize) {
     .unwrap();
     count += 1;
 
-    doc.add_entity(EntityType::MText(MText::with_value(
+    doc.add_entity(EntityType::MText(Box::new(MText::with_value(
         "Multi\\Pline\\PText",
         Vector3::new(0.0, 0.0, 0.0),
-    )))
+    ))))
     .unwrap();
     count += 1;
 
@@ -166,9 +166,9 @@ fn build_rich_document(version: DxfVersion) -> (CadDocument, usize) {
     .unwrap();
     count += 1;
 
-    doc.add_entity(EntityType::Dimension(Dimension::Linear(
+    doc.add_entity(EntityType::Dimension(Box::new(Dimension::Linear(
         DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(100.0, 0.0, 0.0)),
-    )))
+    ))))
     .unwrap();
     count += 1;
 
@@ -188,7 +188,7 @@ fn build_rich_document(version: DxfVersion) -> (CadDocument, usize) {
     count += 1;
 
     // ── Viewport ───────────────────────────────────────────────────
-    doc.add_entity(EntityType::Viewport(Viewport::new()))
+    doc.add_entity(EntityType::Viewport(Box::new(Viewport::new())))
         .unwrap();
     count += 1;
 
@@ -214,7 +214,7 @@ fn build_rich_document(version: DxfVersion) -> (CadDocument, usize) {
             true,
         )));
         hatch.add_path(path);
-        doc.add_entity(EntityType::Hatch(hatch)).unwrap();
+        doc.add_entity(EntityType::Hatch(Box::new(hatch))).unwrap();
         count += 1;
     }
 
@@ -241,11 +241,11 @@ fn build_rich_document(version: DxfVersion) -> (CadDocument, usize) {
     }
 
     // ── MultiLeader ────────────────────────────────────────────────
-    doc.add_entity(EntityType::MultiLeader(MultiLeader::with_text(
+    doc.add_entity(EntityType::MultiLeader(Box::new(MultiLeader::with_text(
         "Label",
         Vector3::new(20.0, 20.0, 0.0),
         vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 10.0, 0.0)],
-    )))
+    ))))
     .unwrap();
     count += 1;
 
@@ -679,6 +679,12 @@ fn normalize_entity_for_comparison(entity: &mut EntityType) {
         EntityType::MText(m) => {
             m.dwg_x_direction = None;
         }
+        EntityType::Spline(s) => {
+            s.dwg_scenario = None;
+        }
+        EntityType::Helix(h) => {
+            h.spline.dwg_scenario = None;
+        }
         // MultiLeader: many handle fields at multiple levels
         EntityType::MultiLeader(mld) => {
             mld.style_handle = None;
@@ -919,7 +925,9 @@ fn dxf_acis_preserves_tokens_and_splits_at_utf8_boundaries() {
     doc.add_entity(EntityType::Solid3D(solid)).unwrap();
 
     let output = String::from_utf8(DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
-    let expected = format!("  1\r\n{first_chunk}\r\n  3\r\n{remainder}\r\n");
+    // The long line wraps at its first space; the 2050-byte head is then
+    // split before the two-byte `é`.
+    let expected = format!("  1\r\n{first_chunk}\r\n  3\r\né\r\n  1\r\n compact_bool F\r\n");
     assert!(output.contains(&expected));
 }
 
@@ -1290,10 +1298,10 @@ dxf_entity_roundtrip!(
 );
 dxf_entity_roundtrip!(
     dxf_rt_mtext,
-    EntityType::MText(MText::with_value(
+    EntityType::MText(Box::new(MText::with_value(
         "Multi\\Pline test",
         Vector3::new(0.0, 0.0, 0.0)
-    ))
+    )))
 );
 dxf_entity_roundtrip!(
     dxf_rt_lwpolyline,
@@ -1324,10 +1332,10 @@ dxf_entity_roundtrip!(
 );
 dxf_entity_roundtrip!(
     dxf_rt_dimension,
-    EntityType::Dimension(Dimension::Linear(DimensionLinear::new(
+    EntityType::Dimension(Box::new(Dimension::Linear(DimensionLinear::new(
         Vector3::new(0.0, 0.0, 0.0),
         Vector3::new(100.0, 0.0, 0.0)
-    )))
+    ))))
 );
 dxf_entity_roundtrip!(
     dxf_rt_tolerance,
@@ -1336,7 +1344,53 @@ dxf_entity_roundtrip!(
         "{\\Fgdt;p}%%v0.5"
     ))
 );
-dxf_entity_roundtrip!(dxf_rt_viewport, EntityType::Viewport(Viewport::new()));
+#[test]
+fn dxf_rt_viewport() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let mut viewport = Viewport::new();
+    viewport.id = 2;
+    doc.add_entity_to_layout(EntityType::Viewport(Box::new(viewport)), "Layout1")
+        .unwrap();
+    let restored = dxf_roundtrip(doc.clone());
+    assert_eq!(restored.entity_count(), doc.entity_count());
+    let report = compare_documents(&doc, &restored);
+    assert!(
+        report.is_empty(),
+        "DXF viewport roundtrip failed:\n{}",
+        report.summary()
+    );
+}
+
+/// A layout saved with a model viewport entered links that viewport as its
+/// last active one; the overall viewport must still read back as ID 1.
+#[test]
+fn dwg_overall_viewport_is_not_the_last_active_one() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1032);
+    let mut sheet = Viewport::new();
+    sheet.width = 420.0;
+    sheet.height = 297.0;
+    let sheet = doc
+        .add_entity_to_layout(EntityType::Viewport(Box::new(sheet)), "Layout1")
+        .unwrap();
+    let model = doc
+        .add_entity_to_layout(EntityType::Viewport(Box::new(Viewport::new())), "Layout1")
+        .unwrap();
+    for object in doc.objects.values_mut() {
+        if let acadrust::objects::ObjectType::Layout(layout) = object {
+            if layout.name == "Layout1" {
+                layout.viewports = vec![sheet, model];
+                layout.viewport = model;
+            }
+        }
+    }
+    let restored = dwg_roundtrip(&doc);
+    let id = |handle| match restored.get_entity(handle) {
+        Some(EntityType::Viewport(viewport)) => viewport.id,
+        other => panic!("viewport expected, got {other:?}"),
+    };
+    assert_eq!(id(sheet), 1);
+    assert_eq!(id(model), 2);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  DWG ROUNDTRIP TESTS
@@ -1616,10 +1670,10 @@ dwg_entity_roundtrip!(
 );
 dwg_entity_roundtrip!(
     dwg_rt_mtext,
-    EntityType::MText(MText::with_value(
+    EntityType::MText(Box::new(MText::with_value(
         "Multi\\Pline test",
         Vector3::new(0.0, 0.0, 0.0)
-    ))
+    )))
 );
 dwg_entity_roundtrip!(
     dwg_rt_lwpolyline,
@@ -1650,10 +1704,10 @@ dwg_entity_roundtrip!(
 );
 dwg_entity_roundtrip!(
     dwg_rt_dimension,
-    EntityType::Dimension(Dimension::Linear(DimensionLinear::new(
+    EntityType::Dimension(Box::new(Dimension::Linear(DimensionLinear::new(
         Vector3::new(0.0, 0.0, 0.0),
         Vector3::new(100.0, 0.0, 0.0)
-    )))
+    ))))
 );
 dwg_entity_roundtrip!(
     dwg_rt_tolerance,
@@ -1662,7 +1716,7 @@ dwg_entity_roundtrip!(
         "{\\Fgdt;p}%%v0.5"
     ))
 );
-dwg_entity_roundtrip!(dwg_rt_viewport, EntityType::Viewport(Viewport::new()));
+dwg_entity_roundtrip!(dwg_rt_viewport, EntityType::Viewport(Box::new(Viewport::new())));
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  CROSS-FORMAT ROUNDTRIP TESTS
@@ -1973,21 +2027,24 @@ fn binary_dxf_roundtrip_deep() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  REAL-FILE ROUNDTRIP (using .dwg files in workspace root)
+//  REAL-FILE ROUNDTRIP (DWG files that are not in the repository)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Test roundtrip of actual DWG files included in the repository.
+/// Round-trips the DWG at `$file`, relative to the crate root.
+///
+/// None of these drawings are in the repository (`.gitignore` excludes
+/// `*.dwg`), so every case is ignored with its file as the reason. Put the
+/// files in place and run `cargo test --test roundtrip -- --ignored real_dwg`.
+///
+/// The reason is the bare `$file` literal: `#[test]` reads it before macros
+/// inside attributes expand, so a `concat!(...)` reason would not be shown.
 macro_rules! real_dwg_roundtrip {
-    ($test_name:ident, $file:expr) => {
+    ($test_name:ident, $file:literal) => {
         #[test]
+        #[ignore = $file]
         fn $test_name() {
             let path = concat!(env!("CARGO_MANIFEST_DIR"), "/", $file);
-            if !std::path::Path::new(path).exists() {
-                eprintln!("Skipping {}: file not found", $file);
-                return;
-            }
-
-            let mut reader = DwgReader::from_file(path).expect("Failed to open DWG file");
+            let mut reader = DwgReader::from_file(path).unwrap_or_else(|e| panic!("{path}: {e}"));
             let doc = reader.read().expect("Failed to read DWG file");
             let orig_entity_count = doc.entity_count();
             let orig_layer_count = doc.layers.len();
@@ -2130,7 +2187,7 @@ fn dwg_version_matrix_mtext() {
     for &(version, label) in DWG_VERSIONS {
         let doc = build_minimal_document(
             version,
-            EntityType::MText(MText::with_value("Multi", Vector3::new(0.0, 0.0, 0.0))),
+            EntityType::MText(Box::new(MText::with_value("Multi", Vector3::new(0.0, 0.0, 0.0)))),
         );
         let rt = dwg_roundtrip(&doc);
         assert_eq!(
@@ -2153,10 +2210,10 @@ fn dwg_version_matrix_mtext() {
 /// Extracts the entity directly rather than asserting on `entity_count()`,
 /// which also counts the model/paper-space block markers.
 fn dwg_roundtrip_mtext(version: DxfVersion, mtext: MText) -> MText {
-    let doc = build_minimal_document(version, EntityType::MText(mtext));
+    let doc = build_minimal_document(version, EntityType::MText(Box::new(mtext)));
     let rt = dwg_roundtrip(&doc);
     let found = rt.entities().find_map(|e| match e {
-        EntityType::MText(m) => Some(m.clone()),
+        EntityType::MText(m) => Some(m.as_ref().clone()),
         _ => None,
     });
     found.expect("MTEXT missing after DWG roundtrip")
@@ -2407,7 +2464,7 @@ fn build_hatch_doc(edges: Vec<BoundaryEdge>, flags: BoundaryPathFlags) -> CadDoc
         path.edges.push(e);
     }
     hatch.add_path(path);
-    doc.add_entity(EntityType::Hatch(hatch)).unwrap();
+    doc.add_entity(EntityType::Hatch(Box::new(hatch))).unwrap();
     doc
 }
 
@@ -2735,6 +2792,7 @@ fn dxf_roundtrip_complex_linetype_shape() {
         scale: 2.0,
         rotation: 30.0,
         absolute_rotation: false,
+        source_flags: 8,
         offset: [1.0, 0.5],
     });
     let mut space = LineTypeElement::space(2.0);
@@ -2755,6 +2813,7 @@ fn dxf_roundtrip_complex_linetype_shape() {
     assert!((c0.scale - 2.0).abs() < 1e-6);
     assert!((c0.rotation - 30.0).abs() < 1e-6);
     assert!(!c0.is_absolute_rotation());
+    assert_eq!(c0.source_flags, 12);
 }
 
 #[test]
@@ -2772,6 +2831,7 @@ fn dxf_roundtrip_complex_linetype_text() {
         scale: 1.5,
         rotation: 45.0,
         absolute_rotation: true,
+        source_flags: 1,
         offset: [0.0, 0.25],
     });
     lt.elements.push(dash);
@@ -2805,6 +2865,7 @@ fn dwg_roundtrip_complex_linetype_shape() {
         scale: 1.0,
         rotation: 0.0,
         absolute_rotation: false,
+        source_flags: 0,
         offset: [0.0, 0.0],
     });
     lt.elements.push(dash);
@@ -2973,4 +3034,44 @@ fn dwg_mline_cap_suppression_bits_roundtrip() {
             "{version:?}: closed MLINE lost its suppressed start cap"
         );
     }
+}
+
+/// An edge action parameter on an unbounded line (type 19) keeps its point
+/// and direction: associative rectangular arrays store their row axis this
+/// way, and dropping it loses the array's orientation on save.
+#[test]
+fn dwg_roundtrip_edge_action_param_line() {
+    use acadrust::objects::{
+        AssocCurveValue, AssocEdgeActionParam, AssocSubcurveKind, AssociativeData,
+        AssociativeObject, ObjectType,
+    };
+    let mut doc = CadDocument::new();
+    let handle = doc.allocate_handle();
+    let mut object =
+        AssociativeObject::new("ACDBASSOCEDGEACTIONPARAM", "AcDbAssocEdgeActionParam");
+    object.handle = handle;
+    object.owner = doc.header.named_objects_dict_handle;
+    let curve = vec![
+        AssocCurveValue::Point(Vector3::new(1.0, 2.0, 0.0)),
+        AssocCurveValue::Point(Vector3::new(0.6, 0.8, 0.0)),
+    ];
+    object.data = AssociativeData::EdgeActionParam(AssocEdgeActionParam {
+        has_action: true,
+        action_type: 19,
+        subcurve_kind: AssocSubcurveKind::Line,
+        curve: curve.clone(),
+        ..Default::default()
+    });
+    doc.objects.insert(handle, ObjectType::Associative(object));
+
+    let read = dwg_roundtrip(&doc);
+    let Some(ObjectType::Associative(AssociativeObject {
+        data: AssociativeData::EdgeActionParam(edge),
+        ..
+    })) = read.objects.get(&handle)
+    else {
+        panic!("edge action parameter lost");
+    };
+    assert_eq!(edge.action_type, 19);
+    assert_eq!(edge.curve, curve);
 }

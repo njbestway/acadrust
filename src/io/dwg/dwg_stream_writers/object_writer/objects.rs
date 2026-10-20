@@ -105,7 +105,7 @@ fn transcode_xrecord_xdata(
     raw: &[u8],
     src_unicode: bool,
     tgt_unicode: bool,
-    target_encoding: &'static encoding_rs::Encoding,
+    target_encoding: crate::io::dxf::code_page::LegacyEncoding,
     target_code_page: u8,
 ) -> Vec<u8> {
     if src_unicode == tgt_unicode {
@@ -208,7 +208,7 @@ fn transcode_xrecord_xdata(
 fn encode_xrecord_entries(
     entries: &[XRecordEntry],
     unicode: bool,
-    encoding: &'static encoding_rs::Encoding,
+    encoding: crate::io::dxf::code_page::LegacyEncoding,
     code_page: u8,
 ) -> Vec<u8> {
     let mut output = Vec::new();
@@ -266,10 +266,11 @@ fn encode_xrecord_entries(
     output
 }
 
-/// Flatten a [`Matrix4`](crate::types::Matrix4) into 12 doubles holding its 3×4
-/// part in row-major order (3 rows of 4); the bottom row is dropped. DWG stores
-/// the spatial-filter transforms row-major.
-fn matrix_to_row_major(m: &crate::types::Matrix4) -> [f64; 12] {
+/// Flatten a [`Matrix4`](crate::types::Matrix4) into the 12 doubles of a
+/// spatial-filter transform, as AutoCAD stores them in DWG and DXF code 40:
+/// one matrix row per group of four, translation last; the bottom row is
+/// dropped.
+fn matrix_to_dxf_4x3(m: &crate::types::Matrix4) -> [f64; 12] {
     let mut out = [0.0; 12];
     let mut i = 0;
     for row in 0..3 {
@@ -337,6 +338,8 @@ pub(crate) fn object_class_names(object: &ObjectType) -> Vec<std::borrow::Cow<'_
     vec![Cow::Borrowed(name)]
 }
 
+const STALE_TABLE_STYLE_FLAG: i16 = 8;
+
 impl<'a> DwgObjectWriter<'a> {
     // ── Object dispatch ─────────────────────────────────────────────
 
@@ -367,6 +370,28 @@ impl<'a> DwgObjectWriter<'a> {
     pub(super) fn write_object(&mut self, obj: &ObjectType) {
         if self.lacks_object_class(obj) {
             return;
+        }
+        let preserved_record = match obj {
+            ObjectType::DynamicBlock(value) => Some((value.handle, value.xdictionary_handle)),
+            ObjectType::Associative(value) => Some((value.handle, value.xdictionary_handle)),
+            _ => None,
+        };
+        if let Some((handle, source_dictionary)) = preserved_record {
+            let effective_dictionary = source_dictionary.or_else(|| {
+                self.extension_dictionary_handle(handle)
+                    .filter(|dictionary| self.document.objects.contains_key(dictionary))
+            });
+            if self.document.original_objects.get(&handle) == Some(obj)
+                && effective_dictionary == source_dictionary
+            {
+                if let Some((_, raw)) = self.document.raw_records.get(&handle.value()) {
+                    if raw.version == self.dxf_version {
+                        let raw = raw.clone();
+                        self.register_raw_object(handle, &raw.data, raw.handle_bits);
+                        return;
+                    }
+                }
+            }
         }
         match obj {
             ObjectType::Dictionary(d) => self.write_dictionary(d),
@@ -828,12 +853,27 @@ impl<'a> DwgObjectWriter<'a> {
         else {
             return;
         };
-        self.write_common_non_entity_data(
+        // A visual style filed in the pre-R2010 layout must say so: the
+        // reader rejects the record unless it carries the ACAD
+        // `AcDbSavedByObjectVersion` marker that announces the down-level
+        // object version.
+        let extra: Vec<(u64, Vec<u8>)> = if self.version.r2010_plus() {
+            Vec::new()
+        } else {
+            let mut marker = crate::xdata::ExtendedDataRecord::new("ACAD");
+            marker.add_value(crate::xdata::XDataValue::String(
+                "AcDbSavedByObjectVersion".to_string(),
+            ));
+            marker.add_value(crate::xdata::XDataValue::Integer16(0));
+            self.encode_xdata_record(&marker).into_iter().collect()
+        };
+        self.write_common_non_entity_data_eed(
             type_code,
             value.handle,
             value.owner,
             &value.reactors,
             &value.xdictionary_handle,
+            extra,
         );
         self.writer.write_variable_text(&value.description);
         self.writer.write_bit_long(value.style_type as i32);
@@ -893,8 +933,12 @@ impl<'a> DwgObjectWriter<'a> {
                 .write_bit_long(Self::visual_style_long(&properties[21]));
             self.writer
                 .write_bit_long(Self::visual_style_long(&properties[22]));
-            self.writer
-                .write_bit_double(Self::visual_style_double(&properties[23]));
+            // properties[23] (DXF group 45) is part of the binary record
+            // only from R2007 on; R2004 ends with the internal-use flag.
+            if self.version.r2007_plus() {
+                self.writer
+                    .write_bit_double(Self::visual_style_double(&properties[23]));
+            }
             self.writer.write_bit(value.internal_use_only);
         } else {
             self.writer.write_bit_short(value.extended_lighting_model);
@@ -1117,25 +1161,34 @@ impl<'a> DwgObjectWriter<'a> {
         if !self.version.r2010_plus() {
             self.writer.write_variable_text(&value.name);
             self.writer.write_bit_short(value.flow_direction as i16);
-            self.writer.write_bit_short(value.flags.bits());
+            self.writer
+                .write_bit_short(value.effective_flags().bits() & !STALE_TABLE_STYLE_FLAG);
             self.writer.write_bit_double(value.horizontal_margin);
             self.writer.write_bit_double(value.vertical_margin);
-            self.writer.write_bit(value.title_suppressed);
-            self.writer.write_bit(value.header_suppressed);
+            self.writer.write_bit(!value.has_title_row());
+            self.writer.write_bit(!value.has_header_row());
             self.write_legacy_table_row_style(&value.data_row_style);
             self.write_legacy_table_row_style(&value.title_row_style);
             self.write_legacy_table_row_style(&value.header_row_style);
         } else {
             self.writer.write_byte(value.modern_unknown_byte);
             self.writer.write_variable_text(&value.name);
-            self.writer.write_bit_long(value.modern_unknown_long1);
+            // The R2010+ flags field carries the table style flags.
+            self.writer
+                .write_bit_long((value.effective_flags().bits() & !STALE_TABLE_STYLE_FLAG) as i32);
             self.writer.write_bit_long(value.modern_unknown_long2);
             self.writer.write_handle(
                 DwgReferenceType::HardOwnership,
                 value.modern_cell_style_handle.value(),
             );
             if let Some(style) = &value.modern_style {
-                self.write_table_style_named_cell_style(style);
+                // The base "Table" style normally has no text style and keeps
+                // none; only a dangling one is resolved.
+                if style.cell_style.content_format.text_style.is_null() {
+                    self.write_named_table_cell_style(style);
+                } else {
+                    self.write_table_style_named_cell_style(style);
+                }
             } else {
                 self.write_default_modern_table_cell_style(value);
             }
@@ -1263,21 +1316,19 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_default_modern_table_cell_style(&mut self, value: &TableStyle) {
-        let row = &value.data_row_style;
         let cell_style = TableCellStyleData {
             style_type: 5,
             data_flags: 1,
-            background_color: row.fill_color,
+            background_color: Color::None,
             content_layout: 1,
             content_format: TableContentFormat {
-                value_data_type: row.data_type,
-                value_unit_type: row.unit_type,
-                value_format_string: row.format_string.clone(),
+                value_data_type: 512,
                 block_scale: 1.0,
-                cell_alignment: row.alignment as i32,
-                content_color: row.text_color,
-                text_style: self.resolve_table_row_text_style(row),
-                text_height: row.text_height,
+                cell_alignment: 1,
+                content_color: Color::ByBlock,
+                // Not the data row height, in imperial and metric drawings alike
+                // (data text of 0.4 or 4.5 still carries 0.18 here; so do the spacings).
+                text_height: 0.18,
                 ..TableContentFormat::default()
             },
             margin_override_flags: 1,
@@ -1285,23 +1336,8 @@ impl<'a> DwgObjectWriter<'a> {
             horizontal_margin: value.horizontal_margin,
             bottom_margin: value.vertical_margin,
             right_margin: value.horizontal_margin,
-            horizontal_spacing: value.horizontal_margin * 3.0,
-            vertical_spacing: value.vertical_margin * 3.0,
-            borders: [
-                (1, &row.top_border),
-                (2, &row.right_border),
-                (4, &row.bottom_border),
-                (8, &row.left_border),
-                (16, &row.horizontal_inside_border),
-                (32, &row.vertical_inside_border),
-            ]
-            .into_iter()
-            .map(|(index_mask, border)| TableGridFormat {
-                index_mask,
-                border: border.clone(),
-                line_type: Handle::NULL,
-            })
-            .collect(),
+            horizontal_spacing: 0.18,
+            vertical_spacing: 0.18,
             ..TableCellStyleData::default()
         };
         self.write_named_table_cell_style(&NamedTableCellStyle {
@@ -1334,18 +1370,23 @@ impl<'a> DwgObjectWriter<'a> {
         name: &str,
         merge_flags: i32,
     ) {
+        // R2010+ edge order; the grid flag is set for a hidden edge, the
+        // reverse of the row border's `is_invisible`.
         let borders = [
             (1, &row.top_border),
-            (2, &row.right_border),
+            (2, &row.horizontal_inside_border),
             (4, &row.bottom_border),
             (8, &row.left_border),
-            (16, &row.horizontal_inside_border),
-            (32, &row.vertical_inside_border),
+            (16, &row.vertical_inside_border),
+            (32, &row.right_border),
         ]
         .into_iter()
         .map(|(index_mask, border)| TableGridFormat {
             index_mask,
-            border: border.clone(),
+            border: TableCellBorder {
+                is_invisible: !border.is_invisible,
+                ..border.clone()
+            },
             line_type: Handle::NULL,
         })
         .collect();
@@ -1362,7 +1403,7 @@ impl<'a> DwgObjectWriter<'a> {
                 },
                 content_layout: 1,
                 content_format: TableContentFormat {
-                    value_data_type: 4,
+                    value_data_type: row.data_type,
                     value_unit_type: row.unit_type,
                     value_format_string: row.format_string.clone(),
                     block_scale: 1.0,
@@ -2195,12 +2236,33 @@ impl<'a> DwgObjectWriter<'a> {
             UnderlayType::Pdf => common::OBJ_PDFDEFINITION,
         };
         let type_code = self.class_type_code(def.entity_name(), fallback);
-        self.write_common_non_entity_data(
+        // An unloaded definition carries NOLOAD in its ACAD extended data.
+        let mut extra = Vec::new();
+        if def.unloaded {
+            if let Some(app) = self.document.app_ids.get("ACAD") {
+                let code_page =
+                    crate::io::dxf::code_page::dwg_code_page_index(&self.document.header.code_page);
+                let encoding = crate::io::dxf::code_page::encoding_from_code_page(
+                    &self.document.header.code_page,
+                )
+                .unwrap_or(encoding_rs::WINDOWS_1252.into());
+                let bytes = crate::io::dwg::eed_codec::encode_values_with_encoding(
+                    self.version.r2007_plus(),
+                    &[crate::xdata::XDataValue::String("NOLOAD".to_string())],
+                    encoding,
+                    code_page,
+                    |_| 0,
+                );
+                extra.push((app.handle.value(), bytes));
+            }
+        }
+        self.write_common_non_entity_data_eed(
             type_code,
             def.handle,
             def.owner_handle,
             &def.reactors,
             &None,
+            extra,
         );
 
         self.writer.write_variable_text(&def.file_path);
@@ -2780,10 +2842,10 @@ impl<'a> DwgObjectWriter<'a> {
         if let Some(d) = sf.back_clip {
             self.writer.write_bit_double(d);
         }
-        for v in matrix_to_row_major(&sf.inverse_block_transform) {
+        for v in matrix_to_dxf_4x3(&sf.inverse_block_transform) {
             self.writer.write_bit_double(v);
         }
-        for v in matrix_to_row_major(&sf.clip_bound_transform) {
+        for v in matrix_to_dxf_4x3(&sf.clip_bound_transform) {
             self.writer.write_bit_double(v);
         }
 
@@ -2901,8 +2963,15 @@ impl<'a> DwgObjectWriter<'a> {
 
         if self.version.r2004_plus() {
             self.writer.write_bit_short(0);
-            let (r, g, b) = bc.color.rgb().unwrap_or((0, 0, 0));
-            let true_color = (0xC2u32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+            let true_color = match bc.color {
+                crate::types::Color::ByLayer => 0xC000_0000,
+                crate::types::Color::ByBlock => 0xC100_0000,
+                crate::types::Color::Index(index) => 0xC300_0000 | u32::from(index),
+                crate::types::Color::None => 0xC800_0000,
+                crate::types::Color::Rgb { r, g, b } => {
+                    0xC200_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+                }
+            };
             self.writer.write_bit_long(true_color as i32);
 
             let mut flags = 0u8;

@@ -26,10 +26,10 @@ fn dxf_roundtrip(doc: &CadDocument) -> CadDocument {
 #[test]
 fn plain_mtext_not_annotative_after_dxf_roundtrip() {
     let mut doc = CadDocument::with_version(DxfVersion::AC1027);
-    doc.add_entity(EntityType::MText(MText::with_value(
+    doc.add_entity(EntityType::MText(Box::new(MText::with_value(
         "Plain",
         Vector3::new(1.0, 2.0, 0.0),
-    )))
+    ))))
     .unwrap();
 
     let rt = dxf_roundtrip(&doc);
@@ -63,7 +63,7 @@ fn multileader_annotation_scale_survives_dxf_roundtrip() {
             vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 10.0, 0.0)],
         );
         ml.enable_annotation_scale = enabled;
-        doc.add_entity(EntityType::MultiLeader(ml)).unwrap();
+        doc.add_entity(EntityType::MultiLeader(Box::new(ml))).unwrap();
 
         let rt = dxf_roundtrip(&doc);
         let got = rt

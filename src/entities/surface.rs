@@ -176,6 +176,10 @@ pub enum SurfaceData {
     },
 }
 
+pub(crate) fn transpose_matrix(value: [f64; 16]) -> [f64; 16] {
+    std::array::from_fn(|index| value[(index % 4) * 4 + index / 4])
+}
+
 pub(crate) fn identity_matrix() -> [f64; 16] {
     let mut value = [0.0; 16];
     value[0] = 1.0;
@@ -372,5 +376,9 @@ impl Entity for Surface {
     }
     fn apply_transform(&mut self, transform: &crate::types::Transform) {
         super::transform::transform_surface(self, transform);
+    }
+
+    fn apply_mirror(&mut self, transform: &crate::types::Transform) {
+        super::mirror::mirror_surface(self, transform);
     }
 }
