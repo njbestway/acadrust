@@ -354,8 +354,22 @@ fn read_surface_action(
 ) -> AssocSurfaceActionBody {
     let action_body = read_action_body(reader);
     let parameter_body = read_parameter_body(reader, version, dxf_version);
-    let surface_body = read_surface_body(reader);
-    let path_status = reader.read_bit_long();
+    // An R2004 plane-surface action stores the action and parameter bodies
+    // only. The surface-body dependency handle and the path/class fields are
+    // absent, and reading them walks off the end of the record.
+    let has_surface_tail = reader.main_remaining_bits() >= 8
+        && reader.handle_remaining_bits() >= 8
+        && !reader.has_error();
+    let surface_body = if has_surface_tail {
+        read_surface_body(reader)
+    } else {
+        AssocSurfaceBody::default()
+    };
+    let path_status = if has_surface_tail {
+        reader.read_bit_long()
+    } else {
+        0
+    };
     let mut value = AssocSurfaceActionBody {
         kind,
         action_body,
@@ -369,7 +383,8 @@ fn read_surface_action(
         | AssocSurfaceActionKind::Patch
         | AssocSurfaceActionKind::EdgeChamfer
         | AssocSurfaceActionKind::EdgeFillet => {}
-        _ => value.class_version = reader.read_bit_long(),
+        _ if has_surface_tail => value.class_version = reader.read_bit_long(),
+        _ => {}
     }
     match kind {
         AssocSurfaceActionKind::Extend => value.option = reader.read_byte(),
@@ -825,12 +840,14 @@ fn read_explicit_constraint(
     )
 }
 
-/// Node data of `class_name`. `legacy` is the version-0 layout, which has no
-/// active flag on constraints and no reserved double on circles and arcs.
+/// Node data of `class_name`. Version-0 constraints have no active flag.
+/// Circles and arcs omit their reserved double in the R2010 inline layout,
+/// including version-2 groups; the later registry layout stores it.
 fn read_constraint_node_data(
     reader: &mut DwgMergedReader,
     class_name: &str,
     legacy: bool,
+    circle_reserved: bool,
 ) -> AssocConstraintNodeData {
     match class_name.to_ascii_uppercase().as_str() {
         "ACG2SMOOTHCONSTRAINT" => {
@@ -860,10 +877,10 @@ fn read_constraint_node_data(
             radius: reader.read_bit_double(),
             start_parameter: reader.read_bit_double(),
             end_parameter: reader.read_bit_double(),
-            reserved: if legacy {
-                0.0
-            } else {
+            reserved: if circle_reserved {
                 reader.read_bit_double()
+            } else {
+                0.0
             },
         },
         "ACCONSTRAINEDARC" => AssocConstraintNodeData::Arc {
@@ -875,10 +892,10 @@ fn read_constraint_node_data(
             radius: reader.read_bit_double(),
             start_parameter: reader.read_bit_double(),
             end_parameter: reader.read_bit_double(),
-            reserved: if legacy {
-                0.0
-            } else {
+            reserved: if circle_reserved {
                 reader.read_bit_double()
+            } else {
+                0.0
             },
             start_point: reader.read_3bit_double(),
             end_point: reader.read_3bit_double(),
@@ -1223,7 +1240,13 @@ pub fn read_associative_data(
             let count = reader.read_bit_long();
             let actions = read_handles(reader, count);
             let next_node_id = reader.read_bit_long();
-            let node_count = safe_count(next_node_id, reader);
+            // This is an ID seed, not an array length. Deleted nodes can
+            // leave it much larger than the remaining record or node count.
+            if next_node_id < 0 {
+                reader.invalidate(format!(
+                    "Negative DWG constraint-group next node id {next_node_id}"
+                ));
+            }
             let mut nodes = Vec::new();
             // Version 0 (the 2010 release) lists its nodes inline after a
             // count: class name, id, connections and data each, with no root,
@@ -1235,16 +1258,21 @@ pub fn read_associative_data(
             // of this codec emitted the later registry layout with root ID
             // zero even for R2010; retain that read compatibility.
             let inline_nodes = legacy
-                || (!version.r2013_plus(dxf_version) && {
+                || (!version.r2013_plus(dxf_version) && reader.main_remaining_bits() >= 2 && {
                     let position = reader.position_in_bits();
+                    let remaining = reader.main_remaining_bits();
                     let count = reader.read_bit_long();
                     reader.set_position_in_bits(position);
-                    count > 0
+                    // An empty inline list is only BL(0); a registry needs
+                    // at least 11 bits for root, connections, flag and counts.
+                    count > 0 || (count == 0 && remaining < 11)
                 });
             if inline_nodes {
                 let count = safe_count(reader.read_bit_long(), reader);
                 nodes.reserve(count as usize + 1);
-                nodes.push(AssocConstraintNode::default());
+                if count > 0 {
+                    nodes.push(AssocConstraintNode::default());
+                }
                 for _ in 0..count {
                     let class_name = reader.read_variable_text();
                     let mut node = if legacy {
@@ -1259,8 +1287,13 @@ pub fn read_associative_data(
                     } else {
                         read_constraint_node_common(reader, version, dxf_version)
                     };
-                    let data = read_constraint_node_data(reader, &class_name, legacy);
+                    let data = read_constraint_node_data(reader, &class_name, legacy, false);
                     let unknown = matches!(data, AssocConstraintNodeData::None);
+                    if unknown {
+                        reader.invalidate(format!(
+                            "Unsupported DWG constraint node class {class_name}"
+                        ));
+                    }
                     node.class_name = class_name;
                     node.data = data;
                     nodes.push(node);
@@ -1270,7 +1303,7 @@ pub fn read_associative_data(
                         break;
                     }
                 }
-            } else if node_count > 0 {
+            } else if next_node_id > 0 {
                 let root_id = reader.read_bit_long();
                 let connection_count = safe_count(reader.read_bit_long(), reader);
                 let mut connections = Vec::with_capacity(connection_count as usize);
@@ -1290,7 +1323,7 @@ pub fn read_associative_data(
                 for _ in 0..class_type_count {
                     class_types.push(reader.read_variable_text());
                 }
-                let registered_count = safe_count(reader.read_bit_long(), reader).min(node_count);
+                let registered_count = safe_count(reader.read_bit_long(), reader);
                 let mut registry = Vec::with_capacity(registered_count as usize);
                 for _ in 0..registered_count {
                     let registry_flag = reader.read_bit();
@@ -1308,10 +1341,19 @@ pub fn read_associative_data(
                     if node.node_id == 0 {
                         node.node_id = registered_node_id;
                     }
-                    node.data = read_constraint_node_data(reader, &class_name, false);
+                    node.data = read_constraint_node_data(reader, &class_name, false, true);
+                    let unknown = matches!(node.data, AssocConstraintNodeData::None);
+                    if unknown {
+                        reader.invalidate(format!(
+                            "Unsupported DWG constraint node class {class_name}"
+                        ));
+                    }
                     node.class_name = class_name;
                     node.registry_flag = registry_flag;
                     nodes.push(node);
+                    if unknown {
+                        break;
+                    }
                 }
             }
             AssociativeData::ConstraintGroup(Assoc2dConstraintGroup {
@@ -1550,4 +1592,40 @@ pub fn read_associative_data(
         _ => return None,
     };
     Some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_surface_action;
+    use crate::io::dwg::dwg_reference_type::DwgReferenceType::HardPointer;
+    use crate::io::dwg::dwg_stream_readers::merged_reader::DwgMergedReader;
+    use crate::io::dwg::dwg_stream_writers::merged_writer::DwgMergedWriter;
+    use crate::io::dwg::dwg_version::DwgVersion;
+    use crate::objects::AssocSurfaceActionKind;
+    use crate::types::DxfVersion;
+
+    #[test]
+    fn r2004_plane_surface_action_ends_after_the_parameter_body() {
+        let dwg = DwgVersion::AC18;
+        let dxf = DxfVersion::AC1018;
+        let mut writer = DwgMergedWriter::new(dwg, dxf);
+        writer.write_bit_long(1); // action body version
+        writer.write_bit_long(0); // parameter version
+        writer.write_bit_long(0); // minor
+        writer.write_bit_long(1); // one dependency
+        writer.write_handle(HardPointer, 0x50E);
+        writer.write_bit_long(0); // marker
+        writer.write_bit_long(0); // no values
+        writer.write_bit_long(0); // empty-value marker
+        writer.write_handle(HardPointer, 0x50D);
+        let mut reader = DwgMergedReader::new(writer.merge(), dxf, writer.handle_start_bits());
+        let action = read_surface_action(&mut reader, dwg, dxf, AssocSurfaceActionKind::Plane);
+        reader.check_error().expect("plane action");
+        assert_eq!(action.action_body.version, 1);
+        assert_eq!(action.parameter_body.dependencies.len(), 1);
+        assert_eq!(action.parameter_body.dependencies[0].value(), 0x50E);
+        assert_eq!(action.parameter_body.dependency.value(), 0x50D);
+        assert_eq!(action.surface_body.dependency.value(), 0);
+        assert_eq!(action.class_version, 0);
+    }
 }

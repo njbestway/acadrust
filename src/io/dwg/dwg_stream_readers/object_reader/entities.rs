@@ -850,6 +850,41 @@ pub fn read_proxy_entity(
     } else {
         false
     };
+    let (payload, text_payload, object_ids) = read_proxy_payload(reader, current_handle);
+    if let Some(envelope) =
+        crate::objects::semantic_property::decode_registered_class_envelope(&payload)
+    {
+        return ExtendedEntityData::RegisteredClass(RegisteredClassEntityData {
+            dxf_name: envelope.dxf_name,
+            cpp_class_name: envelope.cpp_class_name,
+            properties: envelope.properties,
+            payload: envelope.payload,
+            object_ids,
+        });
+    }
+    ExtendedEntityData::Proxy(ProxyEntityData {
+        proxy_id: 498,
+        class_id,
+        dxf_subclass,
+        version: version_value,
+        dwg_version,
+        maintenance_version,
+        from_dxf,
+        graphics: crate::objects::ProxyPayload::from_bytes(&proxy_data),
+        payload,
+        text_payload,
+        object_ids,
+    })
+}
+
+pub(crate) fn read_proxy_payload(
+    reader: &mut DwgMergedReader,
+    current_handle: u64,
+) -> (
+    crate::objects::ProxyPayload,
+    crate::objects::ProxyPayload,
+    Vec<crate::objects::ProxyObjectReference>,
+) {
     let object_data_bits = reader.main_remaining_bits() as u32;
     let mut object_data = vec![0u8; object_data_bits.div_ceil(8) as usize];
     for bit_index in 0..object_data_bits as usize {
@@ -865,8 +900,24 @@ pub fn read_proxy_entity(
         }
     }
     let mut object_ids = Vec::new();
-    while reader.handle_remaining_bits() >= 8 {
+    // R2010+ records carry the exact handle-stream length in the object
+    // framing. The backing byte slice is rounded up, so using its full
+    // length would interpret padding bits as another object reference.
+    let handle_bits = if reader.dxf_version() >= DxfVersion::AC1024 {
+        reader.get_handle_bits().max(0)
+    } else {
+        reader.handle_remaining_bits()
+    };
+    let handle_start = reader.handle_remaining_bits();
+    let mut handle_remaining = handle_bits.min(handle_start);
+    while handle_remaining >= 8 {
+        let before = reader.handle_remaining_bits();
         let (handle, reference_type) = reader.read_handle_reference(current_handle);
+        let consumed = before.saturating_sub(reader.handle_remaining_bits());
+        if consumed <= 0 || consumed > handle_remaining {
+            break;
+        }
+        handle_remaining -= consumed;
         let kind = match reference_type {
             crate::io::dwg::dwg_reference_type::DwgReferenceType::SoftOwnership => {
                 crate::objects::ProxyReferenceKind::SoftOwnership
@@ -889,31 +940,11 @@ pub fn read_proxy_entity(
             kind,
         });
     }
-    let payload = crate::objects::ProxyPayload::from_bits(&object_data, object_data_bits);
-    if let Some(envelope) =
-        crate::objects::semantic_property::decode_registered_class_envelope(&payload)
-    {
-        return ExtendedEntityData::RegisteredClass(RegisteredClassEntityData {
-            dxf_name: envelope.dxf_name,
-            cpp_class_name: envelope.cpp_class_name,
-            properties: envelope.properties,
-            payload: envelope.payload,
-            object_ids,
-        });
-    }
-    ExtendedEntityData::Proxy(ProxyEntityData {
-        proxy_id: 498,
-        class_id,
-        dxf_subclass,
-        version: version_value,
-        dwg_version,
-        maintenance_version,
-        from_dxf,
-        graphics: crate::objects::ProxyPayload::from_bytes(&proxy_data),
-        payload,
-        text_payload: crate::objects::ProxyPayload::from_bits(&text_data, text_data_bits),
+    (
+        crate::objects::ProxyPayload::from_bits(&object_data, object_data_bits),
+        crate::objects::ProxyPayload::from_bits(&text_data, text_data_bits),
         object_ids,
-    })
+    )
 }
 
 pub fn read_line(reader: &mut DwgMergedReader, version: DwgVersion) -> LineData {
@@ -1553,6 +1584,34 @@ pub fn read_mtext(
     version: DwgVersion,
     dxf_version: DxfVersion,
 ) -> MTextData {
+    if !version.r2018_plus(dxf_version) {
+        return read_mtext_layout(reader, version, dxf_version, false);
+    }
+
+    let checkpoint = reader.clone();
+    let text = read_mtext_layout(reader, version, dxf_version, false);
+    if text.background_flags & 0x11 == 0x10
+        && (reader.check_error().is_err() || reader.main_remaining_bits() != 0)
+    {
+        // Some native AC1032 producers also store fill properties for a frame.
+        // Accept that layout only when it consumes the complete entity record.
+        let mut alternate = checkpoint;
+        let native = read_mtext_layout(&mut alternate, version, dxf_version, true);
+        if alternate.check_error().is_ok() && alternate.main_remaining_bits() == 0 {
+            *reader = alternate;
+            return native;
+        }
+        reader.invalidate("Invalid frame-only MTEXT layout");
+    }
+    text
+}
+
+fn read_mtext_layout(
+    reader: &mut DwgMergedReader,
+    version: DwgVersion,
+    dxf_version: DxfVersion,
+    frame_fill_properties: bool,
+) -> MTextData {
     let insertion_point = reader.read_3bit_double();
     let normal = reader.read_3bit_double();
     let x_direction = reader.read_3bit_double();
@@ -1590,10 +1649,9 @@ pub fn read_mtext(
         // 0x10 = text frame (R2018+).
         background_flags = reader.read_bit_long();
 
-        // The background-fill block follows when the UseBackgroundFillColor bit
-        // (0x01) is set, or — for R2018+ — when the TextFrame bit (0x10) is set.
+        // Fill properties are conditional on bit 0x01 in the R2018 layout.
         if (background_flags & 0x01) != 0
-            || (version.r2018_plus(dxf_version) && (background_flags & 0x10) != 0)
+            || (frame_fill_properties && (background_flags & 0x10) != 0)
         {
             // Background scale factor BD 45 (default 1.5)
             background_scale = reader.read_bit_double();
@@ -5418,9 +5476,10 @@ fn read_acis_entity_impl(
     //   B wireframe_data_present
     //   if set: B point_present, [3BD point],
     //           BL isolines, B isoline_present,
-    //           if set: BL num_wires, wires..., BL num_silhouettes, sils...
-    // AutoCAD writes isoline_present=1 with zero counts when there is no
-    // wire cache.
+    //           if set: BL num_wires, wires...
+    //           BL num_silhouettes, sils...
+    // An empty wire cache can have either value of isoline_present; only
+    // the wire count is omitted when that flag is false.
     let wireframe_present = reader.read_bit();
     let mut point = Vector3::ZERO;
     let mut point_present = false;
@@ -5443,41 +5502,42 @@ fn read_acis_entity_impl(
             for _ in 0..num_wires {
                 wires.push(read_wire(reader));
             }
+        }
 
-            // Both cache arrays are absent when isoline_present is false.
-            // Reading a count then consumes the extra-body or revision tail.
-            let num_silhouettes = safe_count(reader.read_bit_long(), reader);
-            for _ in 0..num_silhouettes {
-                // Native R2010+ silhouettes store a BLL viewport identity.
-                // Earlier records use BL, including compact zero identities.
-                let viewport_id = if version.r2010_plus() {
-                    reader.read_bit_long_long()
-                } else {
-                    i64::from(reader.read_bit_long())
-                };
-                let target = reader.read_3bit_double();
-                let view_direction = reader.read_3bit_double();
-                let up_vector = reader.read_3bit_double();
-                let is_perspective = reader.read_bit();
-                let mut sil_wires = Vec::new();
-                let has_sil_wires = reader.read_bit();
-                if has_sil_wires {
-                    let num_sw = safe_count(reader.read_bit_long(), reader);
-                    sil_wires.reserve(num_sw as usize);
-                    for _ in 0..num_sw {
-                        sil_wires.push(read_wire(reader));
-                    }
+        // The isoline flag gates only the wire array. The silhouette
+        // count is always present in a wireframe block, including zero
+        // when there are no silhouettes (ODA DWG spec, section 20.4.41).
+        let num_silhouettes = safe_count(reader.read_bit_long(), reader);
+        for _ in 0..num_silhouettes {
+            // Native R2010+ silhouettes store a BLL viewport identity.
+            // Earlier records use BL, including compact zero identities.
+            let viewport_id = if version.r2010_plus() {
+                reader.read_bit_long_long()
+            } else {
+                i64::from(reader.read_bit_long())
+            };
+            let target = reader.read_3bit_double();
+            let view_direction = reader.read_3bit_double();
+            let up_vector = reader.read_3bit_double();
+            let is_perspective = reader.read_bit();
+            let mut sil_wires = Vec::new();
+            let has_sil_wires = reader.read_bit();
+            if has_sil_wires {
+                let num_sw = safe_count(reader.read_bit_long(), reader);
+                sil_wires.reserve(num_sw as usize);
+                for _ in 0..num_sw {
+                    sil_wires.push(read_wire(reader));
                 }
-                silhouettes.push(Silhouette {
-                    viewport_id,
-                    view_direction,
-                    up_vector,
-                    target,
-                    is_perspective,
-                    has_wires: has_sil_wires,
-                    wires: sil_wires,
-                });
             }
+            silhouettes.push(Silhouette {
+                viewport_id,
+                view_direction,
+                up_vector,
+                target,
+                is_perspective,
+                has_wires: has_sil_wires,
+                wires: sil_wires,
+            });
         }
     }
 
@@ -5653,10 +5713,7 @@ pub fn read_surface(
     has_ds_data: bool,
     kind: SurfaceKind,
 ) -> SurfaceEntityData {
-    // The optional extra modeler block belongs to AcDs-backed surfaces. On
-    // inline ACIS surfaces the next fields are the surface isoline counts;
-    // probing them as an extra ACIS payload shifts the record by one bit.
-    let acis = read_acis_entity_impl(
+    let mut acis = read_acis_entity_impl(
         reader,
         version,
         dxf_version,
@@ -5669,8 +5726,26 @@ pub fn read_surface(
     // Surface records do not have the 3DSOLID history-id handle slot.
     let history_handle = 0;
     // The modeler version is already part of the ACIS header. Native
-    // surfaces begin with the two isoline counts immediately after it.
+    // surfaces begin with the two isoline counts immediately after it,
+    // except when an R2004 surface keeps a second modeler body there.
+    // That body uses the extra-modeler framing (unknown bit, version,
+    // SAB/SAT) while the COMMON_3DSOLID gate stays set, so the shared
+    // solid reader leaves it in the stream. Accept it only when the
+    // following isoline counts are plausible; otherwise rewind.
     let modeler_format_version = 1;
+    if acis.extra_acis_data.is_none() && !reader.has_error() {
+        let body_start = reader.position_in_bits();
+        if let Some(body) = read_extra_acis_data(reader, None) {
+            let mut peek = reader.clone();
+            let u = peek.read_bit_short();
+            let v = peek.read_bit_short();
+            if (0..=512).contains(&u) && (0..=512).contains(&v) && !peek.has_error() {
+                acis.extra_acis_data = Some(body);
+            } else {
+                reader.set_position_in_bits(body_start);
+            }
+        }
+    }
     let u_isolines = reader.read_bit_short();
     let v_isolines = reader.read_bit_short();
     let surface_data = match kind {
@@ -5932,6 +6007,34 @@ mod tests {
         let data = writer.merge();
         let hsb = writer.handle_start_bits();
         DwgMergedReader::new(data, dxf, hsb)
+    }
+
+    #[test]
+    fn r2004_surface_keeps_a_second_modeler_body_ahead_of_isolines() {
+        let sab = crate::entities::acis::SabWriter::write(&crate::entities::acis::primitives::build_box(
+            [0.0, 0.0, 0.0],
+            1.0,
+            2.0,
+            3.0,
+        ));
+        let dwg = DwgVersion::AC18;
+        let dxf = DxfVersion::AC1018;
+        let mut reader = make_reader(dwg, dxf, |writer| {
+            writer.write_bit(true); // no inline primary body
+            writer.write_bit(false); // no wireframe cache
+            writer.write_bit(true); // COMMON_3DSOLID extra gate stays set
+            writer.write_bit(false);
+            writer.write_bit_short(2);
+            writer.write_bytes(&sab);
+            writer.write_bit_short(6);
+            writer.write_bit_short(4);
+        });
+        let surface = read_surface(&mut reader, dwg, dxf, false, SurfaceKind::Generic);
+        reader.check_error().expect("surface record");
+        assert_eq!(surface.u_isolines, 6);
+        assert_eq!(surface.v_isolines, 4);
+        let extra = surface.acis.extra_acis_data.expect("second modeler body");
+        assert_eq!(extra.sab_data, sab);
     }
 
     #[test]
