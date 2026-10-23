@@ -2139,6 +2139,18 @@ impl<'a> SectionReader<'a> {
                         }
                     }
                 }
+                "$DIMFXLON" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_fixed_ext_line_on = p.as_i16() == Some(1);
+                    }
+                }
+                "$DIMARCSYM" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_i16() {
+                            hdr.dim_arc_symbol = v;
+                        }
+                    }
+                }
                 "$DIMJOGANG" => {
                     if let Some(p) = self.reader.read_pair()? {
                         if let Some(v) = p.as_double() {
@@ -12143,7 +12155,7 @@ impl<'a> SectionReader<'a> {
     /// Read an OLE2FRAME entity
     fn read_ole2frame(&mut self) -> Result<Option<Ole2Frame>> {
         let mut ole = Ole2Frame::new();
-        let mut binary_chunks: Vec<Vec<u8>> = Vec::new();
+        let mut data: Vec<u8> = Vec::new();
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -12203,17 +12215,10 @@ impl<'a> SectionReader<'a> {
                         ole.lock_aspect = v.clamp(0, u8::MAX as i16) as u8;
                     }
                 }
-                310 => {
-                    // Binary data chunk (hex-encoded)
-                    let hex = pair.value_string.trim();
-                    if let Ok(bytes) = (0..hex.len())
-                        .step_by(2)
-                        .map(|i| u8::from_str_radix(&hex[i..i.min(hex.len()).max(i + 2)], 16))
-                        .collect::<std::result::Result<Vec<u8>, _>>()
-                    {
-                        binary_chunks.push(bytes);
-                    }
-                }
+                // Binary data chunk (hex). A damaged chunk (odd length, not hex, not
+                // ASCII) keeps its whole hex pairs, as the other binary groups do; slicing
+                // the text by byte offsets panicked on it.
+                310 => append_hex_bytes(&mut data, &pair.value_string),
                 1 | 90 => { /* end marker and length */ }
                 _ => {
                     self.try_read_common_entity_code(&pair, &mut ole.common)?;
@@ -12221,8 +12226,6 @@ impl<'a> SectionReader<'a> {
             }
         }
 
-        // Concatenate binary chunks
-        let data: Vec<u8> = binary_chunks.into_iter().flatten().collect();
         let (storage, envelope, _, _) = Ole2Frame::decode_payload(&data);
         ole.storage = storage;
         ole.envelope = envelope;

@@ -611,6 +611,34 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         })?;
         self.write_header_variable("$DIMPOST", |w| w.write_string(1, &hdr.dim_post))?;
         self.write_header_variable("$DIMAPOST", |w| w.write_string(1, &hdr.dim_alt_post))?;
+        for (variable, stored, handle) in [
+            (
+                "$DIMBLK",
+                hdr.dim_arrow_block.as_str(),
+                hdr.dim_arrow_block_handle,
+            ),
+            (
+                "$DIMBLK1",
+                hdr.dim_arrow_block1.as_str(),
+                hdr.dim_arrow_block1_handle,
+            ),
+            (
+                "$DIMBLK2",
+                hdr.dim_arrow_block2.as_str(),
+                hdr.dim_arrow_block2_handle,
+            ),
+            (
+                "$DIMLDRBLK",
+                hdr.dim_leader_arrow_block.as_str(),
+                hdr.dim_leader_arrow_block_handle,
+            ),
+        ] {
+            let name =
+                crate::document::dimension_arrow_dxf_name(&document.block_records, stored, handle);
+            if !name.is_empty() {
+                self.write_header_variable(variable, |w| w.write_string(1, &name))?;
+            }
+        }
         self.write_header_variable("$DIMSTYLE", |w| {
             w.write_string(2, &hdr.current_dimstyle_name)
         })?;
@@ -661,6 +689,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.write_header_variable("$DIMFXL", |w| {
                 w.write_double(40, hdr.dim_fixed_ext_line_length)
             })?;
+            self.write_header_variable("$DIMFXLON", |w| {
+                w.write_i16(70, if hdr.dim_fixed_ext_line_on { 1 } else { 0 })
+            })?;
+            self.write_header_variable("$DIMARCSYM", |w| w.write_i16(70, hdr.dim_arc_symbol))?;
             // DIMJOGANG valid range is 5°..90°
             self.write_header_variable("$DIMJOGANG", |w| {
                 w.write_double(
@@ -5113,8 +5145,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     self.write_attrib(att, insert_handle)?;
                 }
             }
-            // SEQEND terminates the attribute sequence
-            let seqend_handle = self.allocate_handle();
+            // SEQEND terminates the attribute sequence; it keeps the
+            // handle it was read with (DWG or DXF), as the DWG writer does.
+            let seqend_handle = insert
+                .seqend_handle
+                .filter(|handle| !handle.is_null())
+                .unwrap_or_else(|| self.allocate_handle());
             self.writer.write_entity_type("SEQEND")?;
             self.writer.write_handle(5, seqend_handle)?;
             self.writer.write_handle(330, insert_handle)?;
@@ -9811,12 +9847,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Leader line color
         self.write_color_i32(91, mleader.line_color)?;
 
-        // Leader line type handle (code 341; use ByLayer if null or ByBlock)
+        // Leader line type handle (code 341). A ByBlock leader stays ByBlock
+        // (it is AutoCAD's default for a multileader's leader lines); only a
+        // missing one is written as ByBlock, the same default.
         {
             let h = mleader
                 .line_type_handle
-                .filter(|h| *h != Handle::NULL && *h != self.byblock_linetype_handle)
-                .unwrap_or(self.bylayer_linetype_handle);
+                .filter(|h| *h != Handle::NULL)
+                .unwrap_or(self.byblock_linetype_handle);
             if h != Handle::NULL {
                 self.writer.write_handle(341, h)?;
             }
@@ -11720,10 +11758,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let data = ole.encoded_payload();
         if !data.is_empty() {
             self.writer.write_i32(90, data.len() as i32)?;
-            // Write binary data in 127-byte hex chunks (code 310)
+            // Write binary data in 127-byte hex chunks (code 310), encoded by the
+            // stream writer (one string per byte made a 10 MB OLE object take seconds).
             for chunk in data.chunks(127) {
-                let hex: String = chunk.iter().map(|b| format!("{:02X}", b)).collect();
-                self.writer.write_string(310, &hex)?;
+                self.writer.write_binary(310, chunk)?;
             }
         }
         self.writer.write_string(1, "OLE")?;

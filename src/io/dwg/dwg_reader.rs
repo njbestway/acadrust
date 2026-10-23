@@ -1202,6 +1202,7 @@ impl<R: Read + Seek> DwgReader<R> {
                 }
             }
             self.report_progress(1000);
+            crate::document::sync_dimension_arrow_header(&mut document);
             let stats = crate::io::read::ReadStats::from_document(
                 &document,
                 SourceFormat::Dwg,
@@ -1674,6 +1675,7 @@ impl<R: Read + Seek> DwgReader<R> {
             );
         }
         self.report_progress(1000);
+        crate::document::sync_dimension_arrow_header(&mut document);
         diagnostics.extend(std::mem::take(&mut self.pending_diagnostics));
         let source_sections =
             usize::from(handles_section_read).saturating_add(usize::from(objects_section_read));

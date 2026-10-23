@@ -4283,11 +4283,18 @@ impl<'a> DwgObjectWriter<'a> {
         // 91 Leader LineColor (CMC)
         self.writer.write_cm_color(&e.line_color);
 
-        // 341 LeaderLineTypeID (handle) - HardPointer
+        // 341 LeaderLineTypeID (handle) - HardPointer. Without one, ByBlock:
+        // AutoCAD's default for a multileader's leader lines.
         let lt = e
             .line_type_handle
             .filter(|handle| !handle.is_null())
-            .unwrap_or(self.document.header.bylayer_linetype_handle);
+            .unwrap_or_else(|| {
+                self.document
+                    .line_types
+                    .get("ByBlock")
+                    .map(|lt| lt.handle)
+                    .unwrap_or(self.document.header.byblock_linetype_handle)
+            });
         self.writer
             .write_handle(DwgReferenceType::HardPointer, lt.value());
 
@@ -5445,8 +5452,10 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit(acis.wireframe_isoline_present);
         if acis.wireframe_isoline_present {
             self.writer.write_bit_long(0); // wires
-            self.writer.write_bit_long(0); // silhouettes
         }
+        // The silhouette count is present in every wireframe block,
+        // independently of the isoline cache.
+        self.writer.write_bit_long(0);
         // COMMON_3DSOLID has an extra-modeler-data gate only when the
         // AcDs-backed entity contains a wireframe section.
         self.writer.write_bit(acis.extra_acis_data.is_none());
