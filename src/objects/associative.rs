@@ -1,6 +1,6 @@
 //! Semantic model for associative-network objects.
 //!
-//! AutoCAD stores most associative objects as short inheritance chains.  The
+//! ACAD stores most associative objects as short inheritance chains.  The
 //! shared structs below mirror those chains so DWG and DXF use one lossless
 //! representation instead of class-specific byte blobs.
 
@@ -17,7 +17,9 @@ pub struct AssociativeObject {
     pub dxf_name: String,
     pub cpp_class_name: String,
     pub data: AssociativeData,
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// Known source version, retained as provenance without raw-record storage.
+    /// Missing values in field-named Serde input default to `None`.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub source_version: Option<DxfVersion>,
 }
 
@@ -1380,6 +1382,18 @@ pub struct AssocDimensionReference {
     pub has_last_point_reference: bool,
 }
 
+impl AssocDimensionReference {
+    /// Whether a reference with this osnap type and number of referenced
+    /// objects stores its main sub-entity (subent type, GS marker, xref
+    /// paths). A reference that snaps to no object has none to describe:
+    /// AutoCAD writes an `_End` "last point" reference with no objects as
+    /// class name, osnap type, object count, distance, point and the
+    /// continuation bit only, in DWG and DXF alike.
+    pub fn stores_main_subentity(osnap_type: u8, object_count: usize) -> bool {
+        osnap_type != 0 && object_count > 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AssocDimensionAssociation {
@@ -1412,7 +1426,7 @@ pub fn associative_canonical_name(name: &str) -> String {
         upper
     };
     match canonical.as_str() {
-        // Seen in Autodesk/LibreDWG class tables without the second `D`.
+        // Native class tables include this spelling without the second `D`.
         "ASSOCALIGNEDIMACTIONBODY" => "ASSOCALIGNEDDIMACTIONBODY".to_string(),
         "ACDBPERSSUBENTMANAGER" => "PERSUBENTMGR".to_string(),
         "ACDBDIMASSOC" => "DIMASSOC".to_string(),

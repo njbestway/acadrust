@@ -454,11 +454,11 @@ impl DimensionAngular2Ln {
     pub fn new(vertex: Vector3, first_point: Vector3, second_point: Vector3) -> Self {
         let mut base = DimensionBase::new(DimensionType::Angular);
 
-        // Calculate angle between the two lines
+        // Calculate angle between the two lines; files store it in radians.
         let v1 = (first_point - vertex).normalize();
         let v2 = (second_point - vertex).normalize();
         let angle = v1.dot(&v2).acos();
-        base.actual_measurement = angle.to_degrees();
+        base.actual_measurement = angle;
 
         Self {
             base,
@@ -536,11 +536,11 @@ impl DimensionAngular3Pt {
     pub fn new(vertex: Vector3, first_point: Vector3, second_point: Vector3) -> Self {
         let mut base = DimensionBase::new(DimensionType::Angular3Point);
 
-        // Calculate angle
+        // Calculate angle; files store it in radians.
         let v1 = (first_point - vertex).normalize();
         let v2 = (second_point - vertex).normalize();
         let angle = v1.dot(&v2).acos();
-        base.actual_measurement = angle.to_degrees();
+        base.actual_measurement = angle;
 
         Self {
             base,
@@ -984,55 +984,26 @@ impl Dimension {
             Dimension::LargeRadial(d) => d.measurement(),
         }
     }
+
+    /// The measurement a file stores (DXF group 42, the DWG actual
+    /// measurement): an angular dimension's angle in radians, any other
+    /// dimension's [`measurement`](Self::measurement).
+    pub fn stored_measurement(&self) -> f64 {
+        match self {
+            Dimension::Angular2Ln(d) => d.measurement_radians(),
+            Dimension::Angular3Pt(d) => d.measurement_radians(),
+            _ => self.measurement(),
+        }
+    }
 }
 
 impl super::Entity for Dimension {
-    fn handle(&self) -> crate::types::Handle {
-        self.base().common.handle
+    fn common(&self) -> &super::EntityCommon {
+        &self.base().common
     }
 
-    fn set_handle(&mut self, handle: crate::types::Handle) {
-        self.base_mut().common.handle = handle;
-    }
-
-    fn layer(&self) -> &str {
-        &self.base().common.layer
-    }
-
-    fn set_layer(&mut self, layer: String) {
-        self.base_mut().common.layer = layer;
-    }
-
-    fn color(&self) -> crate::types::Color {
-        self.base().common.color
-    }
-
-    fn set_color(&mut self, color: crate::types::Color) {
-        self.base_mut().common.color = color;
-    }
-
-    fn line_weight(&self) -> crate::types::LineWeight {
-        self.base().common.line_weight
-    }
-
-    fn set_line_weight(&mut self, weight: crate::types::LineWeight) {
-        self.base_mut().common.line_weight = weight;
-    }
-
-    fn transparency(&self) -> crate::types::Transparency {
-        self.base().common.transparency
-    }
-
-    fn set_transparency(&mut self, transparency: crate::types::Transparency) {
-        self.base_mut().common.transparency = transparency;
-    }
-
-    fn is_invisible(&self) -> bool {
-        self.base().common.invisible
-    }
-
-    fn set_invisible(&mut self, invisible: bool) {
-        self.base_mut().common.invisible = invisible;
+    fn common_mut(&mut self) -> &mut super::EntityCommon {
+        &mut self.base_mut().common
     }
 
     fn bounding_box(&self) -> crate::types::BoundingBox3D {

@@ -68,7 +68,8 @@ pub use dynamic_block::{
     BlockLookupAction, BlockLookupColumn, BlockLookupParameter, BlockMoveAction,
     BlockOnePointParameter, BlockOrientedGrip, BlockParameter, BlockParameterDependencyBody,
     BlockParameterProperty, BlockParameterValueSet, BlockPointParameter, BlockPolarParameter,
-    BlockPolarStretchAction, BlockRepresentationData, BlockRotationParameter, BlockStretchAction,
+    BlockPolarStretchAction, BlockPropertiesTable, BlockPropertiesTableField,
+    BlockPropertiesTableValue, BlockRepresentationData, BlockRotationParameter, BlockStretchAction,
     BlockStretchCode, BlockStretchHandle, BlockTwoPointParameter, BlockUserParameter,
     BlockXYParameter, DynamicBlockData, DynamicBlockObject, SolidHistory, SolidHistoryBoolean,
     SolidHistoryBox, SolidHistoryBrep, SolidHistoryChamfer, SolidHistoryCone, SolidHistoryCylinder,
@@ -291,12 +292,12 @@ pub struct Layout {
 
     // ── Remaining embedded PlotSettings fields ──────────────────────────────
     // The LAYOUT object embeds a full PlotSettings record. Preserving only the
-    // paper size left the sheet unsized in AutoCAD (rendered tiny in the corner
+    // paper size left the sheet unsized in ACAD (rendered tiny in the corner
     // because the paper-size name / units / margins were dropped). Keep the rest
     // so the layout round-trips faithfully. See issue #156.
     pub plot_page_name: String,
     pub plot_printer_name: String,
-    /// Paper-size name (e.g. "ISO_A4_(210.00_x_297.00_MM)"). AutoCAD renders the
+    /// Paper-size name (e.g. "ISO_A4_(210.00_x_297.00_MM)"). ACAD renders the
     /// sheet from this; an empty name shows no/wrong paper.
     pub paper_size: String,
     pub plot_view_name: String,
@@ -471,6 +472,8 @@ pub enum ObjectType {
     DgnLineStyle(DgnLineStyleObject),
     /// Fixed ACAD proxy-object schema.
     ProxyObject(ProxyObject),
+    /// ACAD Arch non-graphical class (style, display rep, anchor, list).
+    Arch(crate::classes::arch::ArchObject),
     /// Unknown object type (stored as raw data)
     Unknown {
         /// Object type name
@@ -523,6 +526,11 @@ impl ObjectType {
             ObjectType::RegisteredClass(value) => {
                 value.raw_dwg_data = None;
                 value.raw_dwg_version = None;
+            }
+            ObjectType::Arch(value) => {
+                value.raw_dwg_data = None;
+                value.raw_dwg_version = None;
+                value.raw_dxf_codes = None;
             }
             ObjectType::Unknown {
                 raw_dxf_codes,
@@ -581,13 +589,15 @@ impl ObjectType {
             ObjectType::RegisteredClass(value) => value.handle,
             ObjectType::DgnLineStyle(value) => value.handle,
             ObjectType::ProxyObject(value) => value.handle,
+            ObjectType::Arch(value) => value.handle,
             ObjectType::Unknown { handle, .. } => *handle,
         }
     }
 
     /// Restore storage-only data omitted from serde after editing an object's
-    /// public representation. The source and destination must have the same
-    /// variant and identity; callers remain responsible for that check.
+    /// public representation. Serialized associative `source_version` keeps
+    /// its edited value, including `None`. The source and destination must have
+    /// the same variant and identity; callers remain responsible for that check.
     pub fn preserve_storage_data_from(&mut self, source: &Self) {
         match (self, source) {
             (Self::Layout(value), Self::Layout(source)) => {
@@ -604,9 +614,6 @@ impl ObjectType {
                 value.raw_dxf_codes = source.raw_dxf_codes.clone();
                 value.raw_dxf_version = source.raw_dxf_version;
             }
-            (Self::Associative(value), Self::Associative(source)) => {
-                value.source_version = source.source_version;
-            }
             (Self::ClassObject(value), Self::ClassObject(source)) => {
                 if let (
                     ClassObjectData::CsacDocumentOptions(value),
@@ -620,6 +627,11 @@ impl ObjectType {
             (Self::RegisteredClass(value), Self::RegisteredClass(source)) => {
                 value.raw_dwg_data = source.raw_dwg_data.clone();
                 value.raw_dwg_version = source.raw_dwg_version;
+            }
+            (Self::Arch(value), Self::Arch(source)) => {
+                value.raw_dwg_data = source.raw_dwg_data.clone();
+                value.raw_dwg_version = source.raw_dwg_version;
+                value.raw_dxf_codes = source.raw_dxf_codes.clone();
             }
             (
                 Self::Unknown {
@@ -684,6 +696,7 @@ impl ObjectType {
             ObjectType::RegisteredClass(value) => value.handle = handle,
             ObjectType::DgnLineStyle(value) => value.handle = handle,
             ObjectType::ProxyObject(value) => value.handle = handle,
+            ObjectType::Arch(value) => value.handle = handle,
             ObjectType::Unknown {
                 handle: old_handle, ..
             } => *old_handle = handle,
@@ -729,6 +742,7 @@ impl ObjectType {
             ObjectType::RegisteredClass(value) => value.handle.is_null(),
             ObjectType::DgnLineStyle(value) => value.handle.is_null(),
             ObjectType::ProxyObject(value) => value.handle.is_null(),
+            ObjectType::Arch(value) => value.handle.is_null(),
             ObjectType::Unknown { handle, .. } => handle.is_null(),
         }
     }

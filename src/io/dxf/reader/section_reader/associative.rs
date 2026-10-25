@@ -1005,7 +1005,7 @@ fn read_array_item(cursor: &mut AssocCursor<'_>) -> AssocArrayItem {
 }
 
 fn read_dimension_association_dxf(record: &AssocDxfRecord) -> AssocDimensionAssociation {
-    // AutoCAD writes the dimension handle before the scalar DIMASSOC fields,
+    // ACAD writes the dimension handle before the scalar DIMASSOC fields,
     // while dwg2.spec lists it after them. Read it independently so both
     // orderings decode without advancing the positional reference cursor.
     let dimension = record.handle("AcDbDimAssoc", 330, 0);
@@ -1026,11 +1026,12 @@ fn read_dimension_association_dxf(record: &AssocDxfRecord) -> AssocDimensionAsso
             let class_name = cursor.text(1);
             let osnap_type = cursor.i32(72) as u8;
             let xrefs = cursor.consecutive_handles(331);
-            let (main_subent_type, main_gs_marker, xref_paths) = if osnap_type != 0 {
-                (cursor.i32(73), cursor.i32(91), cursor.consecutive_text(301))
-            } else {
-                (0, 0, Vec::new())
-            };
+            let (main_subent_type, main_gs_marker, xref_paths) =
+                if AssocDimensionReference::stores_main_subentity(osnap_type, xrefs.len()) {
+                    (cursor.i32(73), cursor.i32(91), cursor.consecutive_text(301))
+                } else {
+                    (0, 0, Vec::new())
+                };
             let osnap_distance = cursor.f64(40);
             let osnap_point = Vector3::new(cursor.f64(10), cursor.f64(20), cursor.f64(30));
             let (

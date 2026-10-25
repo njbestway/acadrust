@@ -37,7 +37,7 @@ pub struct DxfReaderConfiguration {
     /// Default encoding to use for non-UTF8 strings if the DXF file does not
     /// specify it via $DWGCODEPAGE.
     ///
-    /// Only applies to DXF versions prior to AC1021 (AutoCAD 2007).
+    /// Only applies to DXF versions prior to AC1021 (ACAD 2007).
     pub default_encoding: Option<String>,
 }
 
@@ -423,6 +423,11 @@ impl DxfReader {
             // rather than the native codes; rebuild it (dimension text fills).
             crate::io::dwg::dwg_reader::recover_mtext_bg_roundtrip(&mut document);
         }
+
+        // Vertex ids are absent in pre-R2010 sources while constraint edge
+        // subentities already reference them; rebuild the ids so the
+        // references survive a re-encode to R2010+ formats.
+        document.restore_constraint_vertex_ids();
 
         source_records = source_records.saturating_add(skipped_source_records);
         let stats = crate::io::read::ReadStats::from_document(

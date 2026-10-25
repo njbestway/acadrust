@@ -30,6 +30,8 @@ output*/*
 *.dwl2
 *.dmp
 /crash_report.txt
+/ErrorReports/
+/*.log
 output_*.json
 
 

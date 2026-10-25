@@ -1,6 +1,6 @@
 //! MTEXT format string parser.
 //!
-//! Parses AutoCAD MTEXT formatted strings into structured [`MTextDocument`]
+//! Parses ACAD MTEXT formatted strings into structured [`MTextDocument`]
 //! containing paragraphs and styled spans.
 //!
 //! For the full specification of supported control codes, see the [`mtext_format`] module.
@@ -12,7 +12,7 @@ use super::types::*;
 /// Parse an MTEXT format string into a structured document.
 ///
 /// Recognizes all control codes whether or not the content is wrapped in
-/// `{...}`. Matches the behavior of AutoCAD MTEXT and MLEADER entities.
+/// `{...}`. Matches the behavior of ACAD MTEXT and MLEADER entities.
 ///
 /// # Arguments
 ///
@@ -345,6 +345,9 @@ impl MTextParser {
                     self.text_buf.push(code_char);
                     self.pos += 1;
                 }
+            } else {
+                // A trailing `%%` has no code yet (an editor mid-typing): keep it.
+                self.text_buf.push_str("%%");
             }
         } else {
             // Not a %% code, just a regular '%' character
@@ -2077,6 +2080,11 @@ mod tests {
     fn test_parse_only_special_chars() {
         let doc = parse_mtext("{%%d%%p%%c}", false);
         assert_eq!(doc.paragraphs[0].to_plain_text(), "°±Ø");
+    }
+
+    #[test]
+    fn test_parse_trailing_double_percent_is_kept() {
+        assert_eq!(parse_mtext("x%%", true).to_plain_text(), "x%%");
     }
 
     #[test]

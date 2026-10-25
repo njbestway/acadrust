@@ -623,7 +623,7 @@ impl SatRecord {
     pub fn token_float(&self, index: usize) -> Option<f64> {
         // Coordinate-aware flat-float indexing. SAT text stores a point/vector
         // as three separate float tokens, so the geometry accessors read
-        // px,py,pz / nx,ny,nz at consecutive indices. SAB/ASM (AutoCAD 2013+)
+        // px,py,pz / nx,ny,nz at consecutive indices. SAB/ASM (ACAD 2013+)
         // packs each coordinate triple into ONE Position/Direction token, so
         // expand those into three consecutive float slots here. Records with
         // no Position tokens (all SAT, most SAB scalars) index 1:1 as before.
@@ -654,7 +654,7 @@ impl SatRecord {
     /// Pointer by ordinal: the `index`-th pointer token, skipping interleaved
     /// scalar tokens. Most accessors use absolute positions (`token_pointer`)
     /// because ACIS keeps parameters in fixed slots, but a few records gained
-    /// an extra scalar field in ASM (ShapeManager, AutoCAD 2013+) — e.g. a
+    /// an extra scalar field in ASM (ShapeManager, ACAD 2013+) — e.g. a
     /// vertex's tolerance int between its edge and point — where ordinal
     /// indexing stays correct for both ACIS and ASM.
     pub fn nth_pointer(&self, index: usize) -> Option<SatPointer> {
@@ -1263,7 +1263,7 @@ impl<'a> SatVertex<'a> {
 
     /// Pointer to the point geometry.
     ///
-    /// Uses pointer-ordinal indexing so the ASM (AutoCAD 2013+) vertex layout
+    /// Uses pointer-ordinal indexing so the ASM (ACAD 2013+) vertex layout
     /// `$attr $edge <tolerance:int> $point` resolves the same as the classic
     /// ACIS `$attr $edge $point`.
     pub fn point(&self) -> SatPointer {
@@ -1965,9 +1965,10 @@ impl<'a> SatSplineSurface<'a> {
 
     pub fn offset_in(&self, document: &SatDocument) -> Option<(SatBSplineSurface, f64)> {
         let tokens = self.definition_tokens(document)?;
+        // `off_spl_sur` in ASM files, `offsur` in ACIS 7 ones.
         let name = tokens
             .iter()
-            .position(|t| t.as_ident() == Some("off_spl_sur"))?;
+            .position(|t| matches!(t.as_ident(), Some("off_spl_sur" | "offsur")))?;
         let open = (name..tokens.len()).find(|&i| tokens[i].as_ident() == Some("{"))?;
         let base = decode_spline_definition(document, subtype_definition(document, tokens, open)?)?;
         // The base's u and v ranges: `I` unset, or `F` and a bound, per end.
@@ -3153,7 +3154,7 @@ impl SatDocument {
 
     /// Strip non-geometry entities for SAB binary encoding.
     ///
-    /// AutoCAD/IntelliCAD's ACIS SAB format only includes core geometric
+    /// ACAD/IntelliCAD's ACIS SAB format only includes core geometric
     /// entities. Custom attribute entities (like `eye_refinement`,
     /// `vertex_template`, `*-attrib`) cause "NOT THAT KIND OF CLASS"
     /// errors in the ACIS kernel when encountered in SAB binary data.
@@ -3229,7 +3230,7 @@ impl SatDocument {
         self.header.num_records = self.records.len();
 
         // Normalize spatial_resolution to 1.0 for SAB output.
-        // IntelliCAD/AutoCAD always use 1.0 in native SAB data.
+        // IntelliCAD/ACAD always use 1.0 in native SAB data.
         // Source files from older ACIS versions may use different values
         // (e.g. 10.0) which can cause compatibility issues.
         self.header.spatial_resolution = 1.0;

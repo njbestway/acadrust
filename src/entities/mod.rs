@@ -108,7 +108,7 @@ pub use multileader::{
     TextAttachmentDirectionType, TextAttachmentPointType, TextAttachmentType,
 };
 pub use ole2frame::{Ole2Frame, OleFrameEnvelope, OleObjectType};
-pub use ole_presentation::{extract_presentation, OlePresentation};
+pub use ole_presentation::{extract_presentation, ole_user_type, OlePresentation};
 pub use point::Point;
 pub use polyface_mesh::{
     PolyfaceFace, PolyfaceMesh, PolyfaceMeshFlags, PolyfaceSmoothType, PolyfaceVertex,
@@ -156,43 +156,77 @@ pub use viewport::{GridFlags, StandardView, Viewport, ViewportRenderMode, Viewpo
 pub use wipeout::{Wipeout, WipeoutClipMode, WipeoutClipType, WipeoutDisplayFlags};
 pub use xline::XLine;
 
-/// Base trait for all CAD entities
+/// Base trait for all CAD entities.
+///
+/// Common fields live on [`EntityCommon`]. Implement [`Self::common`] and
+/// [`Self::common_mut`]; the handle, layer, color, line weight, transparency,
+/// and visibility methods forward to those.
 pub trait Entity {
+    /// Common entity fields.
+    fn common(&self) -> &EntityCommon;
+
+    /// Mutable common entity fields.
+    fn common_mut(&mut self) -> &mut EntityCommon;
+
     /// Get the entity's unique handle
-    fn handle(&self) -> Handle;
+    fn handle(&self) -> Handle {
+        self.common().handle
+    }
 
     /// Set the entity's handle
-    fn set_handle(&mut self, handle: Handle);
+    fn set_handle(&mut self, handle: Handle) {
+        self.common_mut().handle = handle;
+    }
 
     /// Get the entity's layer name
-    fn layer(&self) -> &str;
+    fn layer(&self) -> &str {
+        &self.common().layer
+    }
 
     /// Set the entity's layer name
-    fn set_layer(&mut self, layer: String);
+    fn set_layer(&mut self, layer: String) {
+        self.common_mut().layer = layer;
+    }
 
     /// Get the entity's color
-    fn color(&self) -> Color;
+    fn color(&self) -> Color {
+        self.common().color
+    }
 
     /// Set the entity's color
-    fn set_color(&mut self, color: Color);
+    fn set_color(&mut self, color: Color) {
+        self.common_mut().color = color;
+    }
 
     /// Get the entity's line weight
-    fn line_weight(&self) -> LineWeight;
+    fn line_weight(&self) -> LineWeight {
+        self.common().line_weight
+    }
 
     /// Set the entity's line weight
-    fn set_line_weight(&mut self, weight: LineWeight);
+    fn set_line_weight(&mut self, weight: LineWeight) {
+        self.common_mut().line_weight = weight;
+    }
 
     /// Get the entity's transparency
-    fn transparency(&self) -> Transparency;
+    fn transparency(&self) -> Transparency {
+        self.common().transparency
+    }
 
     /// Set the entity's transparency
-    fn set_transparency(&mut self, transparency: Transparency);
+    fn set_transparency(&mut self, transparency: Transparency) {
+        self.common_mut().transparency = transparency;
+    }
 
     /// Check if the entity is invisible
-    fn is_invisible(&self) -> bool;
+    fn is_invisible(&self) -> bool {
+        self.common().invisible
+    }
 
     /// Set the entity's visibility
-    fn set_invisible(&mut self, invisible: bool);
+    fn set_invisible(&mut self, invisible: bool) {
+        self.common_mut().invisible = invisible;
+    }
 
     /// Get the bounding box of the entity
     fn bounding_box(&self) -> BoundingBox3D;
@@ -413,7 +447,13 @@ pub struct R12EntityMetadata {
     pub child_viewports: Vec<Option<u16>>,
 }
 
-/// Common entity data shared by all entities
+/// Common entity data shared by all entities.
+///
+/// With the `serde` feature, native references and flags are retained alongside
+/// the public appearance fields. Older field-named input (such as JSON) without
+/// these fields defaults optional references and `entity_mode` to `None`, and
+/// flags to zero. Positional formats require a separate compatibility strategy.
+/// Raw DWG records, graphic bytes and the derived data-store bit remain excluded.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntityCommon {
@@ -424,7 +464,7 @@ pub struct EntityCommon {
     /// DWG layer handle as read from the file. Preserved so consumers can tell
     /// an entity on layer "0" from one whose layer reference did not resolve
     /// (the DWG reader falls back to `layer = "0"` in that case).
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub layer_handle: Option<Handle>,
     /// Color
     pub color: Color,
@@ -434,7 +474,7 @@ pub struct EntityCommon {
     pub linetype: String,
     /// DWG linetype handle. Preserved so R13/R14 entities can round-trip
     /// non-ByLayer linetypes even when the table name cannot be resolved.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub linetype_handle: Option<Handle>,
     /// Linetype scale factor (default 1.0)
     pub linetype_scale: f64,
@@ -460,33 +500,33 @@ pub struct EntityCommon {
 
     // ── Native reference/round-trip fields ──
     /// AcDbColor object handle for a color-book color — R2004+.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub color_book_handle: Option<Handle>,
     /// Full visual-style override handle — R2010+; DXF code 348.
     pub full_visual_style_handle: Option<Handle>,
     /// Face visual-style override handle — R2010+.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub face_visual_style_handle: Option<Handle>,
     /// Edge visual-style override handle — R2010+.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub edge_visual_style_handle: Option<Handle>,
     /// Material flags (BB: 00=bylayer, 01=byblock, 10=reserved, 11=handle) — R2007+
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub material_flags: u8,
     /// Material handle (only valid when material_flags == 0b11) — R2007+
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub material_handle: Option<Handle>,
     /// Shadow flags (RC) — R2007+
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub shadow_flags: u8,
     /// Plotstyle flags (BB: 00=bylayer, 01=byblock, 10=reserved, 11=handle) — R2000+
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub plotstyle_flags: u8,
     /// Plotstyle handle (only valid when plotstyle_flags == 0b11) — R2000+
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub plotstyle_handle: Option<Handle>,
     /// Entity mode (0=owned, 1=paper, 2=model) — raw DWG value for round-trip
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub entity_mode: Option<u8>,
     /// Native AC1009 viewport references retained across edits and DWG writes.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -510,18 +550,7 @@ pub struct EntityCommon {
 
 impl EntityCommon {
     fn preserve_storage_data_from(&mut self, source: &Self) {
-        self.layer_handle = source.layer_handle;
-        self.linetype_handle = source.linetype_handle;
         self.graphic_data = source.graphic_data.clone();
-        self.color_book_handle = source.color_book_handle;
-        self.face_visual_style_handle = source.face_visual_style_handle;
-        self.edge_visual_style_handle = source.edge_visual_style_handle;
-        self.material_flags = source.material_flags;
-        self.material_handle = source.material_handle;
-        self.shadow_flags = source.shadow_flags;
-        self.plotstyle_flags = source.plotstyle_flags;
-        self.plotstyle_handle = source.plotstyle_handle;
-        self.entity_mode = source.entity_mode;
         self.r12_metadata = source.r12_metadata.clone();
         self.has_ds_data = source.has_ds_data;
     }
@@ -683,8 +712,12 @@ pub enum EntityType {
 
 impl EntityType {
     /// Restore storage-only data omitted from serde after editing the public
-    /// representation of an entity. The source and destination must have the
-    /// same variant and identity; callers remain responsible for that check.
+    /// representation of an entity. Serialized common references and flags keep
+    /// their edited values, including `None` and zero. For legacy R12 editing,
+    /// source `r12_metadata` is still restored even though it is serialized.
+    /// The source `raw_record` replay cache is not restored.
+    /// The source and destination must have the same variant and identity;
+    /// callers remain responsible for that check.
     pub fn preserve_storage_data_from(&mut self, source: &Self) {
         self.common_mut()
             .preserve_storage_data_from(source.common());
@@ -811,110 +844,12 @@ impl EntityType {
 
     /// Get a reference to the entity's common data
     pub fn common(&self) -> &EntityCommon {
-        match self {
-            EntityType::Point(e) => &e.common,
-            EntityType::Line(e) => &e.common,
-            EntityType::Circle(e) => &e.common,
-            EntityType::Arc(e) => &e.common,
-            EntityType::Ellipse(e) => &e.common,
-            EntityType::Polyline(e) => &e.common,
-            EntityType::Polyline2D(e) => &e.common,
-            EntityType::Polyline3D(e) => &e.common,
-            EntityType::LwPolyline(e) => &e.common,
-            EntityType::Text(e) => &e.common,
-            EntityType::MText(e) => &e.common,
-            EntityType::Spline(e) => &e.common,
-            EntityType::Helix(e) => &e.common,
-            EntityType::Dimension(e) => &e.base().common,
-            EntityType::Hatch(e) => &e.common,
-            EntityType::Solid(e) => &e.common,
-            EntityType::Face3D(e) => &e.common,
-            EntityType::Insert(e) => &e.common,
-            EntityType::Block(e) => &e.common,
-            EntityType::BlockEnd(e) => &e.common,
-            EntityType::Ray(e) => &e.common,
-            EntityType::XLine(e) => &e.common,
-            EntityType::Viewport(e) => &e.common,
-            EntityType::AttributeDefinition(e) => &e.common,
-            EntityType::AttributeEntity(e) => &e.common,
-            EntityType::Leader(e) => &e.common,
-            EntityType::MultiLeader(e) => &e.common,
-            EntityType::MLine(e) => &e.common,
-            EntityType::Mesh(e) => &e.common,
-            EntityType::RasterImage(e) => &e.common,
-            EntityType::Solid3D(e) => &e.common,
-            EntityType::Region(e) => &e.common,
-            EntityType::Body(e) => &e.common,
-            EntityType::Surface(e) => &e.common,
-            EntityType::Table(e) => &e.common,
-            EntityType::Tolerance(e) => &e.common,
-            EntityType::PolyfaceMesh(e) => &e.common,
-            EntityType::Wipeout(e) => &e.common,
-            EntityType::Shape(e) => &e.common,
-            EntityType::Underlay(e) => &e.common,
-            EntityType::Seqend(e) => &e.common,
-            EntityType::Ole2Frame(e) => &e.common,
-            EntityType::PolygonMesh(e) => &e.common,
-            EntityType::Light(e) => &e.common,
-            EntityType::SectionSymbol(e) => &e.common,
-            EntityType::ViewBorder(e) => &e.common,
-            EntityType::Extended(e) => &e.common,
-            EntityType::Unknown(e) => &e.common,
-        }
+        self.as_entity().common()
     }
 
     /// Get a mutable reference to the entity's common data
     pub fn common_mut(&mut self) -> &mut EntityCommon {
-        match self {
-            EntityType::Point(e) => &mut e.common,
-            EntityType::Line(e) => &mut e.common,
-            EntityType::Circle(e) => &mut e.common,
-            EntityType::Arc(e) => &mut e.common,
-            EntityType::Ellipse(e) => &mut e.common,
-            EntityType::Polyline(e) => &mut e.common,
-            EntityType::Polyline2D(e) => &mut e.common,
-            EntityType::Polyline3D(e) => &mut e.common,
-            EntityType::LwPolyline(e) => &mut e.common,
-            EntityType::Text(e) => &mut e.common,
-            EntityType::MText(e) => &mut e.common,
-            EntityType::Spline(e) => &mut e.common,
-            EntityType::Helix(e) => &mut e.common,
-            EntityType::Dimension(e) => &mut e.base_mut().common,
-            EntityType::Hatch(e) => &mut e.common,
-            EntityType::Solid(e) => &mut e.common,
-            EntityType::Face3D(e) => &mut e.common,
-            EntityType::Insert(e) => &mut e.common,
-            EntityType::Block(e) => &mut e.common,
-            EntityType::BlockEnd(e) => &mut e.common,
-            EntityType::Ray(e) => &mut e.common,
-            EntityType::XLine(e) => &mut e.common,
-            EntityType::Viewport(e) => &mut e.common,
-            EntityType::AttributeDefinition(e) => &mut e.common,
-            EntityType::AttributeEntity(e) => &mut e.common,
-            EntityType::Leader(e) => &mut e.common,
-            EntityType::MultiLeader(e) => &mut e.common,
-            EntityType::MLine(e) => &mut e.common,
-            EntityType::Mesh(e) => &mut e.common,
-            EntityType::RasterImage(e) => &mut e.common,
-            EntityType::Solid3D(e) => &mut e.common,
-            EntityType::Region(e) => &mut e.common,
-            EntityType::Body(e) => &mut e.common,
-            EntityType::Surface(e) => &mut e.common,
-            EntityType::Table(e) => &mut e.common,
-            EntityType::Tolerance(e) => &mut e.common,
-            EntityType::PolyfaceMesh(e) => &mut e.common,
-            EntityType::Wipeout(e) => &mut e.common,
-            EntityType::Shape(e) => &mut e.common,
-            EntityType::Underlay(e) => &mut e.common,
-            EntityType::Seqend(e) => &mut e.common,
-            EntityType::Ole2Frame(e) => &mut e.common,
-            EntityType::PolygonMesh(e) => &mut e.common,
-            EntityType::Light(e) => &mut e.common,
-            EntityType::SectionSymbol(e) => &mut e.common,
-            EntityType::ViewBorder(e) => &mut e.common,
-            EntityType::Extended(e) => &mut e.common,
-            EntityType::Unknown(e) => &mut e.common,
-        }
+        self.as_entity_mut().common_mut()
     }
 }
 

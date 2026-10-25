@@ -1,5 +1,140 @@
 ## Changelog
 
+### Unreleased
+
+- **Annotative context data** - AutoCAD does not store the R2010
+  file-to-extension-dictionary bit on object-context leaves. 0.6.7 read that
+  bit and rejected drawings whose first failure was an aligned-dimension,
+  text, MTEXT, leader, or hatch context record (issue #177). MLeader records
+  that follow the ODA layout still use the extra bit.
+- **Elliptic hatch edges** - DXF groups 50 and 51 are circular angles. The
+  model and DWG keep the ellipse parameter, and a DXF round trip converts
+  between the two, including hatch context boundaries. The parameter stays in
+  the same revolution as the angle, so 300° and 424° come back unchanged
+  (issue #178).
+- **Arch records in DXF** - A non-R12 save no longer refuses the whole file
+  because an AEC object has no DXF body. Those objects are omitted, along
+  with dictionary entries and XDATA handles that point at them. An Arch entity with cached
+  proxy graphics is written as `ACAD_PROXY_ENTITY`. An entity with neither a
+  DXF body nor proxy graphics is omitted. `DxfWriter::omitted_architecture_records`
+  lists what was left out. An R12 save still fails, because R12 has no proxy
+  entity (issue #179).
+
+### 0.6.7
+
+- **ACAD Arch** - Reads and preserves AEC, structural, and building-systems
+  classes. A same-version DWG save writes the original class record with the
+  entity's current common properties. `wall`, `door`, and `window` build an
+  AC1032 drawing from parameters, on the sample ACAD layers unless another
+  layer is named. `decode` reads any Arch class into strings, handles,
+  placement, and proxy profiles. Supported edits update native parameters and
+  cached graphics together and return `ArchEditError` when the layout cannot
+  change. See the [Arch API](src/classes/arch/API.md).
+- **DIMASSOC point references without objects** - A point reference that
+  snaps to no object, such as the `_End` last point AutoCAD chains after a
+  perpendicular snap, carries no main sub-entity. DWG and DXF read and write
+  it without subent type, GS marker, and xref paths. Those drawings previously
+  failed the strict read.
+- **Modeler tails** - The silhouette count stays in the wireframe block,
+  including zero, as in ODA DWG section 20.4.41. A missing count is not
+  treated as a material tail. An R2007 solid-history region accepts a profile
+  stored as a body. AcDs wireframe stubs write the silhouette count even when
+  the isoline cache is absent (issue #170).
+- **Associative arcs** - An edge arc carries three points and four scalars in
+  every version. A shorter terminal record is not accepted as a decoded arc.
+- **Block Properties Tables** - Numeric rows and ordered DXF fields
+  round-trip. Each column stores two parameter handles, in DXF field order.
+  Unsupported value types are rejected instead of dropping the table.
+- **Constraint groups** - Pre-R2013 groups serialize inline, without a root
+  entry or class registry. Geometric dependency subentities keep their class
+  fields. Polylines whose vertices are all unnumbered take ids from their
+  constraint edges on read, and DXF writes vertex ids only for R2010 and
+  later. An unknown object that has only DXF groups fails the DWG write.
+- **Objects added after a DWG read** - The writer appends the default class
+  for an object whose class the source never used, including dynamic-block
+  representation data, so a switched visibility state survives a save.
+- **Serde reference and provenance retention** - With the `serde` feature,
+  `EntityCommon` includes `layer_handle`, `linetype_handle`,
+  `color_book_handle`, `face_visual_style_handle`, `edge_visual_style_handle`,
+  `material_flags`, `material_handle`, `shadow_flags`, `plotstyle_flags`,
+  `plotstyle_handle`, and `entity_mode`. `Spline.dwg_scenario` (including an
+  embedded Helix spline) and `AssociativeObject.source_version` are included.
+  Field-named input without these fields still deserializes: optional values
+  default to `None` and flags to zero. Supplied values are retained without
+  normalization. `preserve_storage_data_from` respects edits to these fields,
+  including explicit `None` and zero. Raw DWG records, graphic bytes, and
+  private document storage stay outside ordinary Serde.
+- **Upright complex linetype elements (issue #108)** - `LineTypeComplexData`
+  gains `upright` (`U=`, element flag 0x08) beside `absolute_rotation`. It is
+  read from DXF and DWG, written to DWG and DXF R2013+, and becomes relative
+  rotation in older DXF.
+- **Angular dimension measurements** - Constructors and transforms store an
+  angular dimension's file measurement in radians. `Dimension::stored_measurement`
+  returns that value. `Dimension::measurement` still returns degrees for
+  angular types. The DXF writer sets bit 32 of group 70 when a dimension
+  references its own block.
+- **DXF angles (issues #132 and #174)** - Angle groups are written as the
+  degree value that reads back to the stored radians. Elliptic hatch boundary
+  angles follow the same degree-on-disk, radian-in-memory rule as circular
+  edges.
+- **Leaders (issue #176)** - R2000+ DWG does not store the hook flag, so a
+  derived hook is what a read reports. A missing DXF group 74 means
+  same-direction.
+- **Entity visibility (issue #175)** - Only bit 0 of the DWG invisibility
+  field hides an entity.
+- **R2010 object-context dictionary** - The writer emits the bit the reader
+  already consumed, so annotative context round-trips stay aligned.
+- **Dimension arrow blocks** - `DIMBLK`, `DIMBLK1`, `DIMBLK2`, `DIMLDRBLK`,
+  `DIMARCSYM`, and `DIMFXLON` are kept through DXF and DWG. An arrow handle
+  that names no block is written as the default arrow.
+- **Header extents** - A DWG save keeps `EXTMIN` and `EXTMAX` when the
+  document already has them. Extents are computed only when they are still
+  the empty defaults.
+- **OLE frames** - The DWG reader fills the source application from the
+  storage's CompObj stream. Static-metafile CONTENTS that begin with a header
+  copy are read. Damaged DXF group 310 chunks are skipped instead of
+  panicking.
+- **INSERT** - The attribute `SEQEND` keeps its handle on DXF writes.
+  `explode_from_document` refuses `MINSERT`. Callers that expand an array
+  cell by cell can use the block's base-relative entities.
+- **Multileader leader linetype** - A ByBlock leader linetype stays ByBlock,
+  including when the linetype is missing.
+- **Layouts** - The DXF layout dictionary is resolved from named membership.
+  An ownerless `ACAD_LAYOUT` member is accepted and its owner is completed,
+  including pre-R2000 drawings. Implicit paper space applies only to the
+  active layout (issue #123). Attributes of a paper-space INSERT keep their
+  owner (issue #119).
+- **R11 and R12** - Shared `*D` dimension block names no longer collapse every
+  dimension picture onto one block. R12 writes keep `AcadAnnotative` when
+  extended data references it. `PELLIPSE` is preserved.
+- **Wipeout and alignment grips** - A polygonal wipeout clip ring is closed on
+  DXF write. Alignment grip orientation is read and written as group codes
+  140/141/142.
+- **ACIS** - Offset spline surfaces (`offsur`) read and write. SAT record
+  sequence numbers are read in every version.
+- **Fields and MTEXT** - Object fields can measure polylines and ellipses. A
+  trailing `%%` in MTEXT is kept.
+- **3D import** - STL, OBJ, COLLADA, glTF, and FBX share one mesh assembler.
+  glTF and COLLADA instances use their node graphs. FBX applies local
+  transforms together with parent models.
+- **DWG writes** - Entity mode is looked up once per owner. Class-table and
+  dictionary-index walks follow handle order, so two reads of one drawing
+  write the same bytes. Layer viewport overrides use the registered extension
+  dictionary. Table and multileader styles are written only for the versions
+  that introduced them.
+
+#### Breaking API changes
+
+- `LineTypeComplexData` gains `upright`. Struct literals need `upright: false`
+  or `..Default::default()`. Serde input without the field reads as `false`.
+- The Serde structs above gain fields. Field-named input without them still
+  deserializes. Positional formats need a separate compatibility strategy.
+- `CadDocument::rename_layer`, `Table::add`, `Table::rename`, plot-style
+  `from_bytes` and `to_bytes`, sheet-set `parse_xml`, `from_xml`,
+  `from_bytes`, `read`, and `write`, and
+  `CadDocument::dynamic_block_properties` return `DxfError` instead of
+  `String`.
+
 ### 0.6.6
 
 - **Optional DWG parallelism (issue #156)** - Adds a default-enabled `parallel`

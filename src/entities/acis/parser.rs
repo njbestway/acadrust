@@ -25,7 +25,7 @@ impl SatParser {
         let header = Self::parse_header_line(header_line)?;
 
         // The product-id and tolerance header lines only exist from ACIS 2.0
-        // on. Pre-2.0 SAT (e.g. AutoCAD R14's ACIS 1.6, version 106) writes
+        // on. Pre-2.0 SAT (e.g. ACAD R14's ACIS 1.6, version 106) writes
         // the version line then jumps straight to the records — consuming two
         // phantom header lines there ate the `body` and `lump` records, so
         // every pointer resolved two records off and the solid never meshed.
@@ -267,27 +267,22 @@ impl SatParser {
     ) -> Result<SatRecord, SatParseError> {
         let mut tokenizer = SatTokenizer::new(text, version.has_counted_strings());
 
-        // Determine the record index
-        let index = if version.has_explicit_indices() {
-            // ACIS 7.0+: records start with -<index>
-            match tokenizer.peek_token() {
-                Some(tok) if looks_like_negative_index(tok) => {
-                    let idx_str = tokenizer.next_raw_token().unwrap();
-                    let idx: i32 = idx_str.parse().unwrap_or(*auto_index);
-                    let idx = idx.abs();
-                    *auto_index = idx + 1;
-                    idx
-                }
-                _ => {
-                    let idx = *auto_index;
-                    *auto_index += 1;
-                    idx
-                }
+        // Determine the record index: a record may start with -<index>
+        // in any version (always from ACIS 7.0; older files written with
+        // sequence numbers, such as ACIS 1.6 ones, carry them too).
+        let index = match tokenizer.peek_token() {
+            Some(tok) if looks_like_negative_index(tok) => {
+                let idx_str = tokenizer.next_raw_token().unwrap();
+                let idx: i32 = idx_str.parse().unwrap_or(*auto_index);
+                let idx = idx.abs();
+                *auto_index = idx + 1;
+                idx
             }
-        } else {
-            let idx = *auto_index;
-            *auto_index += 1;
-            idx
+            _ => {
+                let idx = *auto_index;
+                *auto_index += 1;
+                idx
+            }
         };
 
         // Entity type
@@ -641,10 +636,8 @@ fn starts_record(fragment: &str) -> bool {
 
 /// Check if a token looks like a negative index (e.g. "-0", "-1", "-42").
 fn looks_like_negative_index(s: &str) -> bool {
-    if !s.starts_with('-') {
-        return false;
-    }
-    s[1..].chars().all(|c| c.is_ascii_digit())
+    s.strip_prefix('-')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Normalize a pre-7.0 (v400) record's token list to match the 7.0+ layout.

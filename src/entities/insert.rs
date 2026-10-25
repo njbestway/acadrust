@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::entities::{Arc as GeoArc, Ellipse};
 use crate::entities::{AttributeEntity, Entity, EntityCommon, EntityType};
 use crate::types::{
-    BoundingBox3D, Color, Handle, LineWeight, Matrix3, Matrix4, Transform, Transparency, Vector3,
+    BoundingBox3D, Color, Handle, LineWeight, Matrix3, Matrix4, Transform, Vector3,
 };
 
 /// Minimum absolute value accepted for scale factors (avoids degenerate geometry).
@@ -60,7 +60,7 @@ pub struct Insert {
 }
 
 impl Insert {
-    /// Hard upper bound for detached MINSERT expansion.  AutoCAD's command
+    /// Hard upper bound for detached MINSERT expansion.  ACAD's command
     /// refuses MINSERT references; the context-free helper keeps support for
     /// ordinary arrays while refusing pathological work that would otherwise
     /// materialize billions of transforms or entities.
@@ -330,7 +330,7 @@ impl Insert {
 
     /// Resolve ByBlock / layer-"0" property inheritance for an exploded entity.
     ///
-    /// AutoCAD convention:
+    /// ACAD convention:
     /// - Entities on layer `"0"` in the block inherit the Insert's layer.
     /// - `Color::ByBlock` inherits the Insert's color.
     /// - `LineWeight::ByBlock` inherits the Insert's line weight.
@@ -388,7 +388,7 @@ impl Insert {
     /// are restored as transformed definitions; instance attribute values
     /// are not included.
     ///
-    /// **Property inheritance** (AutoCAD convention):
+    /// **Property inheritance** (ACAD convention):
     /// - Entities on layer `"0"` → inherit the Insert's layer.
     /// - `Color::ByBlock` → inherit the Insert's color.
     /// - `LineWeight::ByBlock` → inherit the Insert's line weight.
@@ -504,7 +504,7 @@ impl Insert {
     /// This is used by the document-aware EXPLODE path after it has resolved
     /// the block base point and validated the reference.  It deliberately
     /// bypasses MINSERT array generation; the caller has already applied
-    /// AutoCAD's refusal rules for array references.
+    /// ACAD's refusal rules for array references.
     pub(crate) fn explode_with_transform(
         &self,
         block_entities: &[EntityType],
@@ -602,7 +602,7 @@ impl Insert {
 
     /// Expand bulged polylines before applying a non-uniform block transform.
     /// A retained bulge would still describe a circular arc after stretching,
-    /// while AutoCAD emits an exact elliptical segment.
+    /// while ACAD emits an exact elliptical segment.
     fn explode_single_many(&self, entity: &EntityType, transform: &Transform) -> Vec<EntityType> {
         // Modeler entities are explodable when the block transform is a
         // rigid transform or uniform scale.  Under those transforms their
@@ -793,6 +793,45 @@ impl Insert {
         super::transform::transform_ellipse(&mut ellipse, transform);
         self.resolve_properties(&mut ellipse.common);
         EntityType::Ellipse(ellipse)
+    }
+
+    /// The entities of this insert's block, read from `document` and moved
+    /// so the block's base point is at the origin, ready for
+    /// [`explode`](Self::explode). `None` when the block record is missing,
+    /// refuses explosion or is an external reference.
+    pub fn block_entities_from_document(
+        &self,
+        document: &crate::document::CadDocument,
+    ) -> Option<Vec<EntityType>> {
+        let br = document.block_records.get(&self.block_name)?;
+        if !br.explodable
+            || br.flags.is_xref
+            || br.flags.is_xref_overlay
+            || br.flags.is_external
+            || !br.xref_path.is_empty()
+        {
+            return None;
+        }
+        let base = document
+            .get_entity(br.block_entity_handle)
+            .and_then(|entity| match entity {
+                EntityType::Block(block) => Some(block.base_point),
+                _ => None,
+            })
+            .unwrap_or(br.base_point);
+        let to_base = Transform::from_translation(base * -1.0);
+        Some(
+            br.entity_handles
+                .iter()
+                .filter_map(|h| {
+                    document.entity_index.get(h).map(|&idx| {
+                        let mut entity = document.entities[idx].as_ref().clone();
+                        entity.as_entity_mut().apply_transform(&to_base);
+                        entity
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// Convenience wrapper that looks up the block in a
@@ -1004,52 +1043,12 @@ impl Insert {
 }
 
 impl Entity for Insert {
-    fn handle(&self) -> Handle {
-        self.common.handle
+    fn common(&self) -> &super::EntityCommon {
+        &self.common
     }
 
-    fn set_handle(&mut self, handle: Handle) {
-        self.common.handle = handle;
-    }
-
-    fn layer(&self) -> &str {
-        &self.common.layer
-    }
-
-    fn set_layer(&mut self, layer: String) {
-        self.common.layer = layer;
-    }
-
-    fn color(&self) -> Color {
-        self.common.color
-    }
-
-    fn set_color(&mut self, color: Color) {
-        self.common.color = color;
-    }
-
-    fn line_weight(&self) -> LineWeight {
-        self.common.line_weight
-    }
-
-    fn set_line_weight(&mut self, weight: LineWeight) {
-        self.common.line_weight = weight;
-    }
-
-    fn transparency(&self) -> Transparency {
-        self.common.transparency
-    }
-
-    fn set_transparency(&mut self, transparency: Transparency) {
-        self.common.transparency = transparency;
-    }
-
-    fn is_invisible(&self) -> bool {
-        self.common.invisible
-    }
-
-    fn set_invisible(&mut self, invisible: bool) {
-        self.common.invisible = invisible;
+    fn common_mut(&mut self) -> &mut super::EntityCommon {
+        &mut self.common
     }
 
     fn bounding_box(&self) -> BoundingBox3D {
@@ -1087,6 +1086,7 @@ impl Entity for Insert {
 mod tests {
     use super::*;
     use crate::entities::{AttributeDefinition, Block, BlockEnd, Circle, Line};
+    use crate::types::Transparency;
     use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
     #[test]
