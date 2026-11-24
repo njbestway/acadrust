@@ -167,7 +167,7 @@ pub(super) fn class_layout(data: &[u8], start: usize, end: usize) -> Option<(usi
 /// the end of the text stream.
 pub(super) fn code_set_entries(data: &[u8], start: usize, end: usize) -> Option<(usize, usize)> {
     let mut bits = Bits::new(data, class_data(data, start, end)?, end);
-    let mut entry = |bits: &mut Bits| -> Option<()> {
+    let entry = |bits: &mut Bits| -> Option<()> {
         (1..=3).contains(&bits.bit_long()?).then_some(())?;
         bits.bit_long()?;
         bits.bit_long()?;
