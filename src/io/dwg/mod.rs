@@ -75,6 +75,7 @@ pub mod dwg_version;
 pub mod dwg_writer;
 pub mod eed_codec;
 pub(crate) mod embedded_entity;
+pub(crate) mod file_dependencies;
 pub mod file_headers;
 pub(crate) mod legacy_viewport;
 mod mesh_budget;
@@ -82,6 +83,8 @@ mod parallel;
 pub mod preview;
 pub mod r12;
 pub mod reed_solomon;
+pub mod security;
+mod shard_plan;
 pub(crate) mod size_limits;
 pub(crate) mod typeface_eed;
 
@@ -89,7 +92,7 @@ pub use dwg_reader::DwgReadOptions;
 pub use dwg_reader::DwgReader;
 pub use dwg_reference_type::DwgReferenceType;
 pub use dwg_version::DwgVersion;
-pub use dwg_writer::DwgWriter;
+pub use dwg_writer::{DwgWriteDiagnostic, DwgWriter};
 pub use mesh_budget::MeshFaceBudget;
 
 pub(crate) fn sab_fingerprint<'a>(

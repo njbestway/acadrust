@@ -82,6 +82,14 @@ impl MTextParser {
         self.ctx_stack.last_mut().unwrap()
     }
 
+    /// Hand the current paragraph to the document, recording the span
+    /// properties in effect at its end (see [`MTextParagraph::end_properties`]).
+    fn end_paragraph(&mut self) {
+        let mut paragraph = std::mem::take(&mut self.current_paragraph);
+        paragraph.end_properties = self.current_props().clone();
+        self.document.push_paragraph(paragraph);
+    }
+
     /// Parse with full MTEXT formatting: all control codes are recognized
     /// whether or not the content is wrapped in `{...}`.
     fn parse_formatted(mut self, merge_spans: bool) -> MTextDocument {
@@ -114,14 +122,20 @@ impl MTextParser {
         // starts a new span), `%%d`/`%%p`/`%%c` and `%%%%` resolve to symbols,
         // `%%nnn` is a decimal character code, and `\P`/`\p` break paragraphs.
         // Underscoring/overscoring turn off automatically at the string end.
+        let stroke_properties = |u: bool, o: bool| {
+            let mut props = SpanProperties::default();
+            props.set_underline(u);
+            props.set_overline(o);
+            props
+        };
         let flush = |para: &mut MTextParagraph, text: &mut String, u: bool, o: bool| {
             if text.is_empty() {
                 return;
             }
-            let mut props = SpanProperties::default();
-            props.set_underline(u);
-            props.set_overline(o);
-            para.push_span(MTextSpan::new(std::mem::take(text), props));
+            para.push_span(MTextSpan::new(
+                std::mem::take(text),
+                stroke_properties(u, o),
+            ));
         };
 
         let n = self.chars.len();
@@ -196,6 +210,9 @@ impl MTextParser {
                 && (self.chars[self.pos + 1] == 'P' || self.chars[self.pos + 1] == 'p')
             {
                 flush(&mut para, &mut text, underline, overline);
+                // `%%u`/`%%o` carry across the break; at the string end they
+                // turn off, so the last paragraph keeps the default.
+                para.end_properties = stroke_properties(underline, overline);
                 self.document.push_paragraph(std::mem::take(&mut para));
                 self.pos += 2;
                 continue;
@@ -264,8 +281,7 @@ impl MTextParser {
                         Some('J') => {
                             self.pos += 2;
                             self.flush_current_span(merge_spans);
-                            self.document
-                                .push_paragraph(std::mem::take(&mut self.current_paragraph));
+                            self.end_paragraph();
                         }
                         Some('M') => {
                             self.pos += 2;
@@ -281,8 +297,7 @@ impl MTextParser {
                     // or the caret form `^J`.
                     self.pos += 1;
                     self.flush_current_span(merge_spans);
-                    self.document
-                        .push_paragraph(std::mem::take(&mut self.current_paragraph));
+                    self.end_paragraph();
                 }
                 '\t' => {
                     // Keep the tab character; the layout engine resolves it to
@@ -305,8 +320,7 @@ impl MTextParser {
         // End of input — flush remaining
         self.flush_current_span(merge_spans);
         if !self.current_paragraph.is_empty() {
-            self.document
-                .push_paragraph(std::mem::take(&mut self.current_paragraph));
+            self.end_paragraph();
         }
     }
 
@@ -416,16 +430,20 @@ impl MTextParser {
 
             // Unicode escape: \U+XXXX
             'U' if self.pos + 1 < self.chars.len() && self.chars[self.pos + 1] == '+' => {
-                self.pos += 2; // skip \U+
-                let start = self.pos;
-                while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_hexdigit() {
-                    self.pos += 1;
-                }
-                let hex: String = self.chars[start..self.pos].iter().collect();
-                if let Ok(code_point) = u32::from_str_radix(&hex, 16) {
-                    if let Some(ch) = char::from_u32(code_point) {
-                        self.text_buf.push(ch);
-                    }
+                // `\U+XXXX` is exactly four hex digits; anything else stays literal.
+                let start = self.pos + 2;
+                let scalar = self
+                    .chars
+                    .get(start..start + 4)
+                    .filter(|d| d.iter().all(char::is_ascii_hexdigit))
+                    .and_then(|d| u32::from_str_radix(&d.iter().collect::<String>(), 16).ok())
+                    .and_then(char::from_u32);
+                if let Some(ch) = scalar {
+                    self.pos = start + 4;
+                    self.text_buf.push(ch);
+                } else {
+                    self.text_buf.push_str("\\U+");
+                    self.pos = start;
                 }
             }
 
@@ -457,8 +475,7 @@ impl MTextParser {
             'P' => {
                 self.pos += 1;
                 self.flush_current_span(false);
-                self.document
-                    .push_paragraph(std::mem::take(&mut self.current_paragraph));
+                self.end_paragraph();
                 // Span properties (color, font, bold, height, etc.) carry over
                 // to the next paragraph. Only paragraph-level properties are
                 // per-paragraph (set via \p...; control codes).
@@ -474,8 +491,7 @@ impl MTextParser {
             'N' => {
                 self.pos += 1;
                 self.flush_current_span(false);
-                self.document
-                    .push_paragraph(std::mem::take(&mut self.current_paragraph));
+                self.end_paragraph();
                 // Span properties carry over, same as \P — the one difference
                 // is that what follows opens a new column, so mark it. Drop the
                 // mark and `\N` is indistinguishable from `\P` downstream.
@@ -847,7 +863,8 @@ impl MTextParser {
     }
 
     /// Parse stacking: \S{numerator}/{denominator};
-    /// Separators: / (horizontal), # (diagonal), ^ (limit)
+    /// Separators: / (horizontal), # (diagonal), ^ (limit), ~ (decimal, with
+    /// the decimal point after it)
     fn parse_stacking_code(&mut self) {
         let expr = self.parse_semicolon_value();
 
@@ -862,11 +879,14 @@ impl MTextParser {
 
         while i < chars.len() {
             let ch = chars[i];
-            if !found_sep && matches!(ch, '/' | '#' | '^') {
+            if !found_sep && matches!(ch, '/' | '#' | '^' | '~') {
                 found_sep = true;
                 stacking_type = StackingType::from_char(ch);
                 if ch == '^' && i + 1 < chars.len() && chars[i + 1] == ' ' {
                     i += 1; // ^ may be followed by space
+                }
+                if ch == '~' && i + 1 < chars.len() && matches!(chars[i + 1], '.' | ',') {
+                    i += 1; // the decimal point the halves line up on
                 }
             } else if found_sep {
                 denominator.push(ch);
@@ -900,8 +920,7 @@ impl MTextParser {
         if expr.trim().is_empty() {
             self.pos = start_pos;
             self.flush_current_span(false);
-            self.document
-                .push_paragraph(std::mem::take(&mut self.current_paragraph));
+            self.end_paragraph();
             self.current_props_mut()
                 .clone_from(&SpanProperties::default());
             return;
@@ -996,8 +1015,8 @@ impl MTextParser {
                     i += 1;
                 }
             } else if ch == 's' && i + 1 < chars.len() {
-                // Line spacing: s* (entity default), se<n> (exact), or
-                // sm<n> (multiple).
+                // Line spacing: s* (entity default), se<n> (exact), sa<n>
+                // (at least) or sm<n> (multiple).
                 let sub = chars[i + 1];
                 if sub == '*' {
                     self.current_paragraph.properties.line_spacing =
@@ -1008,7 +1027,7 @@ impl MTextParser {
                     }
                     continue;
                 }
-                if sub == 'e' || sub == 'm' {
+                if sub == 'e' || sub == 'm' || sub == 'a' {
                     let start = i + 2;
                     let mut k = start;
                     while k < chars.len()
@@ -1017,11 +1036,11 @@ impl MTextParser {
                         k += 1;
                     }
                     if let Ok(v) = chars[start..k].iter().collect::<String>().parse::<f64>() {
-                        self.current_paragraph.properties.line_spacing = if sub == 'e' {
-                            Some(MTextLineSpacing::Exact(v))
-                        } else {
-                            Some(MTextLineSpacing::Multiple(v))
-                        };
+                        self.current_paragraph.properties.line_spacing = Some(match sub {
+                            'e' => MTextLineSpacing::Exact(v),
+                            'a' => MTextLineSpacing::AtLeast(v),
+                            _ => MTextLineSpacing::Multiple(v),
+                        });
                     }
                     i = k;
                     if i < chars.len() && chars[i] == ',' {
@@ -1030,6 +1049,14 @@ impl MTextParser {
                     continue;
                 }
                 i += 1;
+            } else if ch == 't' && chars.get(i + 1) == Some(&'z') {
+                // `tz` clears the tab stops; kept as the one stop at 0 that
+                // `t0` reads as.
+                self.current_paragraph.properties.tab_stops = vec![TabStop::Left(0.0)];
+                i += 2;
+                if i < chars.len() && chars[i] == ',' {
+                    i += 1;
+                }
             } else if ch == 't' && i + 1 < chars.len() {
                 // Tab stops: comma-separated, each optionally prefixed by
                 // `c`/`r`/`D` (center/right/decimal); no prefix = left.
@@ -1745,6 +1772,52 @@ mod tests {
         assert_eq!(doc.paragraphs[1].to_plain_text(), "Col2");
     }
 
+    #[test]
+    fn paragraph_alignment_reset_inherits_the_attachment_alignment() {
+        // `\pq*` is the alignment reset, not Justify: a centred paragraph
+        // followed by a `\pq*` reset and more single-line paragraphs stays
+        // centred in AutoCAD (survey-export pole labels do exactly this).
+        // Justified would leave each single-line paragraph ragged-left.
+        let doc = parse_mtext("{\\pqc;A\\P\\pq*;B\\PC}", false);
+        assert_eq!(
+            doc.paragraphs[0].properties.alignment,
+            Some(MTextParagraphAlignment::Center),
+            "the \\pqc; paragraph is centred"
+        );
+        assert_eq!(
+            doc.paragraphs[1].properties.alignment,
+            Some(MTextParagraphAlignment::Default),
+            "\\pq* is the reset, not Justified"
+        );
+        assert_eq!(
+            doc.paragraphs[2].properties.alignment, None,
+            "a bare paragraph break records no new alignment property"
+        );
+    }
+
+    #[test]
+    fn paragraph_alignment_reset_code_is_distinct_from_justify() {
+        assert_eq!(
+            MTextParagraphAlignment::from_char('*'),
+            MTextParagraphAlignment::Default,
+            "q* resets to the entity's attachment alignment"
+        );
+        assert_eq!(
+            MTextParagraphAlignment::from_char('j'),
+            MTextParagraphAlignment::Justified,
+            "qj stays Justified"
+        );
+        let doc = parse_mtext(r"{\pq*;A\P\pqj;B}", false);
+        assert_eq!(
+            doc.paragraphs[0].properties.alignment,
+            Some(MTextParagraphAlignment::Default)
+        );
+        assert_eq!(
+            doc.paragraphs[1].properties.alignment,
+            Some(MTextParagraphAlignment::Justified)
+        );
+    }
+
     // ========================================================================
     // Unicode escape
     // ========================================================================
@@ -1753,6 +1826,71 @@ mod tests {
     fn test_parse_unicode_escape() {
         let doc = parse_mtext(r"{\U+00B0}", false);
         assert_eq!(doc.paragraphs[0].to_plain_text(), "°");
+    }
+
+    #[test]
+    fn an_empty_paragraph_keeps_the_span_properties_at_its_break() {
+        // A group closed before the break does not apply to the empty line.
+        let doc = parse_mtext(r"{\H2x;Title}\P\PBody", false);
+        assert_eq!(doc.paragraphs.len(), 3);
+        assert!(doc.paragraphs[1].is_empty());
+        assert_eq!(doc.paragraphs[1].end_properties.height, None);
+        // A code before the break does.
+        let doc = parse_mtext(r"\H2x;\PA", false);
+        assert!(doc.paragraphs[0].is_empty());
+        assert_eq!(
+            doc.paragraphs[0].end_properties.height,
+            Some(MTextScalar::Factor(2.0))
+        );
+        // Inside a group the break takes the group's properties.
+        let doc = parse_mtext(r"{\C1;A\P\PB}", false);
+        assert!(doc.paragraphs[1].is_empty());
+        assert_eq!(
+            doc.paragraphs[1].end_properties.color,
+            Some(MTextColor::Index(1))
+        );
+    }
+
+    #[test]
+    fn every_paragraph_break_records_the_span_properties_in_effect() {
+        for (text, kind) in [
+            (r"\H3;A\PB", r"\P"),
+            (r"\H3;A\NB", r"\N"),
+            ("\\H3;A^JB", "^J"),
+            ("\\H3;A\nB", "line feed"),
+            (r"\H3;A\p;B", r"\p;"),
+        ] {
+            let doc = parse_mtext(text, false);
+            assert_eq!(
+                doc.paragraphs[0].end_properties.height,
+                Some(MTextScalar::Absolute(3.0)),
+                "{kind}"
+            );
+        }
+        // The last paragraph ends at the end of the text.
+        let doc = parse_mtext(r"A\H3;", false);
+        assert_eq!(
+            doc.paragraphs[0].end_properties.height,
+            Some(MTextScalar::Absolute(3.0))
+        );
+    }
+
+    #[test]
+    fn plain_text_paragraph_end_properties_carry_the_open_strokes() {
+        // `%%u` is still in effect at the `\P`, so the first paragraph ends
+        // underlined; at the string end underscoring turns off.
+        let doc = parse_plain_text("%%uA\\PB");
+        assert!(doc.paragraphs[0].end_properties.stroke.underline());
+        assert_eq!(doc.paragraphs[1].end_properties, SpanProperties::default());
+    }
+
+    #[test]
+    fn a_unicode_escape_takes_exactly_four_hex_digits() {
+        assert_eq!(parse_mtext(r"20\U+00B0C", false).to_plain_text(), "20°C");
+        assert_eq!(parse_mtext(r"\U+00B12", false).to_plain_text(), "±2");
+        assert_eq!(parse_mtext(r"\U+00GZ", false).to_plain_text(), r"\U+00GZ");
+        assert_eq!(parse_mtext(r"\U+00B", false).to_plain_text(), r"\U+00B");
+        assert_eq!(parse_mtext(r"\U+D800", false).to_plain_text(), r"\U+D800");
     }
 
     #[test]

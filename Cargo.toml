@@ -1,6 +1,6 @@
 [package]
 name = "acadrust"
-version = "0.6.7"
+version = "0.6.8"
 edition = "2021"
 authors = ["Hakan AK"]
 description = "A pure Rust library for reading and writing CAD files in DXF format (ASCII and Binary) and DWG format (Binary)."
@@ -20,12 +20,16 @@ import = ["dep:quick-xml"]
 server = ["dep:axum", "dep:tokio"]
 
 [dependencies]
+# Enum dispatch
+whichever = { version = "0.7", default-features = false }
+
 # Error handling
 thiserror = "2"
 anyhow = "1.0"
 
 # Binary parsing
 nom = "7.1"
+memchr = "2"
 byteorder = "1.5"
 
 # Compression

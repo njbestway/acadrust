@@ -167,6 +167,7 @@ impl<'a> SemanticInventoryV1<'a> {
             version,
             maintenance_version: _,
             header,
+            file_dependencies: _,
             layers,
             line_types,
             text_styles,
@@ -275,6 +276,16 @@ impl<'a> SemanticInventoryV1<'a> {
                     SemanticReferenceV1::Resolved(SemanticNodeV1::Object(object)),
                     owner,
                 );
+            }
+            if let ObjectType::ImageDefinition(definition) = object {
+                for reactor in &definition.reactors {
+                    self.visit_relationship(
+                        &mut visitor,
+                        SemanticRelationshipKindV1::Reactor,
+                        SemanticReferenceV1::Resolved(SemanticNodeV1::Object(object)),
+                        *reactor,
+                    );
+                }
             }
         }
 
@@ -427,6 +438,7 @@ fn classify_object(object: &ObjectType) -> SemanticObjectV1<'_> {
         | ObjectType::MultiLeaderStyle(_)
         | ObjectType::TableStyle(_)
         | ObjectType::TableContent(_)
+        | ObjectType::TableTemplate(_)
         | ObjectType::Scale(_)
         | ObjectType::ObjectContextData(_)
         | ObjectType::SortEntitiesTable(_)

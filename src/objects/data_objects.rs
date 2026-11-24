@@ -76,7 +76,10 @@ pub struct BreakData {
     /// AcDbBreakData version (DXF 70).
     pub version: i16,
     pub dimension_reference: Handle,
-    /// Internal soft-pointer slot present after the dimension reference.
+    /// Not stored in DWG: an AutoCAD-written record carries one null soft
+    /// pointer per point reference instead
+    /// ([`BreakPointReference::reserved_reference`]). Kept for API
+    /// compatibility; readers leave it null and writers ignore it.
     pub reserved_reference: Handle,
     pub point_references: Vec<BreakPointReference>,
 }
@@ -98,6 +101,26 @@ pub struct BreakPointReference {
     pub second_point: Vector3,
     /// Internal trailing version field not exposed by Autodesk DXF.
     pub trailing_version: i16,
+    /// Object of the sub-entity path (DXF 331).
+    /// Missing values in field-named Serde input default to a null handle.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub subentity_object: Handle,
+    /// Sub-entity type of the path (DXF 73).
+    /// Missing values in field-named Serde input default to 0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub subentity_type: i32,
+    /// Sub-entity index of the path (DXF 92).
+    /// Missing values in field-named Serde input default to 0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub subentity_index: i32,
+    /// DWG-only bit-long after the sub-entity index, zero in every
+    /// AutoCAD-written record seen so far; not exposed by DXF.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub subentity_reserved: i32,
+    /// DWG-only soft pointer stored before the sub-entity object, null in
+    /// every AutoCAD-written record seen so far; not exposed by DXF.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub reserved_reference: Handle,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

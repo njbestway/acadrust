@@ -133,6 +133,12 @@ impl SectionReader {
             SectionReaderInner::MergedReader(r) => r.try_read_bit_short(),
         }
     }
+    fn try_read_bit_long(&mut self) -> Option<i32> {
+        match &mut self.inner {
+            SectionReaderInner::BitReader(r) => r.try_read_bit_long(),
+            SectionReaderInner::MergedReader(r) => r.try_read_bit_long(),
+        }
+    }
     fn read_bit_long(&mut self) -> i32 {
         match &mut self.inner {
             SectionReaderInner::BitReader(r) => r.read_bit_long(),
@@ -421,7 +427,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     h.spline_type = r.read_bit_short();
     h.shade_edge = r.read_bit_short();
     h.shade_diffuse = r.read_bit_short();
-    let _ = r.read_bit_short(); // UNITMODE
+    h.unit_mode = r.read_bit_short(); // UNITMODE
     h.max_active_viewports = r.read_bit_short();
     h.isolines = r.read_bit_short();
     h.multiline_justification = r.read_bit_short();
@@ -517,12 +523,9 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         let _ = r.read_handle(); // PUCSBASE
 
         // Paper space orthographic origins (6 × 3BD)
-        let _ = r.read_3bit_double(); // PUCSORGTOP
-        let _ = r.read_3bit_double(); // PUCSORGBOTTOM
-        let _ = r.read_3bit_double(); // PUCSORGLEFT
-        let _ = r.read_3bit_double(); // PUCSORGRIGHT
-        let _ = r.read_3bit_double(); // PUCSORGFRONT
-        let _ = r.read_3bit_double(); // PUCSORGBACK
+        for origin in h.paper_ucs_ortho_origins.iter_mut() {
+            *origin = r.read_3bit_double(); // PUCSORGTOP, BOTTOM, LEFT, RIGHT, FRONT, BACK
+        }
     }
 
     // ── Model space extents/limits/UCS ──
@@ -545,12 +548,9 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         let _ = r.read_handle(); // UCSBASE
 
         // Model space orthographic origins (6 × 3BD)
-        let _ = r.read_3bit_double(); // UCSORGTOP
-        let _ = r.read_3bit_double(); // UCSORGBOTTOM
-        let _ = r.read_3bit_double(); // UCSORGLEFT
-        let _ = r.read_3bit_double(); // UCSORGRIGHT
-        let _ = r.read_3bit_double(); // UCSORGFRONT
-        let _ = r.read_3bit_double(); // UCSORGBACK
+        for origin in h.ucs_ortho_origins.iter_mut() {
+            *origin = r.read_3bit_double(); // UCSORGTOP, BOTTOM, LEFT, RIGHT, FRONT, BACK
+        }
 
         // DIMPOST, DIMAPOST
         h.dim_post = r.read_variable_text();
@@ -577,12 +577,13 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         h.dim_tolerance_justification = r.read_byte() as i16;
         h.dim_horizontal_justification = r.read_byte() as i16;
         h.dim_fit = r.read_byte() as i16;
+        h.dim_fit_r13 = h.dim_fit;
         h.dim_user_positioned_text = r.read_bit();
         h.dim_tolerance_zero_suppression = r.read_byte() as i16;
         h.dim_alt_tolerance_zero_suppression = r.read_byte() as i16;
         h.dim_alt_tolerance_zero_tight = r.read_byte() as i16;
         h.dim_text_above = r.read_byte() as i16;
-        let _ = r.read_bit_short(); // DIMUNIT
+        h.dim_unit = r.read_bit_short(); // DIMUNIT
         h.dim_angular_decimal_places = r.read_bit_short();
         h.dim_decimal_places = r.read_bit_short();
         h.dim_tolerance_decimal_places = r.read_bit_short();
@@ -694,11 +695,11 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
 
     // R2010+: extra dimension fields
     if r2010_plus(v) {
-        let _ = r.read_bit(); // DIMTXTDIRECTION
-        let _ = r.read_bit_double(); // DIMALTMZF
-        let _ = r.read_variable_text(); // DIMALTMZS
-        let _ = r.read_bit_double(); // DIMMZF
-        let _ = r.read_variable_text(); // DIMMZS
+        h.dim_text_direction = r.read_bit(); // DIMTXTDIRECTION
+        h.dim_alt_mzf = r.read_bit_double(); // DIMALTMZF
+        h.dim_alt_mzs = r.read_variable_text(); // DIMALTMZS
+        h.dim_mzf = r.read_bit_double(); // DIMMZF
+        h.dim_mzs = r.read_variable_text(); // DIMMZS
     }
 
     // R2000+ dimension handles
@@ -856,7 +857,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         let _ = r.read_handle(); // INTERFEREVPVS
         let _ = r.read_handle(); // DRAGVS
 
-        let _ = r.read_byte(); // CSHADOW
+        h.cast_shadow = r.read_byte() as i16; // CSHADOW
         h.shadow_plane_location = r.read_bit_double();
     }
 
@@ -878,9 +879,12 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
             }
         }
 
-        if r2004_plus(v) {
-            let _ = r.read_bit_long();
-            let _ = r.read_bit_long();
+        // LibreDWG's writer stops the R2004 header here, so the two BitLongs and
+        // the bit after them are optional as well, like the AC1014 tail above.
+        if r2004_plus(v)
+            && r.try_read_bit_long().is_some()
+            && r.try_read_bit_long().is_some()
+        {
             let _ = r.read_bit();
         }
     }

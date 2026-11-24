@@ -132,6 +132,17 @@ impl Insert {
         };
     }
 
+    /// Store the three scale factors exactly as given, with no zero guard.
+    ///
+    /// The checked setters above keep a drawing someone is building from holding a degenerate
+    /// transform by accident. A reader has no such choice: a DWG stores the scale as a plain double,
+    /// so the file can say 0.0, and the reader reports what the file says.
+    pub fn set_scale_unchecked(&mut self, x: f64, y: f64, z: f64) {
+        self.x_scale = x;
+        self.y_scale = y;
+        self.z_scale = z;
+    }
+
     // ── Builder helpers ─────────────────────────────────────────
 
     /// Builder: Set the scale factors
@@ -485,6 +496,7 @@ impl Insert {
         common.reactors.clear();
         common.graphic_data = None;
         common.raw_record = None;
+        Self::detach_exploded_history(entity);
         if let EntityType::Insert(insert) = entity {
             for attribute in &mut insert.attributes {
                 attribute.common.handle = Handle::NULL;
@@ -496,6 +508,20 @@ impl Insert {
             }
             insert.view_rep_handle = None;
             insert.seqend_handle = None;
+        }
+    }
+
+    /// Drop a modeler copy's link to its source's solid history.  The
+    /// history graph is hard-owned by the member in the block definition, so
+    /// a copy naming it would share it: deleting the copy's history would
+    /// delete the definition's, and both would claim it at DWG save time.
+    pub(crate) fn detach_exploded_history(entity: &mut EntityType) {
+        match entity {
+            EntityType::Solid3D(solid) => solid.history_handle = None,
+            EntityType::Region(region) => region.history_handle = None,
+            EntityType::Body(body) => body.history_handle = None,
+            EntityType::Surface(surface) => surface.history_handle = None,
+            _ => {}
         }
     }
 
@@ -604,24 +630,6 @@ impl Insert {
     /// A retained bulge would still describe a circular arc after stretching,
     /// while ACAD emits an exact elliptical segment.
     fn explode_single_many(&self, entity: &EntityType, transform: &Transform) -> Vec<EntityType> {
-        // Modeler entities are explodable when the block transform is a
-        // rigid transform or uniform scale.  Under those transforms their
-        // native region decomposition remains exact; non-uniform cases are
-        // handled by the document-aware anonymous *E fallback instead.
-        if matches!(
-            entity,
-            EntityType::Solid3D(_) | EntityType::Region(_) | EntityType::Body(_)
-        ) && Self::linear_is_similarity(transform)
-        {
-            return entity
-                .explode()
-                .into_iter()
-                .map(|mut piece| {
-                    piece.as_entity_mut().apply_transform(transform);
-                    piece
-                })
-                .collect();
-        }
         let normal = match entity {
             EntityType::LwPolyline(polyline) => polyline.normal,
             EntityType::Polyline2D(polyline) => polyline.normal,
@@ -661,20 +669,6 @@ impl Insert {
             && ly > SCALE_EPSILON
             && (lx - ly).abs() <= 1e-10 * lx.max(ly)
             && x.dot(&y).abs() <= 1e-10 * lx * ly
-    }
-
-    fn linear_is_similarity(transform: &Transform) -> bool {
-        let x = transform.apply_rotation(Vector3::UNIT_X);
-        let y = transform.apply_rotation(Vector3::UNIT_Y);
-        let z = transform.apply_rotation(Vector3::UNIT_Z);
-        let vectors = [x, y, z];
-        let lengths = vectors.map(|vector| vector.length());
-        lengths.iter().all(|length| *length > SCALE_EPSILON)
-            && (lengths[0] - lengths[1]).abs() <= 1e-10 * lengths[0].max(lengths[1])
-            && (lengths[1] - lengths[2]).abs() <= 1e-10 * lengths[1].max(lengths[2])
-            && x.dot(&y).abs() <= 1e-10 * lengths[0] * lengths[1]
-            && x.dot(&z).abs() <= 1e-10 * lengths[0] * lengths[2]
-            && y.dot(&z).abs() <= 1e-10 * lengths[1] * lengths[2]
     }
 
     /// Whether a linear transform introduces shear relative to an INSERT's
@@ -1082,6 +1076,29 @@ impl Entity for Insert {
     }
 }
 
+impl Insert {
+    pub(crate) fn reservation_fields(&self) {
+        let Self {
+            common: _,
+            block_name: _,
+            insert_point: _,
+            x_scale: _,
+            y_scale: _,
+            z_scale: _,
+            rotation: _,
+            normal: _,
+            column_count: _,
+            row_count: _,
+            column_spacing: _,
+            row_spacing: _,
+            dwg_minsert: _,
+            attributes: _,
+            view_rep_handle: _,
+            seqend_handle: _,
+        } = self;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1098,6 +1115,93 @@ mod tests {
         assert!(insert.array_capacity_hint() <= 4096);
         assert!(insert.array_points().is_empty());
         assert!(insert.explode(&[EntityType::Line(Line::new())]).is_empty());
+    }
+
+    /// A DWG stores an INSERT scale as a plain double, so a file can hold 0.0.
+    /// No setter lets a caller build one (they rewrite anything under SCALE_EPSILON),
+    /// so I put the zero into the private field and write the file myself.
+    fn zero_scale_round_trip(
+        version: crate::types::DxfVersion,
+        columns: u16,
+    ) -> Vec<Insert> {
+        use crate::tables::BlockRecord;
+        use crate::{CadDocument, DwgReader, DwgWriter};
+
+        let mut doc = CadDocument::with_version(version);
+        let mut block = BlockRecord::new("B");
+        block.handle = doc.allocate_handle();
+        block.block_entity_handle = doc.allocate_handle();
+        block.block_end_handle = doc.allocate_handle();
+        doc.block_records.add(block).unwrap();
+
+        let mut insert = Insert::new("B", Vector3::new(5.0, 6.0, 0.0));
+        insert.x_scale = 1.0;
+        insert.y_scale = 0.0;
+        insert.z_scale = 1.0;
+        if columns > 1 {
+            insert.column_count = columns;
+            insert.column_spacing = 10.0;
+        }
+        doc.add_entity(EntityType::Insert(insert)).unwrap();
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("write dwg");
+        let back = DwgReader::from_stream(std::io::Cursor::new(bytes))
+            .read()
+            .expect("read dwg");
+        back.entities()
+            .filter_map(|e| match e {
+                EntityType::Insert(i) => Some(i.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dwg_reader_keeps_a_stored_zero_scale_on_insert() {
+        for version in [
+            crate::types::DxfVersion::AC1015,
+            crate::types::DxfVersion::AC1032,
+        ] {
+            let inserts = zero_scale_round_trip(version, 1);
+            assert_eq!(inserts.len(), 1, "{version:?}");
+            assert_eq!(inserts[0].x_scale().to_bits(), 1.0f64.to_bits(), "{version:?}");
+            assert_eq!(
+                inserts[0].y_scale().to_bits(),
+                0.0f64.to_bits(),
+                "{version:?}: the file stores 0.0, the reader returned {:e}",
+                inserts[0].y_scale()
+            );
+            assert_eq!(inserts[0].z_scale().to_bits(), 1.0f64.to_bits(), "{version:?}");
+        }
+    }
+
+    #[test]
+    fn dwg_reader_keeps_a_stored_zero_scale_on_minsert() {
+        let inserts = zero_scale_round_trip(crate::types::DxfVersion::AC1015, 3);
+        assert_eq!(inserts.len(), 1);
+        assert_eq!(inserts[0].column_count, 3);
+        assert_eq!(
+            inserts[0].y_scale().to_bits(),
+            0.0f64.to_bits(),
+            "the file stores 0.0, the reader returned {:e}",
+            inserts[0].y_scale()
+        );
+    }
+
+    #[test]
+    fn unchecked_setter_stores_what_it_is_given() {
+        let mut i = Insert::new("B", Vector3::ZERO);
+        i.set_scale_unchecked(1.0, 0.0, -2.5);
+        assert_eq!((i.x_scale(), i.y_scale(), i.z_scale()), (1.0, 0.0, -2.5));
+    }
+
+    #[test]
+    fn checked_setters_still_refuse_zero() {
+        let mut i = Insert::new("B", Vector3::ZERO);
+        i.set_x_scale(0.0);
+        i.set_y_scale(0.0);
+        i.set_z_scale(0.0);
+        assert_eq!((i.x_scale(), i.y_scale(), i.z_scale()), (SCALE_EPSILON, SCALE_EPSILON, SCALE_EPSILON));
     }
 
     /// Helper – approximate equality for f64

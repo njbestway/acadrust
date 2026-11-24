@@ -16,7 +16,7 @@ an installed CAD application. File support spans DXF and DWG R12 through R2018+.
 
 ```toml
 [dependencies]
-acadrust = "0.6.7"
+acadrust = "0.6.8"
 ```
 
 ```rust
@@ -46,7 +46,7 @@ Enable optional features as needed:
 
 ```toml
 [dependencies]
-acadrust = { version = "0.6.7", features = ["serde", "import"] }
+acadrust = { version = "0.6.8", features = ["serde", "import"] }
 ```
 
 To run DWG work sequentially on the calling thread and omit acadrust's Rayon
@@ -54,7 +54,7 @@ dependency, disable default features:
 
 ```toml
 [dependencies]
-acadrust = { version = "0.6.7", default-features = false }
+acadrust = { version = "0.6.8", default-features = false }
 ```
 
 Cargo features are additive: another dependency enabling `acadrust/parallel`
@@ -70,7 +70,7 @@ application-owned pool once and reuse it for all DWG jobs:
 
 ```toml
 [dependencies]
-acadrust = "0.6.7"
+acadrust = "0.6.8"
 rayon = "1"
 ```
 
@@ -296,6 +296,7 @@ then fails and names it.
 ## Used By
 - [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) An open-source (GPLv3) CAD application that uses acadrust as its core native DWG/DXF engine for read/write operations and 3D modeling.
 - [CADCraft](https://github.com/storytold/cadcraft) An open-source, AutoCAD-style drafting application written in Rust that uses acadrust for DWG read/write operations.
+- [LinceCAD](https://www.lincecad.com/) A commercial 2D and 3D CAD application for Windows and Linux that uses acadrust for native DWG/DXF reading and writing. Its changes to acadrust are published under the MPL-2.0 in [jac0161/acadrust](https://github.com/jac0161/acadrust/tree/cadfv).
 
 ## Support & Sponsorship
 
@@ -309,3 +310,7 @@ Every contribution helps keep this project active and well-maintained. Thank you
 ## License
 
 MPL-2.0 — see [LICENSE](LICENSE).
+
+## Checked handle reservation
+
+See [checked handle reservation](docs/handle-reservation.md) for safe batch allocation, supported target coverage and explicit refusal/legacy limits.

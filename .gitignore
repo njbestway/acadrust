@@ -20,6 +20,7 @@ test_tiles/*
 test_tiles_dxf/*
 test_color.json/*
 /samples/
+/budweiser/
 output*/*
 
 *.dxf

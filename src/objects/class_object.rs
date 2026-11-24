@@ -6,7 +6,8 @@
 //! are retained as editable models based on native-format probes and regression
 //! tests; individual class coverage is not a claim of a complete published spec.
 
-use crate::types::{Color, Handle, Vector2, Vector3};
+use crate::objects::object_data::{ObjectDataDescriptor, ObjectDataDictionary, ObjectDataRecord};
+use crate::types::{Color, DxfVersion, Handle, Vector2, Vector3};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -97,6 +98,9 @@ pub enum ClassObjectData {
     ViewRepModelSpaceViewSelectionSet(ViewRepModelSpaceViewSelectionSet),
     ViewRep(ViewRep),
     ViewRepModelSpaceSource(ViewRepModelSpaceSource),
+    ObjectDataDictionary(ObjectDataDictionary),
+    ObjectDataDescriptor(ObjectDataDescriptor),
+    ObjectDataRecord(ObjectDataRecord),
 }
 
 impl ClassObjectData {
@@ -153,12 +157,22 @@ impl ClassObjectData {
             Self::ViewRepModelSpaceViewSelectionSet(_) => "ACDBSYMODELSPACEVIEWSELSET",
             Self::ViewRep(_) => "ACDBVIEWREP",
             Self::ViewRepModelSpaceSource(_) => "ACDBVIEWREPMODELSPACESOURCE",
+            Self::ObjectDataDictionary(_) => "IRD_DSC_DICT",
+            Self::ObjectDataDescriptor(_) => "IRD_DSC_RECORD",
+            Self::ObjectDataRecord(_) => "IRD_OBJ_RECORD",
         }
     }
 
     pub(crate) fn visit_handles_mut(&mut self, visit: &mut impl FnMut(&mut Handle)) {
         match self {
+            Self::ObjectDataDictionary(value) => {
+                for (_, handle) in &mut value.entries {
+                    visit(handle);
+                }
+            }
+            Self::ObjectDataRecord(value) => visit(&mut value.table),
             Self::Empty
+            | Self::ObjectDataDescriptor(_)
             | Self::LayerFilter(_)
             | Self::VbaProject(_)
             | Self::Sun(_)
@@ -259,6 +273,11 @@ impl ClassObjectData {
                 for data in &mut value.custom_data {
                     visit(&mut data.target);
                 }
+                for item in &mut value.data_map {
+                    if let Some(handle) = &mut item.value.handle_value {
+                        visit(handle);
+                    }
+                }
                 visit(&mut value.hard_owner);
             }
             Self::DetailViewStyle(value) => {
@@ -286,7 +305,8 @@ impl ClassObjectData {
                 }
             }
             Self::ViewRep(value) => {
-                for sketch in &mut value.sketches {
+                let more = value.more_models.iter_mut().flat_map(|m| &mut m.sketches);
+                for sketch in value.sketches.iter_mut().chain(more) {
                     for reference in &mut sketch.references {
                         visit(&mut reference.object);
                     }
@@ -344,6 +364,17 @@ pub struct ViewRepSourceManager {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ViewRepStandard {
     pub values: [i32; 6],
+}
+
+impl ViewRepStandard {
+    /// Values stored on disk: AutoCAD 2010 (AC1024) has five, R2013 adds a sixth.
+    pub(crate) fn stored_len(dxf: DxfVersion) -> usize {
+        if dxf >= DxfVersion::AC1027 {
+            6
+        } else {
+            5
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -451,6 +482,23 @@ pub enum ViewRepSketchGeometry {
     },
 }
 
+/// One model source's geometry in a view: the record stores
+/// `source_version` of these, the first in [`ViewRep`]'s own fields and the
+/// rest in [`ViewRep::more_models`].
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ViewRepModelGeometry {
+    pub model_id: i64,
+    pub guid: ViewRepGuid,
+    pub marker: u8,
+    pub transform: [f64; 16],
+    pub transform_version: i32,
+    pub database_id: i64,
+    pub geometry_version: i32,
+    pub geometry_marker: i32,
+    pub sketches: Vec<ViewRepSketch>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ViewRepSketch {
@@ -496,6 +544,8 @@ pub struct ViewRep {
     pub description: String,
     pub source_id: i64,
     pub source_enabled: bool,
+    /// Number of model geometry blocks the record holds (the first one's
+    /// fields follow; the rest are in `more_models`).
     pub source_version: i32,
     pub model_id: i64,
     pub guid: ViewRepGuid,
@@ -506,6 +556,9 @@ pub struct ViewRep {
     pub geometry_version: i32,
     pub geometry_marker: i32,
     pub sketches: Vec<ViewRepSketch>,
+    /// Geometry blocks after the first (a view of several model sources).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub more_models: Vec<ViewRepModelGeometry>,
     pub related_objects: [Handle; 2],
     pub source_manager: Handle,
     pub owned_objects: [Handle; 2],
@@ -532,6 +585,18 @@ pub struct ViewRep {
     pub style: Handle,
 }
 
+impl ViewRep {
+    /// The model block count the record stores: `source_version`, unless
+    /// `more_models` says there are more.
+    pub fn model_count(&self) -> i32 {
+        if self.more_models.is_empty() {
+            self.source_version
+        } else {
+            self.more_models.len() as i32 + 1
+        }
+    }
+}
+
 impl Default for ViewRep {
     fn default() -> Self {
         Self {
@@ -552,6 +617,7 @@ impl Default for ViewRep {
             geometry_version: 0,
             geometry_marker: 0,
             sketches: Vec::new(),
+            more_models: Vec::new(),
             related_objects: [Handle::NULL; 2],
             source_manager: Handle::NULL,
             owned_objects: [Handle::NULL; 2],
@@ -1224,7 +1290,19 @@ pub struct DataLink {
     pub status_flags: i32,
     pub update_status: String,
     pub custom_data: Vec<DataLinkCustomData>,
+    /// The link's data map (`CUSTOMDATA` / `DATAMAP` in DXF, a custom data collection in DWG):
+    /// for an Excel link, `ACEXCEL_CONNECTION_STRING`, `ACEXCEL_SOURCEDATE` and
+    /// `ACEXCEL_UPDATEOPTIONS`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub data_map: Vec<crate::entities::TableCustomData>,
     pub hard_owner: Handle,
+}
+
+impl DataLink {
+    /// Bit of the DWG option that says the data map follows. AutoCAD sets it whenever the map is
+    /// written and leaves it out of the option it shows (DXF group 90, `entget`); a DWG link whose
+    /// bit and map disagree can't be opened by AutoCAD.
+    pub const HAS_DATA_MAP: i32 = 8;
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

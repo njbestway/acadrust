@@ -70,10 +70,16 @@ impl DwgWriter {
         }
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
+        prepare_unique_seqends(&mut prepared);
         prepare_database_references(&mut prepared);
         prepare_table_keys(&mut prepared);
         prepare_active_viewport_elevation(&mut prepared);
         prepare_roundtrip_records(&mut prepared);
+        prepare_plot_style_name_dictionary(&mut prepared);
+        // R2010+ style records own their starting table; older ones keep it
+        // in the extension dictionary.
+        let in_dictionary = prepared.version < DxfVersion::AC1024;
+        crate::objects::prepare_table_style_templates(&mut prepared, in_dictionary);
         prepare_book_colors(&mut prepared)?;
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
@@ -91,7 +97,7 @@ impl DwgWriter {
         let mut owned;
         let document: &CadDocument = if document.has_null_table_entries()
             || document.version < DxfVersion::AC1027
-            || has_missing_object_classes(document)
+            || has_missing_classes(document)
         {
             owned = document.clone();
             if owned.has_null_table_entries() {
@@ -105,11 +111,12 @@ impl DwgWriter {
                     prepare_legacy_classes(&mut owned);
                 }
             }
-            // Objects added after reading (an evaluated dynamic block's
+            // Entities and objects added after reading (a MULTILEADER drawn
+            // or pasted in, an evaluated dynamic block's
             // AcDbBlockRepresentationData, a drawing variable) need their
             // class whatever the version; the verbatim table only gains
             // entries at its end, so the numbers it carries stay valid.
-            add_missing_object_classes(&mut owned);
+            add_missing_classes(&mut owned);
             if owned.version < DxfVersion::AC1027 {
                 prepare_legacy_document(&mut owned);
                 crate::objects::store_table_style_roundtrip(&mut owned);
@@ -160,10 +167,16 @@ impl DwgWriter {
         validate_version(document.version)?;
         let mut prepared = crate::io::loft_parameters::prepared(document);
         prepare_surface_classes(&mut prepared);
+        prepare_unique_seqends(&mut prepared);
         prepare_database_references(&mut prepared);
         prepare_table_keys(&mut prepared);
         prepare_active_viewport_elevation(&mut prepared);
         prepare_roundtrip_records(&mut prepared);
+        prepare_plot_style_name_dictionary(&mut prepared);
+        // R2010+ style records own their starting table; older ones keep it
+        // in the extension dictionary.
+        let in_dictionary = prepared.version < DxfVersion::AC1024;
+        crate::objects::prepare_table_style_templates(&mut prepared, in_dictionary);
         prepare_book_colors(&mut prepared)?;
         write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
@@ -174,6 +187,105 @@ impl DwgWriter {
         Self::write_to_writer(&mut buffer, document)?;
         Ok(buffer.into_inner())
     }
+
+    /// Records a DWG save of `document` writes as they are although readers
+    /// built on ODA refuse the file over them (#370).
+    ///
+    /// An empty name is legal in DWG only on a shape-file STYLE. The unnamed
+    /// ordinary STYLE that linetype shape segments draw from is written with
+    /// the shape-file flag (#311) and is not listed. Every other record with
+    /// an empty name is written unchanged under its handle and listed here
+    /// with its table; the writer does not rename it, that is the caller's
+    /// choice. A record without a handle is listed with the null handle, as
+    /// the save assigns one. Empty for R12, whose tables are written by the
+    /// R12 writer.
+    pub fn write_diagnostics(document: &CadDocument) -> Vec<DwgWriteDiagnostic> {
+        if document.version == DxfVersion::AC1009 {
+            return Vec::new();
+        }
+        fn unnamed<'a, T: crate::tables::TableEntry + 'a>(
+            table: &'static str,
+            entries: impl Iterator<Item = &'a T>,
+            records: &mut Vec<(&'static str, Handle)>,
+        ) {
+            records.extend(
+                entries
+                    .filter(|entry| entry.name().is_empty())
+                    .map(|entry| (table, entry.handle())),
+            );
+        }
+        let shape_files = unnamed_shape_styles(document);
+        let mut records = Vec::new();
+        unnamed("BLOCK_RECORD", document.block_records.iter(), &mut records);
+        unnamed("LAYER", document.layers.iter(), &mut records);
+        let styles = document
+            .text_styles
+            .iter()
+            .filter(|style| !style.is_shape_file && !shape_files.contains(&style.handle));
+        unnamed("STYLE", styles, &mut records);
+        unnamed("LTYPE", document.line_types.iter(), &mut records);
+        unnamed("VIEW", document.views.iter(), &mut records);
+        unnamed("UCS", document.ucss.iter(), &mut records);
+        unnamed("VPORT", document.vports.iter(), &mut records);
+        unnamed("APPID", document.app_ids.iter(), &mut records);
+        unnamed("DIMSTYLE", document.dim_styles.iter(), &mut records);
+        records
+            .into_iter()
+            .map(|(table, handle)| DwgWriteDiagnostic {
+                code: "unnamed-table-record".to_string(),
+                table: table.to_string(),
+                handle,
+                message: format!(
+                    "{table} {:#X} has an empty name and is written unchanged; \
+                     readers built on ODA refuse a DWG with an unnamed {table} record",
+                    handle.value()
+                ),
+            })
+            .collect()
+    }
+}
+
+/// A record a DWG save writes as it is although other readers may refuse the
+/// file over it. Listed by [`DwgWriter::write_diagnostics`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DwgWriteDiagnostic {
+    /// Stable identifier of the kind, such as `unnamed-table-record`.
+    pub code: String,
+    /// Symbol table of the record, such as `LAYER` or `APPID`.
+    pub table: String,
+    /// Handle of the record.
+    pub handle: Handle,
+    /// Human-readable description.
+    pub message: String,
+}
+
+/// Handles of the unnamed ordinary STYLE records that linetype shape segments
+/// draw from: the shape file behind complex linetypes, stored without its
+/// flag (#311). An empty name is legal in DWG only on a shape-file STYLE, so
+/// the writer writes these with the flag; the document keeps them as they
+/// are (#370).
+pub(crate) fn unnamed_shape_styles(document: &CadDocument) -> std::collections::HashSet<Handle> {
+    use crate::tables::linetype::LineTypeComplexContent;
+    let unnamed: std::collections::HashSet<Handle> = document
+        .text_styles
+        .iter()
+        .filter(|style| !style.is_shape_file && style.name.is_empty() && !style.handle.is_null())
+        .map(|style| style.handle)
+        .collect();
+    if unnamed.is_empty() {
+        return unnamed;
+    }
+    document
+        .line_types
+        .iter()
+        .flat_map(|linetype| linetype.elements.iter())
+        .filter_map(|element| element.complex.as_ref())
+        .filter(|complex| {
+            matches!(complex.content, LineTypeComplexContent::Shape { .. })
+                && unnamed.contains(&complex.style_handle)
+        })
+        .map(|complex| complex.style_handle)
+        .collect()
 }
 
 pub(crate) fn prepare_active_viewport_elevation(document: &mut std::borrow::Cow<'_, CadDocument>) {
@@ -249,6 +361,24 @@ fn validate_unknown_records(document: &CadDocument) -> Result<()> {
                     data,
                     document.version,
                 )?;
+            }
+        }
+        if let crate::entities::EntityType::Extended(entity) = entity {
+            // An SPDS format entity has no model: its vendor schema is not
+            // public, so only its raw bytes can be written. Without bytes of
+            // the target version the record would go out empty.
+            if let crate::entities::ExtendedEntityData::Format(data) = &entity.data {
+                if data.raw_dwg_data.is_none()
+                    || data
+                        .raw_dwg_version
+                        .is_some_and(|version| version != document.version)
+                    || document.version == DxfVersion::AC1009
+                {
+                    return Err(DxfError::NotImplemented(format!(
+                        "Cannot encode SPDS format entity at handle {} as DWG {:?}: compatible raw DWG data is required",
+                        entity.common.handle, document.version
+                    )));
+                }
             }
         }
         if let crate::entities::EntityType::Unknown(entity) = entity {
@@ -738,6 +868,119 @@ fn prepare_surface_classes(document: &mut std::borrow::Cow<'_, CadDocument>) {
     }
 }
 
+/// An INSERT's SEQEND is written under a handle no other record of the drawing has.
+/// A block reference copied within or between drawings keeps the SEQEND handle it had (the
+/// copy paths renew its ATTRIB handles only), so two records were written under one handle:
+/// another INSERT's SEQEND, or whatever entity, ATTRIB or object of the target drawing holds
+/// that handle; the reader keeps one, and an ATTRIB lost that way was gone from the saved
+/// drawing. On the output copy, a SEQEND handle already in use is cleared, so the writer
+/// allocates a fresh one; the first claimant keeps it.
+fn prepare_unique_seqends(document: &mut std::borrow::Cow<'_, CadDocument>) {
+    use crate::entities::EntityType;
+    use crate::tables::TableEntry;
+    let doc = document.as_ref();
+    let mut used = std::collections::HashSet::new();
+    macro_rules! table {
+        ($t:expr) => {
+            used.insert($t.handle().value());
+            used.extend($t.iter().map(|e| e.handle().value()));
+        };
+    }
+    table!(doc.layers);
+    table!(doc.line_types);
+    table!(doc.text_styles);
+    table!(doc.dim_styles);
+    table!(doc.app_ids);
+    table!(doc.views);
+    table!(doc.vports);
+    table!(doc.ucss);
+    table!(doc.vx_table);
+    table!(doc.block_records);
+    for record in doc.block_records.iter() {
+        used.extend([
+            record.block_entity_handle.value(),
+            record.block_end_handle.value(),
+        ]);
+    }
+    used.extend(doc.objects.keys().map(|h| h.value()));
+    for entity in doc.entities() {
+        used.insert(entity.common().handle.value());
+        match entity {
+            EntityType::Insert(i) => {
+                used.extend(i.attributes.iter().map(|a| a.common.handle.value()))
+            }
+            EntityType::Polyline3D(p) => used.extend(p.vertices.iter().map(|v| v.handle.value())),
+            _ => {}
+        }
+    }
+    let clashes: Vec<Handle> = doc
+        .entities()
+        .filter_map(|e| match e {
+            EntityType::Insert(i) => i
+                .seqend_handle
+                .filter(|h| !h.is_null() && !used.insert(h.value()))
+                .map(|_| i.common.handle),
+            _ => None,
+        })
+        .collect();
+    if clashes.is_empty() {
+        return;
+    }
+    let output = document.to_mut();
+    for handle in clashes {
+        if let Some(EntityType::Insert(i)) = output.get_entity_mut(handle) {
+            i.seqend_handle = None;
+        }
+    }
+}
+
+/// ACAD_PLOTSTYLENAME is a dictionary with a default entry
+/// (ACDBDICTIONARYWDFLT) in every drawing AutoCAD and ODA save, and ODA refuses
+/// a DWG that stores it as a plain DICTIONARY ("can't be cast to
+/// AcDbDictionaryWithDefault"). DXF files of other programs carry it as a plain
+/// DICTIONARY: promote it on the output copy, with `Normal` as the default
+/// entry, else the first one. Its reactors and extension dictionary go to the
+/// side channels the writer reads them from for this record.
+fn prepare_plot_style_name_dictionary(document: &mut std::borrow::Cow<'_, CadDocument>) {
+    use crate::objects::{DictionaryWithDefault, ObjectType};
+    // R13/R14 have no plot style dictionary: the writer leaves it out.
+    if document.version < DxfVersion::AC1015 {
+        return;
+    }
+    let Some(handle) = document
+        .named_objects_dictionary()
+        .and_then(|root| root.get("ACAD_PLOTSTYLENAME"))
+    else {
+        return;
+    };
+    let Some(ObjectType::Dictionary(plain)) = document.objects.get(&handle) else {
+        return;
+    };
+    let promoted = DictionaryWithDefault {
+        handle: plain.handle,
+        owner: plain.owner,
+        entries: plain.entries.clone(),
+        default_handle: plain
+            .get("Normal")
+            .or_else(|| plain.entries.first().map(|(_, entry)| *entry))
+            .unwrap_or(Handle::NULL),
+        duplicate_cloning: plain.duplicate_cloning,
+        hard_owner: plain.hard_owner,
+    };
+    let reactors = plain.reactors.clone();
+    let xdictionary = plain.xdictionary_handle;
+    let output = document.to_mut();
+    if !reactors.is_empty() {
+        output.reactors_by_handle.entry(handle).or_insert(reactors);
+    }
+    if let Some(xdictionary) = xdictionary {
+        output.xdic_by_handle.entry(handle).or_insert(xdictionary);
+    }
+    output
+        .objects
+        .insert(handle, ObjectType::DictionaryWithDefault(promoted));
+}
+
 /// Re-key symbol-table entries that were renamed in place.
 ///
 /// Tables key entries by the name captured at insertion, so a caller that
@@ -871,7 +1114,13 @@ fn objects_in_handle_order(document: &CadDocument) -> Vec<(Handle, &crate::objec
 /// class-registered record takes its type code from that number. A class the
 /// profile would drop while an entity or object still uses it leaves the
 /// record without a valid type code, so it is kept, after the profile.
+///
+/// A proxy names its class by number instead (`class_id`, DXF 91): that class
+/// is kept as well, and the proxy takes the class's new number once the table
+/// is rebuilt. Without it the number points past the table or at another
+/// class, and readers refuse the proxy (ODA: "No ClassId").
 fn prepare_legacy_classes(document: &mut CadDocument) {
+    let proxies = proxy_classes(document);
     let entity_classes = document.entities().map(entity_class_name);
     let object_classes = objects_in_handle_order(document)
         .into_iter()
@@ -894,6 +1143,7 @@ fn prepare_legacy_classes(document: &mut CadDocument) {
         .chain(object_classes)
         .chain(field_classes)
         .filter_map(|name| document.classes.get_by_name(&name).cloned())
+        .chain(proxies.iter().map(|(_, class)| class.clone()))
         .filter(|class| seen.insert(class.dxf_name.to_ascii_uppercase()))
         .collect();
 
@@ -904,52 +1154,154 @@ fn prepare_legacy_classes(document: &mut CadDocument) {
             document.classes.add_or_update(class);
         }
     }
+
+    for (proxy, class) in proxies {
+        let Some(number) = document
+            .classes
+            .get_by_name(&class.dxf_name)
+            .map(|class| i32::from(class.class_number))
+        else {
+            continue;
+        };
+        match proxy {
+            ProxyRecord::Entity(handle) => {
+                if let Some(crate::entities::EntityType::Extended(entity)) =
+                    document.get_entity_mut(handle)
+                {
+                    if let crate::entities::ExtendedEntityData::Proxy(data) = &mut entity.data {
+                        data.class_id = number;
+                    }
+                }
+            }
+            ProxyRecord::Object(handle) => {
+                if let Some(crate::objects::ObjectType::ProxyObject(object)) =
+                    document.objects.get_mut(&handle)
+                {
+                    object.class_id = number;
+                }
+            }
+        }
+    }
 }
 
-/// Class names of objects whose class the table lacks.
-fn missing_object_class_names(document: &CadDocument) -> Vec<Vec<std::borrow::Cow<'_, str>>> {
-    objects_in_handle_order(document)
+/// A proxy record, by handle.
+enum ProxyRecord {
+    Entity(Handle),
+    Object(Handle),
+}
+
+/// Every proxy entity and proxy object whose `class_id` names a class of the
+/// table, with that class.
+fn proxy_classes(document: &CadDocument) -> Vec<(ProxyRecord, crate::classes::DxfClass)> {
+    let class_of = |class_id: i32| {
+        document
+            .classes
+            .iter()
+            .find(|class| i32::from(class.class_number) == class_id)
+            .cloned()
+    };
+    let entities = document.entities().filter_map(|entity| match entity {
+        crate::entities::EntityType::Extended(extended) => match &extended.data {
+            crate::entities::ExtendedEntityData::Proxy(data) => Some((
+                ProxyRecord::Entity(extended.common.handle),
+                class_of(data.class_id)?,
+            )),
+            _ => None,
+        },
+        _ => None,
+    });
+    let objects = objects_in_handle_order(document)
         .into_iter()
-        .map(|(_, object)| {
-            crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names(object)
-        })
-        .filter(|names| !names.iter().any(|name| document.classes.contains(name)))
-        .collect()
+        .filter_map(|(handle, object)| match object {
+            crate::objects::ObjectType::ProxyObject(data) => {
+                Some((ProxyRecord::Object(handle), class_of(data.class_id)?))
+            }
+            _ => None,
+        });
+    entities.chain(objects).collect()
 }
 
-/// True when an object the defaults can declare has no class in the table.
-fn has_missing_object_classes(document: &CadDocument) -> bool {
+/// Default declarations for the classes of entities and objects that the
+/// table lacks, one per class, in first-use order.
+fn missing_classes<'a>(document: &'a CadDocument) -> Vec<crate::classes::DxfClass> {
+    use std::borrow::Cow;
+
     let defaults = crate::classes::default_classes();
-    missing_object_class_names(document).iter().any(|names| {
-        defaults.iter().any(|class| {
-            names
-                .iter()
-                .any(|name| class.dxf_name.eq_ignore_ascii_case(name))
-        })
-    })
+    // Most records share a handful of names (every LINE is "LINE"): settle
+    // each name once instead of once per record.
+    let mut seen: std::collections::HashSet<Cow<'a, str>> = std::collections::HashSet::new();
+    let mut missing: Vec<crate::classes::DxfClass> = Vec::new();
+    // `own`: the declaration a registered-class record carries itself (its
+    // DXF and C++ class names), used when the defaults don't know the class.
+    let mut check = |names: &[Cow<'a, str>], own: Option<crate::classes::DxfClass>| {
+        if names.iter().all(|name| seen.contains(name.as_ref())) {
+            return;
+        }
+        seen.extend(names.iter().cloned());
+        if names.iter().any(|name| document.classes.contains(name)) {
+            return;
+        }
+        let Some(class) = defaults
+            .iter()
+            .find(|class| {
+                names
+                    .iter()
+                    .any(|name| class.dxf_name.eq_ignore_ascii_case(name))
+            })
+            .cloned()
+            .or(own)
+        else {
+            return;
+        };
+        if !missing
+            .iter()
+            .any(|added| added.dxf_name.eq_ignore_ascii_case(&class.dxf_name))
+        {
+            missing.push(class);
+        }
+    };
+    for entity in document.entities() {
+        let own = match entity {
+            crate::entities::EntityType::Extended(extended) => match &extended.data {
+                crate::entities::ExtendedEntityData::RegisteredClass(data) => Some(
+                    crate::classes::DxfClass::new_entity(&data.dxf_name, &data.cpp_class_name),
+                ),
+                _ => None,
+            },
+            _ => None,
+        };
+        check(&[Cow::Borrowed(entity_class_name(entity))], own);
+    }
+    for (_, object) in objects_in_handle_order(document) {
+        let own = match object {
+            crate::objects::ObjectType::RegisteredClass(data) => Some(
+                crate::classes::DxfClass::new(&data.dxf_name, &data.cpp_class_name),
+            ),
+            _ => None,
+        };
+        check(
+            &crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names(object),
+            own,
+        );
+    }
+    missing
 }
 
-/// Declare the class of every object whose source file never used that
-/// class. Such records take their type code from the class table; without an
-/// entry they fall back to a fixed or placeholder code (500 for dynamic block
-/// records), which readers resolve to another class or drop: an evaluated
-/// dynamic block reference then loses its link to the definition.
-fn add_missing_object_classes(document: &mut CadDocument) {
-    let defaults = crate::classes::default_classes();
-    let missing: Vec<_> = missing_object_class_names(document)
-        .into_iter()
-        .filter_map(|names| {
-            defaults
-                .iter()
-                .find(|class| {
-                    names
-                        .iter()
-                        .any(|name| class.dxf_name.eq_ignore_ascii_case(name))
-                })
-                .cloned()
-        })
-        .collect();
-    for mut class in missing {
+/// True when an entity or object the defaults can declare has no class in
+/// the table.
+fn has_missing_classes(document: &CadDocument) -> bool {
+    !missing_classes(document).is_empty()
+}
+
+/// Declare the class of every entity and object whose source file never used
+/// that class. Such records take their type code from the class table; without
+/// an entry they fall back to a fixed or placeholder code (500 for dynamic
+/// block records), which readers resolve to another class or drop: an
+/// evaluated dynamic block reference then loses its link to the definition,
+/// and a MULTILEADER or WIPEOUT drawn into a file that never held one makes
+/// AutoCAD refuse to open the drawing.
+fn add_missing_classes(document: &mut CadDocument) {
+    for mut class in missing_classes(document) {
         class.class_number = 0;
         document.classes.add_or_update(class);
     }
@@ -1023,6 +1375,51 @@ fn prepare_legacy_document(document: &mut CadDocument) {
                 document.objects.remove(&child);
             }
         }
+    }
+
+    // A pre-R2010 MLEADERSTYLE names its record version in ACAD_MLEADERVER
+    // xdata (1070 = 2), as AutoCAD and ZWCAD write it. ZWCAD 2025 drops an
+    // R2004 style without it as an invalid dictionary entry, and AUDIT then
+    // clears CMLEADERSTYLE.
+    if document.version < DxfVersion::AC1024 {
+        add_mleader_version_xdata(document);
+    }
+}
+
+/// Application name of the MLEADERSTYLE record version xdata.
+const MLEADER_VERSION_APP: &str = "ACAD_MLEADERVER";
+
+fn add_mleader_version_xdata(document: &mut CadDocument) {
+    use crate::xdata::{ExtendedDataRecord, XDataValue};
+    let styles: Vec<Handle> = document
+        .objects
+        .iter()
+        .filter(|(_, object)| matches!(object, crate::objects::ObjectType::MultiLeaderStyle(_)))
+        .map(|(handle, _)| *handle)
+        .filter(|handle| {
+            document
+                .object_xdata
+                .get(handle)
+                .and_then(|data| data.get_record(MLEADER_VERSION_APP))
+                .is_none()
+        })
+        .collect();
+    if styles.is_empty() {
+        return;
+    }
+    if !document.app_ids.contains(MLEADER_VERSION_APP) {
+        let mut app = crate::tables::AppId::new(MLEADER_VERSION_APP);
+        app.handle = document.allocate_handle();
+        let _ = document.app_ids.add(app);
+    }
+    for handle in styles {
+        let mut record = ExtendedDataRecord::new(MLEADER_VERSION_APP);
+        record.add_value(XDataValue::Integer16(2));
+        document
+            .object_xdata
+            .entry(handle)
+            .or_default()
+            .add_record(record);
     }
 }
 
@@ -1216,7 +1613,23 @@ fn prepare_header(
         super::dwg_stream_writers::object_writer::paper_space_block_handle(document);
 
     // ── Sync current style handles (validate against actual objects) ──
-    // CLAYER: must point to an actual layer; fall back to "0" if invalid
+    // CLAYER: a DXF names it ($CLAYER) and the handle read with it is null, so
+    // resolve the name first; then it must point to an actual layer, else "0".
+    if let Some(layer) = document
+        .layers
+        .iter()
+        .find(|l| l.name.eq_ignore_ascii_case(&h.current_layer_name))
+    {
+        let is_default_name = h.current_layer_name == "0";
+        let handle_is_valid_custom = !h.current_layer_handle.is_null()
+            && document
+                .layers
+                .iter()
+                .any(|l| l.handle == h.current_layer_handle && l.name != "0");
+        if !is_default_name || !handle_is_valid_custom {
+            h.current_layer_handle = layer.handle;
+        }
+    }
     {
         let clayer_valid = !h.current_layer_handle.is_null()
             && document
@@ -1227,6 +1640,39 @@ fn prepare_header(
             if let Some(layer) = document.layers.get("0") {
                 h.current_layer_handle = layer.handle;
             }
+        }
+    }
+
+    // ── Current text and dimension styles by name ──
+    // A DXF names them ($TEXTSTYLE, $DIMSTYLE); the handles read with it need not be those styles' handles
+    // in this document, and the DWG stores only handles, so AutoCAD opened the drawing with Standard current.
+    // Ported from CADCraft's DWG bridge (storytold/cadcraft #1051, #1650; MIT OR Apache-2.0).
+    if let Some(s) = document
+        .text_styles
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(&h.current_text_style_name))
+    {
+        let is_default_name = h.current_text_style_name.eq_ignore_ascii_case("Standard");
+        let handle_is_valid_custom = !h.current_text_style_handle.is_null()
+            && document.text_styles.iter().any(|t| {
+                t.handle == h.current_text_style_handle && !t.name.eq_ignore_ascii_case("Standard")
+            });
+        if !is_default_name || !handle_is_valid_custom {
+            h.current_text_style_handle = s.handle;
+        }
+    }
+    if let Some(s) = document
+        .dim_styles
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(&h.current_dimstyle_name))
+    {
+        let is_default_name = h.current_dimstyle_name.eq_ignore_ascii_case("Standard");
+        let handle_is_valid_custom = !h.current_dimstyle_handle.is_null()
+            && document.dim_styles.iter().any(|d| {
+                d.handle == h.current_dimstyle_handle && !d.name.eq_ignore_ascii_case("Standard")
+            });
+        if !is_default_name || !handle_is_valid_custom {
+            h.current_dimstyle_handle = s.handle;
         }
     }
 
@@ -1327,7 +1773,9 @@ fn prepare_header(
         }
     }
 
-    // dim_text_style_handle — validate against text styles
+    // dim_text_style_handle — DXF names the style, a DWG stores its handle.
+    // A null or dangling handle selects the style the name gives; when that
+    // names nothing, fall back to Standard.
     {
         let dts_valid = !h.dim_text_style_handle.is_null()
             && document
@@ -1337,7 +1785,8 @@ fn prepare_header(
         if !dts_valid {
             h.dim_text_style_handle = document
                 .text_styles
-                .get("Standard")
+                .get(&h.dim_text_style_name)
+                .or_else(|| document.text_styles.get("Standard"))
                 .map(|s| s.handle)
                 .unwrap_or(Handle::NULL);
         }
@@ -1356,20 +1805,29 @@ fn prepare_header(
         }
     }
 
-    // ── Validate dim linetype handles against actual linetypes ──
-    // These can become corrupt during header read/write due to stream alignment.
+    // ── Resolve and validate dim linetype handles against actual linetypes ──
+    // DXF names them and a DWG stores their handles, so a null or dangling
+    // handle takes the handle of the linetype the name gives.
     {
-        let valid_lt = |h: Handle| -> bool {
-            h.is_null() || document.line_types.iter().any(|lt| lt.handle == h)
-        };
-        if !valid_lt(h.dim_linetype_handle) {
-            h.dim_linetype_handle = Handle::NULL;
-        }
-        if !valid_lt(h.dim_linetype1_handle) {
-            h.dim_linetype1_handle = Handle::NULL;
-        }
-        if !valid_lt(h.dim_linetype2_handle) {
-            h.dim_linetype2_handle = Handle::NULL;
+        let names = [
+            h.dim_linetype_name.clone(),
+            h.dim_linetype1_name.clone(),
+            h.dim_linetype2_name.clone(),
+        ];
+        for (handle, name) in [
+            (&mut h.dim_linetype_handle, &names[0]),
+            (&mut h.dim_linetype1_handle, &names[1]),
+            (&mut h.dim_linetype2_handle, &names[2]),
+        ] {
+            let valid =
+                !handle.is_null() && document.line_types.iter().any(|lt| lt.handle == *handle);
+            if !valid {
+                *handle = document
+                    .line_types
+                    .get(name)
+                    .map(|lt| lt.handle)
+                    .unwrap_or(Handle::NULL);
+            }
         }
     }
 
@@ -1662,7 +2120,7 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: FileDepList ──
-    let file_dep_data = build_file_dep_list();
+    let file_dep_data = build_file_dep_list(document)?;
     fhw.add_section(
         output,
         section_names::FILE_DEP_LIST,
@@ -1815,7 +2273,7 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::APP_INFO, &app_info_data)?;
 
     // FileDepList
-    let file_dep_data = build_file_dep_list();
+    let file_dep_data = build_file_dep_list(document)?;
     fhw.add_section(output, section_names::FILE_DEP_LIST, &file_dep_data)?;
 
     // RevHistory
@@ -2032,16 +2490,13 @@ fn build_summary_info(
     data
 }
 
-/// Build FileDepList section data (AC18+ only).
-///
-/// Empty dependency list (0 features, 0 files).
-fn build_file_dep_list() -> Vec<u8> {
-    let mut data = Vec::with_capacity(8);
-    // Int32: feature count (0)
-    data.extend_from_slice(&0u32.to_le_bytes());
-    // Int32: file count (0)
-    data.extend_from_slice(&0u32.to_le_bytes());
-    data
+/// Build typed FileDepList section data (AC18+ only).
+fn build_file_dep_list(document: &CadDocument) -> Result<Vec<u8>> {
+    super::file_dependencies::write(
+        &document.file_dependencies,
+        document.version,
+        summary_encoding(document),
+    )
 }
 
 /// Build RevHistory section data (AC18+ only).
@@ -2780,6 +3235,77 @@ mod tests {
     }
 
     #[test]
+    fn entity_without_its_class_gets_it_declared() {
+        use crate::entities::{EntityType, MultiLeader, Wipeout};
+        use crate::types::Vector3;
+
+        // A drawing whose source file never held a MULTILEADER or a WIPEOUT,
+        // so its class table lacks both, then gains one of each. Readers
+        // resolve classes by position, so the source table is numbered
+        // without gaps, as a file written by AutoCAD would be.
+        let mut document = CadDocument::new();
+        let mut classes = crate::classes::DxfClassCollection::new();
+        for class in document.classes.iter() {
+            if !["MULTILEADER", "WIPEOUT"]
+                .iter()
+                .any(|name| class.dxf_name.eq_ignore_ascii_case(name))
+            {
+                let mut class = class.clone();
+                class.class_number = 500 + classes.len() as i16;
+                classes.push_preserving(class);
+            }
+        }
+        let numbers: Vec<_> = classes
+            .iter()
+            .map(|class| (class.dxf_name.clone(), class.class_number))
+            .collect();
+        document.classes = classes;
+        document
+            .add_entity(EntityType::MultiLeader(Box::new(MultiLeader::with_text(
+                "note",
+                Vector3::new(10.0, 5.0, 0.0),
+                vec![Vector3::ZERO, Vector3::new(10.0, 5.0, 0.0)],
+            ))))
+            .unwrap();
+        document
+            .add_entity(EntityType::Wipeout(Wipeout::rectangular(
+                Vector3::ZERO,
+                10.0,
+                5.0,
+            )))
+            .unwrap();
+
+        let bytes = DwgWriter::write_to_vec(&document).unwrap();
+        let decoded = crate::io::dwg::DwgReader::from_stream(Cursor::new(bytes))
+            .read()
+            .unwrap();
+
+        assert!(decoded.classes.contains("MULTILEADER"));
+        assert!(decoded.classes.contains("WIPEOUT"));
+        // The source classes keep their places and numbers; the new ones go
+        // at the end, and every number still matches its position.
+        let decoded_classes: Vec<_> = decoded.classes.iter().collect();
+        for (index, class) in decoded_classes.iter().enumerate() {
+            assert_eq!(class.class_number, 500 + index as i16, "{}", class.dxf_name);
+        }
+        for (class, (name, number)) in decoded_classes.iter().zip(&numbers) {
+            assert_eq!((&class.dxf_name, class.class_number), (name, *number));
+        }
+        let mut added: Vec<_> = decoded_classes[numbers.len()..]
+            .iter()
+            .map(|class| class.dxf_name.to_uppercase())
+            .collect();
+        added.sort();
+        assert_eq!(added, ["MULTILEADER", "WIPEOUT"]);
+        let types: Vec<_> = decoded
+            .model_space_entities()
+            .map(|entity| entity.as_entity().entity_type())
+            .collect();
+        assert!(types.contains(&"MULTILEADER"), "{types:?}");
+        assert!(types.contains(&"WIPEOUT"), "{types:?}");
+    }
+
+    #[test]
     fn test_validate_version_r2007_ok() {
         assert!(validate_version(DxfVersion::AC1021).is_ok());
     }
@@ -2946,7 +3472,7 @@ mod tests {
 
     #[test]
     fn test_build_file_dep_list() {
-        let d = build_file_dep_list();
+        let d = build_file_dep_list(&CadDocument::new()).unwrap();
         assert_eq!(d.len(), 8);
     }
 
@@ -3123,7 +3649,7 @@ mod tests {
         let mut expected = doc.classes.clone();
         expected.retain_legacy_dwg_classes();
         assert_eq!(decoded.classes.len(), expected.len());
-        assert_eq!(decoded.objects.len(), 13);
+        assert_eq!(decoded.objects.len(), 14); // includes AcDbVariableDictionary (#408)
     }
 
     #[test]

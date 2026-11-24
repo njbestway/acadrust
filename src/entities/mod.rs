@@ -121,7 +121,11 @@ pub use polyline::{
     Polyline, Polyline2D, PolylineFlags, SmoothSurfaceType, Vertex2D, Vertex3D, VertexFlags,
 };
 pub use polyline3d::{Polyline3D, Polyline3DFlags, Vertex3DPolyline};
-pub use proxy_graphics::{ProxyGraphicRecord, ProxyGraphics, ProxyUnicodeText};
+pub use proxy_graphics::{
+    CheckedProxyGraphicRecord, CheckedProxyGraphics, ProxyGraphicCommand, ProxyGraphicError,
+    ProxyGraphicErrorReason, ProxyGraphicRecord, ProxyGraphics, ProxyLegacyText,
+    ProxyLegacyTextStyle, ProxyStyledUnicodeText, ProxyUnicodeText,
+};
 pub use raster_image::{
     ClipBoundary, ClipMode, ClipType, ImageDefinition, ImageDisplayFlags, ImageDisplayQuality,
     RasterImage, RasterImageBuilder, ResolutionUnit,
@@ -161,6 +165,7 @@ pub use xline::XLine;
 /// Common fields live on [`EntityCommon`]. Implement [`Self::common`] and
 /// [`Self::common_mut`]; the handle, layer, color, line weight, transparency,
 /// and visibility methods forward to those.
+#[whichever::dispatchable]
 pub trait Entity {
     /// Common entity fields.
     fn common(&self) -> &EntityCommon;
@@ -454,7 +459,7 @@ pub struct R12EntityMetadata {
 /// these fields defaults optional references and `entity_mode` to `None`, and
 /// flags to zero. Positional formats require a separate compatibility strategy.
 /// Raw DWG records, graphic bytes and the derived data-store bit remain excluded.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntityCommon {
     /// Unique handle
@@ -541,11 +546,153 @@ pub struct EntityCommon {
     /// The exact merged-stream bytes this entity was decoded from (DWG only),
     /// with the framing the writer needs to re-emit them verbatim.
     /// Set by the DWG reader; cleared by every mutable access (`get_entity_mut`,
-    /// `entities_mut`) and by `add_entity`, so it is only ever present on an
-    /// entity that is byte-for-byte what the source file contained. The writer
-    /// copies such records instead of re-encoding them (same target version only).
+    /// `entities_mut`) and by `add_entity`, and not carried over to a copy of
+    /// the entity (`Clone`), so it is only ever present on an entity that is
+    /// byte-for-byte what the source file contained. The writer copies such
+    /// records instead of re-encoding them (same target version only).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub raw_record: Option<std::sync::Arc<RawRecord>>,
+}
+
+impl Clone for EntityCommon {
+    /// A copy of the entity, without [`raw_record`](Self::raw_record).
+    ///
+    /// The record is what the entity was read from, and the DWG writer copies
+    /// it instead of encoding the entity. A copy is a new value that its
+    /// holder changes field by field and may store back in the document: if
+    /// it carried the record, the drawing would be saved as it was before the
+    /// change.
+    fn clone(&self) -> Self {
+        let Self {
+            handle,
+            layer,
+            layer_handle,
+            color,
+            line_weight,
+            linetype,
+            linetype_handle,
+            linetype_scale,
+            transparency,
+            color_name,
+            invisible,
+            extended_data,
+            graphic_data,
+            reactors,
+            xdictionary_handle,
+            owner_handle,
+            color_book_handle,
+            full_visual_style_handle,
+            face_visual_style_handle,
+            edge_visual_style_handle,
+            material_flags,
+            material_handle,
+            shadow_flags,
+            plotstyle_flags,
+            plotstyle_handle,
+            entity_mode,
+            r12_metadata,
+            has_ds_data,
+            raw_record: _,
+        } = self;
+        Self {
+            handle: handle.clone(),
+            layer: layer.clone(),
+            layer_handle: layer_handle.clone(),
+            color: color.clone(),
+            line_weight: line_weight.clone(),
+            linetype: linetype.clone(),
+            linetype_handle: linetype_handle.clone(),
+            linetype_scale: linetype_scale.clone(),
+            transparency: transparency.clone(),
+            color_name: color_name.clone(),
+            invisible: invisible.clone(),
+            extended_data: extended_data.clone(),
+            graphic_data: graphic_data.clone(),
+            reactors: reactors.clone(),
+            xdictionary_handle: xdictionary_handle.clone(),
+            owner_handle: owner_handle.clone(),
+            color_book_handle: color_book_handle.clone(),
+            full_visual_style_handle: full_visual_style_handle.clone(),
+            face_visual_style_handle: face_visual_style_handle.clone(),
+            edge_visual_style_handle: edge_visual_style_handle.clone(),
+            material_flags: material_flags.clone(),
+            material_handle: material_handle.clone(),
+            shadow_flags: shadow_flags.clone(),
+            plotstyle_flags: plotstyle_flags.clone(),
+            plotstyle_handle: plotstyle_handle.clone(),
+            entity_mode: entity_mode.clone(),
+            r12_metadata: r12_metadata.clone(),
+            has_ds_data: has_ds_data.clone(),
+            raw_record: None,
+        }
+    }
+}
+
+impl PartialEq for EntityCommon {
+    /// Equality of the entity data. [`raw_record`](Self::raw_record) is a
+    /// cache of the source bytes, not part of that data: an entity and its
+    /// copy are equal.
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            handle,
+            layer,
+            layer_handle,
+            color,
+            line_weight,
+            linetype,
+            linetype_handle,
+            linetype_scale,
+            transparency,
+            color_name,
+            invisible,
+            extended_data,
+            graphic_data,
+            reactors,
+            xdictionary_handle,
+            owner_handle,
+            color_book_handle,
+            full_visual_style_handle,
+            face_visual_style_handle,
+            edge_visual_style_handle,
+            material_flags,
+            material_handle,
+            shadow_flags,
+            plotstyle_flags,
+            plotstyle_handle,
+            entity_mode,
+            r12_metadata,
+            has_ds_data,
+            raw_record: _,
+        } = self;
+        *handle == other.handle
+            && *layer == other.layer
+            && *layer_handle == other.layer_handle
+            && *color == other.color
+            && *line_weight == other.line_weight
+            && *linetype == other.linetype
+            && *linetype_handle == other.linetype_handle
+            && *linetype_scale == other.linetype_scale
+            && *transparency == other.transparency
+            && *color_name == other.color_name
+            && *invisible == other.invisible
+            && *extended_data == other.extended_data
+            && *graphic_data == other.graphic_data
+            && *reactors == other.reactors
+            && *xdictionary_handle == other.xdictionary_handle
+            && *owner_handle == other.owner_handle
+            && *color_book_handle == other.color_book_handle
+            && *full_visual_style_handle == other.full_visual_style_handle
+            && *face_visual_style_handle == other.face_visual_style_handle
+            && *edge_visual_style_handle == other.edge_visual_style_handle
+            && *material_flags == other.material_flags
+            && *material_handle == other.material_handle
+            && *shadow_flags == other.shadow_flags
+            && *plotstyle_flags == other.plotstyle_flags
+            && *plotstyle_handle == other.plotstyle_handle
+            && *entity_mode == other.entity_mode
+            && *r12_metadata == other.r12_metadata
+            && *has_ds_data == other.has_ds_data
+    }
 }
 
 impl EntityCommon {
@@ -613,6 +760,7 @@ impl Default for EntityCommon {
 /// Enumeration of all entity types for type-safe storage
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[whichever::dispatch(Entity, from = false)]
 pub enum EntityType {
     /// Point entity
     Point(Point),
@@ -635,14 +783,18 @@ pub enum EntityType {
     /// Text entity
     Text(Text),
     /// Multi-line text entity
+    #[dispatch(deref)]
     MText(Box<MText>),
     /// Spline entity
     Spline(Spline),
     /// Helix entity (spline-derived 3D spiral)
+    #[dispatch(deref)]
     Helix(Box<Helix>),
     /// Dimension entity
+    #[dispatch(deref)]
     Dimension(Box<Dimension>),
     /// Hatch entity
+    #[dispatch(deref)]
     Hatch(Box<Hatch>),
     /// Solid entity
     Solid(Solid),
@@ -659,6 +811,7 @@ pub enum EntityType {
     /// XLine entity (construction line, infinite)
     XLine(XLine),
     /// Viewport entity (paper space viewport)
+    #[dispatch(deref)]
     Viewport(Box<Viewport>),
     /// Attribute definition entity
     AttributeDefinition(AttributeDefinition),
@@ -667,6 +820,7 @@ pub enum EntityType {
     /// Leader entity
     Leader(Leader),
     /// MultiLeader entity
+    #[dispatch(deref)]
     MultiLeader(Box<MultiLeader>),
     /// MLine (multiline) entity
     MLine(MLine),
@@ -681,8 +835,10 @@ pub enum EntityType {
     /// Body entity
     Body(Body),
     /// Surface entity (ACAD_SURFACE family: lofted/swept/extruded/etc.)
+    #[dispatch(deref)]
     Surface(Box<Surface>),
     /// Table entity
+    #[dispatch(deref)]
     Table(Box<Table>),
     /// Tolerance entity (geometric tolerancing)
     Tolerance(Tolerance),
@@ -697,14 +853,17 @@ pub enum EntityType {
     /// End-of-sequence marker
     Seqend(Seqend),
     /// OLE2 embedded object
+    #[dispatch(deref)]
     Ole2Frame(Box<Ole2Frame>),
     /// Polygon mesh (3D surface mesh)
     PolygonMesh(PolygonMeshEntity),
     /// Light entity (point / spot / distant light source)
+    #[dispatch(deref)]
     Light(Box<Light>),
     SectionSymbol(SectionSymbol),
     ViewBorder(ViewBorder),
     /// Structured class-based and legacy entities.
+    #[dispatch(deref)]
     Extended(Box<ExtendedEntity>),
     /// Unknown / unsupported entity type (common fields only)
     Unknown(UnknownEntity),
@@ -736,120 +895,22 @@ impl EntityType {
 
     /// Get a reference to the entity trait object
     pub fn as_entity(&self) -> &dyn Entity {
-        match self {
-            EntityType::Point(e) => e,
-            EntityType::Line(e) => e,
-            EntityType::Circle(e) => e,
-            EntityType::Arc(e) => e,
-            EntityType::Ellipse(e) => e,
-            EntityType::Polyline(e) => e,
-            EntityType::Polyline2D(e) => e,
-            EntityType::Polyline3D(e) => e,
-            EntityType::LwPolyline(e) => e,
-            EntityType::Text(e) => e,
-            EntityType::MText(e) => e.as_ref(),
-            EntityType::Spline(e) => e,
-            EntityType::Helix(e) => e.as_ref(),
-            EntityType::Dimension(e) => e.as_ref(),
-            EntityType::Hatch(e) => e.as_ref(),
-            EntityType::Solid(e) => e,
-            EntityType::Face3D(e) => e,
-            EntityType::Insert(e) => e,
-            EntityType::Block(e) => e,
-            EntityType::BlockEnd(e) => e,
-            EntityType::Ray(e) => e,
-            EntityType::XLine(e) => e,
-            EntityType::Viewport(e) => e.as_ref(),
-            EntityType::AttributeDefinition(e) => e,
-            EntityType::AttributeEntity(e) => e,
-            EntityType::Leader(e) => e,
-            EntityType::MultiLeader(e) => e.as_ref(),
-            EntityType::MLine(e) => e,
-            EntityType::Mesh(e) => e,
-            EntityType::RasterImage(e) => e,
-            EntityType::Solid3D(e) => e,
-            EntityType::Region(e) => e,
-            EntityType::Body(e) => e,
-            EntityType::Surface(e) => e.as_ref(),
-            EntityType::Table(e) => e.as_ref(),
-            EntityType::Tolerance(e) => e,
-            EntityType::PolyfaceMesh(e) => e,
-            EntityType::Wipeout(e) => e,
-            EntityType::Shape(e) => e,
-            EntityType::Underlay(e) => e,
-            EntityType::Seqend(e) => e,
-            EntityType::Ole2Frame(e) => e.as_ref(),
-            EntityType::PolygonMesh(e) => e,
-            EntityType::Light(e) => e.as_ref(),
-            EntityType::SectionSymbol(e) => e,
-            EntityType::ViewBorder(e) => e,
-            EntityType::Extended(e) => e.as_ref(),
-            EntityType::Unknown(e) => e,
-        }
+        self
     }
 
     /// Get a mutable reference to the entity trait object
     pub fn as_entity_mut(&mut self) -> &mut dyn Entity {
-        match self {
-            EntityType::Point(e) => e,
-            EntityType::Line(e) => e,
-            EntityType::Circle(e) => e,
-            EntityType::Arc(e) => e,
-            EntityType::Ellipse(e) => e,
-            EntityType::Polyline(e) => e,
-            EntityType::Polyline2D(e) => e,
-            EntityType::Polyline3D(e) => e,
-            EntityType::LwPolyline(e) => e,
-            EntityType::MText(e) => e.as_mut(),
-            EntityType::Text(e) => e,
-            EntityType::Spline(e) => e,
-            EntityType::Helix(e) => e.as_mut(),
-            EntityType::Dimension(e) => e.as_mut(),
-            EntityType::Hatch(e) => e.as_mut(),
-            EntityType::Solid(e) => e,
-            EntityType::Face3D(e) => e,
-            EntityType::Insert(e) => e,
-            EntityType::Block(e) => e,
-            EntityType::BlockEnd(e) => e,
-            EntityType::Ray(e) => e,
-            EntityType::XLine(e) => e,
-            EntityType::Viewport(e) => e.as_mut(),
-            EntityType::AttributeDefinition(e) => e,
-            EntityType::AttributeEntity(e) => e,
-            EntityType::Leader(e) => e,
-            EntityType::MultiLeader(e) => e.as_mut(),
-            EntityType::MLine(e) => e,
-            EntityType::Mesh(e) => e,
-            EntityType::RasterImage(e) => e,
-            EntityType::Solid3D(e) => e,
-            EntityType::Region(e) => e,
-            EntityType::Body(e) => e,
-            EntityType::Surface(e) => e.as_mut(),
-            EntityType::Table(e) => e.as_mut(),
-            EntityType::Tolerance(e) => e,
-            EntityType::PolyfaceMesh(e) => e,
-            EntityType::Wipeout(e) => e,
-            EntityType::Shape(e) => e,
-            EntityType::Underlay(e) => e,
-            EntityType::Seqend(e) => e,
-            EntityType::Ole2Frame(e) => e.as_mut(),
-            EntityType::PolygonMesh(e) => e,
-            EntityType::Light(e) => e.as_mut(),
-            EntityType::SectionSymbol(e) => e,
-            EntityType::ViewBorder(e) => e,
-            EntityType::Extended(e) => e.as_mut(),
-            EntityType::Unknown(e) => e,
-        }
+        self
     }
 
     /// Get a reference to the entity's common data
     pub fn common(&self) -> &EntityCommon {
-        self.as_entity().common()
+        Entity::common(self)
     }
 
     /// Get a mutable reference to the entity's common data
     pub fn common_mut(&mut self) -> &mut EntityCommon {
-        self.as_entity_mut().common_mut()
+        Entity::common_mut(self)
     }
 }
 

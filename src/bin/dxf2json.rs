@@ -1057,6 +1057,9 @@ fn stacking_to_display_text(stack: &acadrust::entities::mtext_format::StackingDa
         StackingType::Horizontal | StackingType::Diagonal => {
             format!("{}/{}", stack.numerator, stack.denominator)
         }
+        StackingType::Decimal => {
+            format!("{}{}", stack.numerator, stack.denominator)
+        }
     }
 }
 

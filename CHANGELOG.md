@@ -2,6 +2,277 @@
 
 ### Unreleased
 
+- **Extended dimensions keep AcDbDimension base groups** - The
+  ARC_DIMENSION and LARGE_RADIAL_DIMENSION reader had no arms for the
+  AcDbDimension insertion point (12), horizontal direction (51) and
+  flip-arrow (74/75) groups, so a DXF read dropped them — including on
+  files the library itself writes.
+- **IMAGE clip mode in DXF** - The DXF writer never emitted group 290,
+  so an image clipped to the inside of its boundary reverted to clipping
+  the outside on every save. `290` (0 = outside, 1 = inside) is now
+  written after the clip boundary vertices for R2010 (AC1024) and later,
+  matching the version gate on the DWG stream's clip-inverted bit.
+- **MULTILEADER text attachment point** - The field (DXF group 179 on the
+  entity, group 171 in the context data) holds the MTEXT attachment point,
+  values 1 to 9. It was modeled as left/center/right only, so a legitimate
+  value such as 5 (middle center, which AutoCAD writes) read with an
+  `unknown-leader-enum` warning and round-tripped as 2.
+  `TextAttachmentPointType` now covers `TopLeft` to `BottomRight`; the former
+  `Left`/`Center`/`Right` variants are `TopLeft`/`TopCenter`/`TopRight`.
+
+- **DXF-format proxy entities** - An `ACAD_PROXY_ENTITY` whose original
+  data format is DXF (`70 1`) carries the entity's own DXF groups after
+  the header. The reader kept only binary data and let those groups' own
+  `70`/`90` overwrite the header; the writer then emitted `70 0` with
+  binary `93`/`161`/`310` data, so a DXF round trip lost the data. The
+  groups are now kept verbatim (`ProxyEntityData::dxf_data`) and written
+  back as they are, as `ACAD_PROXY_OBJECT` already does.
+
+- **AutoCAD 2010 view-rep standard** - `ACDBVIEWREPSTANDARD` stores five
+  values before R2013 and six from R2013; the DWG reader and writer now
+  use the count the drawing's version stores.
+
+- **Section size limit as a read option** -
+  `DwgReadOptions::max_section_bytes` (`with_max_section_bytes`) replaces
+  the fixed 1 GiB bound on one decompressed section. Large drawings can
+  exceed it: a 424 MB AC1032 file with 10,000 proxy entities has an
+  `AcDb:AcDbObjects` section of about 1.25 GB and read as an empty
+  document (diagnostic `objects-extract-failed`). The default stays
+  1 GiB; `max_decompressed_bytes` still caps the whole read.
+
+- **3DSOLID wire transform scale** - The scale in a wire's transform is
+  one BD (uniform scale), not a 3BD. Wireframes whose wires carry a
+  transform now decode in step with the stream, where reading the scale
+  as three values pushed every later field out of place. `Wire::scale`
+  keeps its three components, all equal when read from a DWG.
+
+- **Civil 3D station equations, design speeds and sites** -
+  `ArchEntityData::alignment_station_equations` and
+  `alignment_design_speeds` read an alignment's equations (raw station,
+  back, ahead, increasing) and speeds; `display_station` gives the
+  station Civil 3D shows past the equations. `ArchObject::topology` reads
+  the graph a site container or alignment companion keeps (edges through
+  nodes with the faces on both sides); `Topology::face_polylines` gives a
+  parcel's boundary.
+
+- **Civil 3D offset and connected alignments** - Offset alignments draw
+  their spirals (the parent spiral moved sideways over the part it
+  follows) and their widening transitions (curve – line – curve, curve –
+  reverse curve, curve – curve – reverse curve); connected alignments draw
+  their three-centered arcs.
+
+- **Civil 3D profiles** - Layout profiles read every entity Civil 3D
+  writes: symmetric parabolas by length or K, circular curves by length,
+  radius or through a point, asymmetric parabolas, parabolas through three
+  points, between two points with K, radius or a grade, parabolas hanging
+  from the tangent before, tangents leaving a curve towards a point, and
+  free tangents between two curves. `ProfilePiece` gains `Circular` and
+  `AsymmetricParabola`.
+
+- **Civil 3D alignment elements** - Alignments read more of the element
+  records Civil 3D 2018 and later write: the first spiral of a group kept
+  as separate elements, headers with any parameter-lock byte, compound and
+  placed spirals, free spirals and spiral-spiral groups between lines,
+  spiral-curve groups ending at a point, spiral-line and line-spiral
+  groups, spiral-spiral and spiral-line-spiral groups between two curves,
+  reverse curves with spirals through one or two points, long
+  spiral-curve-spiral-curve-spiral groups from their TS, fillets through a
+  point, curves ending at a point or along a direction, lines to or from a
+  point, and open curves by their centre. Groups between curves solve
+  where they leave the first curve. `FreeSpiralLineSpiral` is now
+  `FreeSpiralSpiralCurves { ratio }`; `Circle` carries `closed` and
+  `clockwise`.
+
+- **Civil 3D pipe networks** - `ArchEntityData::pipe_ends` reads a pipe's
+  start and end, `structure_position` a structure's insertion point, and
+  `ArchObject::network_part_fields` a part definition's number fields
+  (inner diameter, wall thickness, structure diameter, ...) with their
+  units, in drawings from Civil 3D 2013 and 2018 on.
+
+- **Civil 3D alignments** - Masking regions read with any number of
+  regions (the list opens with three `BL 2` before its count). Free lines
+  between two fixed arcs are solved tangent to both, ending the first arc
+  and starting the second where the line meets them; composite solutions
+  keep their element joins, so each piece takes its own style component.
+
+- **Civil 3D spirals and curves** - Spiral records carry their shape:
+  `SpiralShape` (clothoid, Bloss, sinusoidal, biquadratic, cubic parabola,
+  Japanese cubic, sine half-wave) on `SpiralIn` / `SpiralOut`, each drawn
+  with its own geometry. Alignments read whole circles (by centre and
+  radius, or centre and start point) and arcs from a stored point onto the
+  next line.
+
+- **Civil 3D 2013 drawings** - Style display components, assembly
+  attachments and alignment elements read in drawings Civil 3D 2013 wrote:
+  their component and attachment tags carry 70 where later releases carry
+  80, some alignments open each element with `BS 0`, and subassemblies and
+  assemblies keep one null handle fewer before the assembly and baseline
+  style. Alignments solve arcs of a given radius fitted between a line and
+  a fixed arc, arcs that leave a line and end at a stored point, lines
+  through two stored points, and elements stored as a chain of points.
+  Curves are walked with the exact chord of each step, so small radii no
+  longer drift off their end point. `corridor_baselines` returns a
+  corridor's feature line groups per baseline, and
+  `corridor_feature_line_groups` now covers every baseline instead of the
+  first.
+
+- **Civil 3D labels** - `label_stations` keeps a label at station 0, which
+  the record stores in two bits, and negative stations before it, so a
+  data band labels the alignment start and stations before it. Text
+  components written without the component marker read their x/y offsets
+  and gap too.
+
+- **Civil 3D styles** - `ArchObject::display_components` reads a Civil 3D
+  style's display components (visibility, color, layer, linetype,
+  lineweight, linetype scale) in the order the style class defines them,
+  and `surface_contour_intervals` a surface style's minor and major contour
+  intervals. `TinSurface::boundary` and `TinSurface::contours` draw a
+  surface's outline and contours, `alignment_pieces` gives an alignment's
+  lines, curves and spirals, and `profile_pieces` a profile's tangents and
+  vertical curves, so each can take its own style component.
+  `alignment_masked_ranges` gives the station ranges an alignment hides,
+  `profile_view_axes` a profile view style's axis intervals, tick sizes and
+  text heights, `marker` a marker style's point shape and size,
+  `label_tick` / `label_line` a label's tick block and leader line,
+  `band_height` a data band's height, `code_set` / `code_set_defaults` a code
+  set's styles, and `corridor_feature_line_groups` a corridor's feature lines
+  grouped by region. `LabelText` gains the text component's attachment,
+  rotation, x/y offsets, gap and anchor point; station formats add the
+  `9+99.99` and whole-station options. Alignment geometry points keep every
+  join inside compound pieces and are named BP, EP, PI, PCC, PRC and SPI.
+
+- **Civil 3D classes** - `classes::civil` names the `AECC_*` classes:
+  `kind_of` / `ArchEntityData::civil_kind` give alignments, profiles, profile
+  views, TIN surfaces, corridors, assemblies, subassemblies, parcels, sample
+  line groups and labels; `object_kind_of` / `ArchObject::civil_kind` sort the
+  dictionary objects into styles, label styles, display representations,
+  settings and profile elements. `ArchEntityData::tin_surface` reads a TIN
+  surface's stored triangulation (points, triangles, neighbors, hidden flags),
+  which the drawing's proxy graphics reduce to a bounding box.
+  `alignment_elements` / `alignment_polylines` read an alignment's design
+  elements and solve its centerline exactly: fixed, floating and free lines
+  and arcs, spirals, free and floating spiral-curve(-spiral) groups, free
+  spirals, free spiral-line-spirals, spiral-spiral-curves ending at their
+  stored point, and reverse spiral-curve-spiral pairs. An element this crate
+  cannot decode ends the polyline instead of being guessed.
+  `profile_polylines` reads a profile's station/elevation tangents and joins
+  them with their vertical curves, `profile_view_frame` a profile view's
+  placement, ranges and vertical scale, and `corridor_feature_lines` a
+  corridor's baseline and feature lines with their stations.
+  `alignment_start_station` and `alignment_geometry_points` (POB, TS, SC, PC,
+  ...) give stations along the solved centerline. `profile_pvis` lists
+  a design profile's PVIs and vertical curve lengths, `label_stations` the
+  stations a label group places labels at, `label_anchor` a single label's
+  position, and `sample_lines` the stations and swath of a sample line group.
+  `ArchObject::label_text` reads a label text component (its format with
+  static text, property fields and their precision/station/percent options,
+  text height and offset; `parse_format` and `LabelPart::format_value`
+  render it), `ArchObject::inline_strings` the formats a style stores, and
+  `sample_line_name_template` a sample line group's naming template.
+  `subassembly_shape` reads the points and links a subassembly last
+  generated, `assembly_layout` an assembly's baseline point and which parent
+  point each subassembly hangs from, and `subassembly_assembly` the assembly
+  a subassembly belongs to.
+  `classes::map3d` names the Map 3D display-management objects. The records
+  stay in their containers and keep their native bodies on save.
+
+- **Rotation of annotative block and text representations in DXF** - Group 50
+  of a block or text object context is in degrees, but it was read and written
+  as is while the rotation in memory is in radians, as DWG stores it and as
+  `Insert::rotation` and the attribute representation hold it. A symbol rotated
+  30 degrees came back as 30 radians. A representation that an earlier version
+  wrote after editing holds radians in group 50 and now reads as degrees.
+- **Custom drawing property fields** - `%<\AcVar CustomDP.<Name>>%`, the code
+  AutoCAD writes for a custom drawing property, resolves to the property's
+  stored text verbatim (name matched case-insensitively). It used to fall
+  through to the system-variable lookup, which reformatted a value such as
+  `12,5` as the point `12.000000, 5.000000, 0.000000`. An empty value shows
+  `----`; a missing property stays unresolved.
+- **Classes of added entities** - Saving as DWG now declares the class of
+  every class-registered entity that the source file's class table lacks
+  (MULTILEADER, WIPEOUT, ACAD_TABLE, IMAGE, ARC_DIMENSION, ...), as it already
+  did for objects. Such an entity drawn into a file that never held one made
+  AutoCAD refuse to open the drawing.
+- **Attributed MINSERT arrays in DWG 2004+** - The INSERT/MINSERT reader now
+  consumes the owned-object count that follows the attributes flag from R2004
+  on. A MINSERT with attributes previously read its column count, row count
+  and spacings one field early (for example 2 x 3 at 15/10 came back as
+  1 x 2 at 1.0/~0), and saving the drawing kept the wrong array.
+
+### 0.6.8
+
+- **Symbol names (issue #237)** - Names are compared as AutoCAD compares
+  them: each letter upper-cases to one letter, and a non-ASCII letter never
+  folds into an ASCII one. `Yazı` and `YAZI`, or `Straße` and `STRASSE`, stay
+  distinct table entries.
+- **SPLINE from DWG to DXF (issue #234)** - A DWG to DXF save keeps the
+  SPLINE closed flag and clamps periodic NURBS control points to valid
+  parameters.
+- **Current styles in DWG writes (issue #227)** - A DWG save keeps the
+  current text and dimension styles (`$TEXTSTYLE`, `$DIMSTYLE`) by resolving
+  their names to table handles.
+- **Dimension names (issue #215)** - The dimension text style and linetype
+  names are written and resolved from their names rather than dropped.
+- **BLOCKPROPERTIESTABLE (issue #183)** - Group 93 is read as a value
+  followed by three flags, not as a flag count.
+- **VBA_PROJECT (issue #184)** - The section's BL is treated as its size, so
+  files that previously failed the strict read load.
+- **Header variables (issues #196, #211, and #222)** - The DWG reader keeps
+  `ACADMAINTVER`, `DIMTXTDIRECTION`, `DIMALTMZF`/`DIMALTMZS`,
+  `DIMMZF`/`DIMMZS`, `CSHADOW`, and the UCS and paper-space UCS orthographic
+  origins. `UNITMODE` and `DIMUNIT` round-trip, the R13 `DIMFIT` stays apart
+  from `DIMATFIT`, and the DXF reader also keeps `$PELLIPSE` and
+  `$PUCSBASE`.
+- **UNITMODE (issue #220)** - `header.unit_mode` is the single source for
+  `$UNITMODE`, so a DXF write no longer uses a second value.
+- **Dimension header names (issue #217)** - `DIMTXSTY`, `DIMLTYPE`,
+  `DIMLTEX1`, and `DIMLTEX2` are kept from both the DWG and DXF headers,
+  defaulting to `Standard` and `ByBlock`.
+- **Code pages and CIF escapes (issues #191, #209, #213, and #216)** - A
+  pre-R2007 CIF escape is decoded only when the code page cannot hold the
+  character, and a stand-in code page row does not gate it. In R2007+ UTF-8
+  and UTF-16 text a CIF escape is content. Characters are escaped only when
+  the code page encodes them onto a different one, and Shift_JIS yen is
+  written as a bare backslash.
+- **MTEXT escapes (issue #212)** - `\U+XXXX` takes exactly four hex digits,
+  so `20\U+00B0C` is `20`, U+00B0, then `C`.
+- **Image definition reactors (issue #204)** - `IMAGEDEF` and
+  `RASTERVARIABLES` write their owner dictionary and reactor handles, so
+  AutoCAD's External References palette no longer lists images as
+  unreferenced after a DXF round trip.
+- **Unknown DWG code pages (issue #202)** - An unknown code page index still
+  falls back to ANSI_1252, but the read now reports a warning naming it.
+- **Same-version saves (issue #199)** - A DWG save keeps an object whose
+  class is not registered instead of dropping it.
+- **MTEXT columns (issue #198)** - For R2007 to R2013 the column layout is
+  written as ACAD extended data instead of group 50, so the rotation no
+  longer reads back as a column height. Older versions write no columns, and
+  the reader restores `column_data`.
+- **Legacy TABLE cells (issue #193)** - Below R2007 an empty text cell keeps
+  an empty string, the text follows the value handle that is written, and
+  R2000 colors use the full color record.
+- **Binary DXF integers (issue #190)** - An integer that does not fit its
+  group's width is an error instead of being silently truncated.
+- **Clockwise HATCH arcs (issue #159)** - A clockwise arc edge is stored with
+  complementary angles in DXF, so a round trip keeps its direction.
+- **DWG header current names (issue #186)** - The current text style,
+  linetype, and dimension style resolve to names from their handles.
+- **FreeBSD aarch64** - `sysctlbyname`'s name parameter uses `c_char`, and CI
+  checks both FreeBSD targets.
+- **MTEXT paragraph end properties** - `MTextParagraph::end_properties` holds
+  the span properties in effect where a paragraph ends: at its break (`\P`,
+  `\N`, `^J`, a raw line feed, `\p;`) or at the end of the text. An empty
+  paragraph has no spans, so this is the only record of the height, font and
+  colour its line is set in; groups closed before the break do not apply to
+  it (issue #229). Plain-text parsing records the `%%u`/`%%o` state at its
+  breaks. Breaking: struct literals of `MTextParagraph` need
+  `end_properties: SpanProperties::default()` or `..Default::default()`.
+  Serde input without the field reads as the default (issue #231).
+- **DWG allocation budget** - `DwgReadOptions::max_decompressed_bytes` caps the
+  total decompressed bytes one read allocates across sections and system pages,
+  so a small crafted file fails with a `DxfError` instead of exhausting memory.
+  Buffers sized from file data are now reserved fallibly, turning an allocation
+  failure into a `DxfError` rather than a process abort (issue #226).
 - **Annotative context data** - AutoCAD does not store the R2010
   file-to-extension-dictionary bit on object-context leaves. 0.6.7 read that
   bit and rejected drawings whose first failure was an aligned-dimension,
@@ -40,8 +311,12 @@
   treated as a material tail. An R2007 solid-history region accepts a profile
   stored as a body. AcDs wireframe stubs write the silhouette count even when
   the isoline cache is absent (issue #170).
-- **Associative arcs** - An edge arc carries three points and four scalars in
-  every version. A shorter terminal record is not accepted as a decoded arc.
+- **Associative arcs** - An edge arc carries three points and four scalars,
+  except a terminal AC1024 arc, which AutoCAD writes with three (radius, start
+  and end angle) and whose main stream ends exactly after the third. That
+  record is decoded with three scalars and written back as it was read. Any
+  other shorter record (AC1027 and later, a nested arc, bits left after the
+  third scalar, or fewer than three scalars) is not accepted as a decoded arc.
 - **Block Properties Tables** - Numeric rows and ordered DXF fields
   round-trip. Each column stores two parameter handles, in DXF field order.
   Unsupported value types are rejected instead of dropping the table.

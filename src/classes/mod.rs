@@ -2,6 +2,8 @@
 //!
 //! [`arch`] is the ACAD Arch (AEC) class catalog and the geometry
 //! model used to read, write, build, and modify those entities and objects.
+//! [`civil`] names the Civil 3D classes and decodes their stored geometry.
+//! [`map3d`] names the Map 3D display-management objects.
 
 //! Classes define custom object types registered in the DXF drawing.
 //! Each class maps a DXF entity/object name to its C++ class name and
@@ -10,6 +12,8 @@
 //! Corresponds to the classic `DxfClass` and `DxfClassCollection`.
 
 pub mod arch;
+pub mod civil;
+pub mod map3d;
 
 use std::collections::HashMap;
 
@@ -288,6 +292,20 @@ impl DxfClassCollection {
             class.class_number = 500 + index as i16;
             self.name_index
                 .insert(class.dxf_name.to_ascii_uppercase(), index);
+        }
+    }
+
+    /// Add the default definition of one class when the collection lacks it:
+    /// objects made in memory need their class listed to be written.
+    pub(crate) fn ensure_default(&mut self, dxf_name: &str) {
+        if self.contains(dxf_name) {
+            return;
+        }
+        if let Some(class) = default_classes()
+            .into_iter()
+            .find(|class| class.dxf_name == dxf_name)
+        {
+            self.add_or_update(class);
         }
     }
 
@@ -598,6 +616,9 @@ pub(crate) fn default_classes() -> Vec<DxfClass> {
         ("ACMESCOPE", "AcMeScope", 0, "AcMeServices", false),
         ("ACMESTATEMGR", "AcMeStateMgr", 0, "AcMeServices", false),
         ("CSACDOCUMENTOPTIONS", "CDocDataContainer", 4095, "\"DERU003_CSAPP\"", false),
+        ("IRD_DSC_DICT", "CIrdDscDict", 1025, "\"IRD\"", false),
+        ("IRD_DSC_RECORD", "CIrdDscRecord", 1025, "\"IRD\"", false),
+        ("IRD_OBJ_RECORD", "CIrdObjRecord", 1025, "\"IRD\"", false),
         ("BLOCKALIGNEDCONSTRAINTPARAMETER", "AcDbBlockAlignedConstraintParameter", 0, "ObjectDBX Classes", false),
         ("BLOCKANGULARCONSTRAINTPARAMETER", "AcDbBlockAngularConstraintParameter", 0, "ObjectDBX Classes", false),
         ("BLOCKARRAYACTION", "AcDbBlockArrayAction", 0, "ObjectDBX Classes", false),
@@ -720,6 +741,7 @@ pub(crate) fn default_classes() -> Vec<DxfClass> {
         ("DIMASSOC", "AcDbDimAssoc", 0,
             "AcDbDimAssoc|Product Desc:     AcDim ARX App For Dimension|Company:          Autodesk|WEB Address:      www.autodesk.com", false),
         ("TABLECONTENT", "AcDbTableContent", 1025, "ObjectDBX Classes", false),
+        ("TABLETEMPLATE", "AcDbTableTemplate", 1152, "ObjectDBX Classes", false),
         ("TABLEGEOMETRY", "AcDbTableGeometry", 1025, "ObjectDBX Classes", false),
         ("Format", "mcsDbObjectFormat", 0, "NanoSPDS", true),
         ("RASTERVARIABLES", "AcDbRasterVariables", 0, "ISM", false),

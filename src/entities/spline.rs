@@ -19,6 +19,12 @@ pub struct SplineFlags {
     pub linear: bool,
 }
 
+pub(crate) struct ClampedSpline {
+    pub points: Vec<Vector3>,
+    pub knots: Vec<f64>,
+    pub weights: Vec<f64>,
+}
+
 impl SplineFlags {
     /// Create default spline flags
     pub fn new() -> Self {
@@ -175,6 +181,193 @@ impl Spline {
         (p as i32, kv)
     }
 
+    /// Whether all control points or fit points of this spline lie in a plane.
+    pub fn is_planar(&self) -> bool {
+        let points = if !self.control_points.is_empty() {
+            &self.control_points
+        } else if !self.fit_points.is_empty() {
+            &self.fit_points
+        } else {
+            return false;
+        };
+
+        if points.len() <= 3 {
+            return true;
+        }
+
+        let p0 = points[0];
+        // Fast path for 2D XY splines
+        if points.iter().all(|p| (p.z - p0.z).abs() < 1e-4) {
+            return true;
+        }
+
+        // If normal vector is defined and unit length, check against it
+        let normal = self.normal;
+        if normal != Vector3::ZERO && (normal.length_squared() - 1.0).abs() < 1e-4 {
+            return points.iter().all(|p| ((*p - p0).dot(&normal)).abs() < 1e-4);
+        }
+
+        // Otherwise find a plane normal from the first 3 non-collinear points
+        let mut p1_opt = None;
+        for p in &points[1..] {
+            if (*p - p0).length_squared() > 1e-8 {
+                p1_opt = Some(*p);
+                break;
+            }
+        }
+        let Some(p1) = p1_opt else {
+            return true;
+        };
+        let v1 = p1 - p0;
+
+        let mut normal_opt = None;
+        for p in &points[1..] {
+            let v2 = *p - p0;
+            let n = v1.cross(&v2);
+            if n.length_squared() > 1e-8 {
+                normal_opt = Some(n.normalize());
+                break;
+            }
+        }
+        let Some(plane_normal) = normal_opt else {
+            return true;
+        };
+
+        points
+            .iter()
+            .all(|p| ((*p - p0).dot(&plane_normal)).abs() < 1e-4)
+    }
+
+    /// Convert a periodic cubic B-spline with DWG periodic knot vector (knots.len() == control_points.len() + 1)
+    /// to a clamped B-spline where `knots.len() == control_points.len() + degree + 1`.
+    ///
+    /// This produces the exact clamped NURBS representation that AutoCAD writes to DXF,
+    /// ensuring downstream DXF readers can evaluate the curve geometry.
+    pub fn periodic_to_clamped_cubic(&self) -> Option<(Vec<Vector3>, Vec<f64>)> {
+        self.clamp_periodic_cubic()
+            .map(|clamped| (clamped.points, clamped.knots))
+    }
+
+    pub(crate) fn clamp_periodic_cubic(&self) -> Option<ClampedSpline> {
+        if !self.flags.periodic || self.degree != 3 {
+            return None;
+        }
+        let n = self.control_points.len();
+        if n < 3 || self.knots.len() != n + 1 {
+            return None;
+        }
+
+        let p = &self.control_points;
+        let k = (n - 2) % n;
+        let k_prev = (k + n - 1) % n;
+        let k_next = (k + 1) % n;
+
+        let weighted = self.flags.rational;
+        let weight = |i: usize| self.weights.get(i).copied().unwrap_or(1.);
+        let combine = |terms: &[(usize, f64)]| {
+            let common = weight(terms[0].0);
+            if !weighted || terms.iter().all(|&(i, _)| weight(i) == common) {
+                let point = terms
+                    .iter()
+                    .fold(Vector3::ZERO, |point, &(i, factor)| point + p[i] * factor);
+                return (point, common);
+            }
+            let scale = terms.iter().map(|&(i, _)| weight(i)).fold(0., f64::max);
+            let (sum, point) =
+                terms
+                    .iter()
+                    .fold((0., Vector3::ZERO), |(sum, point), &(i, factor)| {
+                        let contribution = factor * (weight(i) / scale);
+                        (sum + contribution, point + p[i] * contribution)
+                    });
+            (point * (1. / sum), sum * scale)
+        };
+        let first = combine(&[(k_prev, 1. / 6.), (k, 2. / 3.), (k_next, 1. / 6.)]);
+        let second = combine(&[(k, 2. / 3.), (k_next, 1. / 3.)]);
+        let penultimate = combine(&[(k_prev, 1. / 3.), (k, 2. / 3.)]);
+
+        let mut controls = Vec::with_capacity(n + 3);
+        controls.push(first);
+        controls.push(second);
+        for i in 0..(n - 1) {
+            let idx = (k_next + i) % n;
+            controls.push((p[idx], weight(idx)));
+        }
+        controls.push(penultimate);
+        controls.push(first);
+
+        let u0 = self.knots[0];
+        let un = self.knots[n];
+        let mut clamped_knots = Vec::with_capacity(n + 7);
+        clamped_knots.extend([u0, u0, u0, u0]);
+        clamped_knots.extend_from_slice(&self.knots[1..n]);
+        clamped_knots.extend([un, un, un, un]);
+
+        let (points, weights) = controls.into_iter().unzip();
+        Some(ClampedSpline {
+            points,
+            knots: clamped_knots,
+            weights: if weighted { weights } else { Vec::new() },
+        })
+    }
+
+    /// The clamped cubic NURBS through the fit points of a fit-point spline:
+    /// knots at the fit parameters (chord, square-root chord or uniform, by
+    /// `knot_parameterization`), four times at each end. The two missing
+    /// conditions are the start/end tangents when set, else a zero second
+    /// derivative at that end; a closed fit spline is treated the same, its
+    /// last fit point repeating the first. `None` when there is nothing to
+    /// interpolate or two consecutive fit points coincide.
+    pub(crate) fn interpolate_fit_cubic(&self) -> Option<ClampedSpline> {
+        let q = &self.fit_points;
+        if self.degree != 3 || q.len() < 2 || !self.control_points.is_empty() {
+            return None;
+        }
+        let n = q.len() - 1;
+        let mut params = vec![0.0];
+        let mut chord = 0.0;
+        for w in q.windows(2) {
+            let d = (w[1] - w[0]).length();
+            if d < 1e-12 {
+                return None;
+            }
+            chord += d;
+            let step = match self.knot_parameterization {
+                1 => d.sqrt(),
+                2 => 1.0,
+                _ => d,
+            };
+            params.push(params.last().unwrap() + step);
+        }
+        let (u0, un) = (params[0], params[n]);
+        let mut knots = vec![u0; 4];
+        knots.extend_from_slice(&params[1..n]);
+        knots.extend([un; 4]);
+        let m = n + 3;
+        // ponytail: dense Gaussian elimination, O(n^3); a banded solver if fit
+        // splines with thousands of points show up.
+        let row = |u: f64, d: usize| (0..m).map(|i| basis(&knots, i, 3, u, d)).collect::<Vec<_>>();
+        let unit = |i: usize| (0..m).map(|j| if j == i { 1.0 } else { 0.0 }).collect::<Vec<_>>();
+        let speed = chord / (un - u0);
+        let end = |u: f64, tangent: Vector3| {
+            if tangent == Vector3::ZERO {
+                (row(u, 2), Vector3::ZERO)
+            } else {
+                (row(u, 1), tangent.normalize() * speed)
+            }
+        };
+        let mut rows = vec![(unit(0), q[0]), end(u0, self.begin_tangent)];
+        rows.extend((1..n).map(|k| (row(params[k], 0), q[k])));
+        rows.push(end(un, self.end_tangent));
+        rows.push((unit(m - 1), q[n]));
+        let points = solve(rows)?;
+        Some(ClampedSpline {
+            points,
+            knots,
+            weights: Vec::new(),
+        })
+    }
+
     /// Get the number of control points
     pub fn control_point_count(&self) -> usize {
         self.control_points.len()
@@ -236,6 +429,64 @@ impl Entity for Spline {
     fn apply_mirror(&mut self, transform: &crate::types::Transform) {
         super::mirror::mirror_spline(self, transform);
     }
+}
+
+/// The `d`-th derivative of B-spline basis function `i` of degree `p` at `u`.
+/// The last non-empty knot span is closed, so `u` may be the end parameter.
+fn basis(knots: &[f64], i: usize, p: usize, u: f64, d: usize) -> f64 {
+    let ratio = |num: f64, den: f64| if den == 0.0 { 0.0 } else { num / den };
+    if p == 0 {
+        let (a, b) = (knots[i], knots[i + 1]);
+        let last = *knots.last().unwrap();
+        return if (a <= u && u < b) || (u == last && a < b && b == last) {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    let (left, right) = (knots[i + p] - knots[i], knots[i + p + 1] - knots[i + 1]);
+    if d == 0 {
+        ratio(u - knots[i], left) * basis(knots, i, p - 1, u, 0)
+            + ratio(knots[i + p + 1] - u, right) * basis(knots, i + 1, p - 1, u, 0)
+    } else {
+        p as f64
+            * (ratio(basis(knots, i, p - 1, u, d - 1), left)
+                - ratio(basis(knots, i + 1, p - 1, u, d - 1), right))
+    }
+}
+
+/// Solve `rows` (coefficients, right-hand side) by Gaussian elimination with
+/// partial pivoting; `None` when singular.
+fn solve(mut rows: Vec<(Vec<f64>, Vector3)>) -> Option<Vec<Vector3>> {
+    let m = rows.len();
+    for c in 0..m {
+        let pivot = (c..m).max_by(|&a, &b| rows[a].0[c].abs().total_cmp(&rows[b].0[c].abs()))?;
+        if rows[pivot].0[c].abs() < 1e-14 {
+            return None;
+        }
+        rows.swap(c, pivot);
+        let (head, tail) = rows.split_at_mut(c + 1);
+        let (pr, pv) = (&head[c].0, head[c].1);
+        for (r, v) in tail.iter_mut() {
+            let f = r[c] / pr[c];
+            if f != 0.0 {
+                for j in c..m {
+                    r[j] -= f * pr[j];
+                }
+                *v = *v - pv * f;
+            }
+        }
+    }
+    let mut x = vec![Vector3::ZERO; m];
+    for c in (0..m).rev() {
+        let (r, v) = &rows[c];
+        let mut acc = *v;
+        for j in c + 1..m {
+            acc = acc - x[j] * r[j];
+        }
+        x[c] = acc * (1.0 / r[c]);
+    }
+    Some(x)
 }
 
 #[cfg(test)]
