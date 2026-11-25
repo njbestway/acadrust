@@ -42,4 +42,5 @@ Thumbs.db
 /tests/bricscad/
 /tests/acad/
 /tests/bcad/
-
+/output*/
+/test*/

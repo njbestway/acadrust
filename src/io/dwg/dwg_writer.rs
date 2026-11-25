@@ -431,6 +431,15 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                 if !hatch.is_associative {
                     continue;
                 }
+                // Route B: an unedited hatch is written verbatim from raw_record.
+                // Its boundary handles may reference VERTEX/SEQEND children the
+                // reader folded into a compound polyline parent, so get_entity()
+                // cannot resolve them; "repairing" would silently drop associativity
+                // on a record the user never touched. Only repair hatches that lost
+                // passthrough (edited / re-encoded).
+                if hatch.common.raw_record.is_some() {
+                    continue;
+                }
                 let boundaries: Vec<Handle> = hatch
                     .paths
                     .iter()
@@ -496,7 +505,9 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                     .or_else(|| document.block_records.get(&table.block_name));
                 if resolved.is_none_or(|record| {
                     table.block_record_handle != Some(record.handle)
-                        || table.block_name != record.name
+                        // block_name is a legacy DXF field the DWG reader leaves
+                        // empty; only a non-empty name can disagree with the block.
+                        || (!table.block_name.is_empty() && table.block_name != record.name)
                         || record.handle.is_null()
                         || record.block_entity_handle.is_null()
                         || record.block_end_handle.is_null()
@@ -664,6 +675,15 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
         }
     }
     for (boundary_handle, hatch_handle) in missing_hatch_reactors {
+        // Do not mutate an unedited boundary (still carrying raw_record): it is
+        // written verbatim and must stay byte-identical. Test before get_entity_mut,
+        // which clears raw_record.
+        if output
+            .get_entity(boundary_handle)
+            .is_some_and(|boundary| boundary.common().raw_record.is_some())
+        {
+            continue;
+        }
         if let Some(boundary) = output.get_entity_mut(boundary_handle) {
             if !boundary.common().reactors.contains(&hatch_handle) {
                 boundary.common_mut().reactors.push(hatch_handle);
