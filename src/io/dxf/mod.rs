@@ -23,14 +23,15 @@ pub mod code_page;
 mod dxf_code;
 mod group_code_value;
 mod multiline_attributes;
+mod proxy_dxf_filer;
 mod reader;
 mod spline_flags;
 mod writer;
 
 pub use dxf_code::DxfCode;
 pub use group_code_value::GroupCodeValueType;
+pub(crate) use reader::{rewire_stale_text_style_references, DxfStreamReader, DxfTextReader};
 pub use reader::{DxfReader, DxfReaderConfiguration};
-pub(crate) use reader::{DxfStreamReader, DxfTextReader};
 pub use writer::{value_type_for_code, write_binary_dxf, write_dxf};
 pub use writer::{
     DxfBinaryWriter, DxfOmission, DxfStreamWriter, DxfStreamWriterExt, DxfTextWriter, DxfWriter,

@@ -102,6 +102,11 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
     /// Records written per DXF name (upper case), used for the CLASSES
     /// instance counts. `None` keeps each class's stored count.
     class_instance_counts: Option<HashMap<String, i32>>,
+    /// Each dictionary's owner in the document being written
+    /// (`CadDocument::owned_dictionaries`), gathered once: every table record
+    /// is asked for its extension dictionary. `None` walks the document's
+    /// objects for each record.
+    owned_dictionaries: Option<HashMap<Handle, Handle>>,
 }
 
 impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
@@ -128,6 +133,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             loft_reference_appid: None,
             source_dwg_context: None,
             class_instance_counts: None,
+            owned_dictionaries: None,
+        }
+    }
+
+    /// Gather the dictionaries' owners of `document` once, for the extension
+    /// dictionaries of its table records. The document must not change while
+    /// this writer writes it.
+    pub(crate) fn gather_owned_dictionaries(&mut self, document: &CadDocument) {
+        self.owned_dictionaries = Some(document.owned_dictionaries());
+    }
+
+    /// `owner`'s extension dictionary, from the gathered owners when there are.
+    fn extension_dictionary(&self, document: &CadDocument, owner: Handle) -> Option<Handle> {
+        match &self.owned_dictionaries {
+            Some(owned) => document.extension_dictionary_handle_in(owner, owned),
+            None => document.extension_dictionary_handle(owner),
         }
     }
 
@@ -179,6 +200,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                         continue;
                     }
                 }
+                _ if document.is_orphan_dimension_association(obj) => continue,
                 _ => {}
             }
             set.insert(*h);
@@ -2085,7 +2107,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_string(0, "TABLE")?;
         self.writer.write_string(2, name)?;
         self.writer.write_handle(5, table_handle)?;
-        if let Some(handle) = document.extension_dictionary_handle(table_handle) {
+        if let Some(handle) = self.extension_dictionary(document, table_handle) {
             self.writer.write_string(102, "{ACAD_XDICTIONARY")?;
             self.writer.write_handle(360, handle)?;
             self.writer.write_string(102, "}")?;
@@ -2107,7 +2129,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         handle: Handle,
         document: &CadDocument,
     ) -> Result<()> {
-        if let Some(xdictionary) = document.extension_dictionary_handle(handle) {
+        if let Some(xdictionary) = self.extension_dictionary(document, handle) {
             if !xdictionary.is_null()
                 && (self.valid_handles.is_empty() || self.valid_handles.contains(&xdictionary))
             {
@@ -6312,6 +6334,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     self.write_block_visibility_parameter(obj)?
                 }
                 ObjectType::DynamicBlock(obj) => self.write_dynamic_block_object_dxf(obj)?,
+                ObjectType::Associative(_) if document.is_orphan_dimension_association(object) => {}
                 ObjectType::Associative(obj) => self.write_associative_object_dxf(obj)?,
                 ObjectType::ClassObject(obj) => self.write_class_object_dxf(obj)?,
                 ObjectType::DataObject(obj) => self.write_data_object_dxf(obj)?,
@@ -6731,7 +6754,26 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         self.writer.write_handle(330, object.owner)?;
         self.writer.write_subclass("AcDbProxyObject")?;
-        if object.from_dxf && !object.dxf_data.is_empty() {
+        let decoded_dxf_data = if object.from_dxf && object.dxf_data.is_empty() {
+            super::super::proxy_dxf_filer::decode_proxy_dxf_data(
+                &object.payload,
+                &object.text_payload,
+                &object.object_ids,
+            )
+            .ok()
+        } else {
+            None
+        };
+        let dxf_data = if object.from_dxf {
+            if object.dxf_data.is_empty() {
+                decoded_dxf_data.as_ref()
+            } else {
+                Some(&object.dxf_data)
+            }
+        } else {
+            None
+        };
+        if let Some(dxf_data) = dxf_data {
             // Original data format DXF: the header, then the object's own DXF
             // groups as read, with no binary size, data or 94 terminator
             // (AutoCAD's form; it refuses binary data after 70 1).
@@ -6742,7 +6784,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 object.maintenance_version,
                 true,
             )?;
-            for (code, value) in &object.dxf_data {
+            for (code, value) in dxf_data {
                 self.writer.write_string(*code, value)?;
             }
             return Ok(());
@@ -9101,7 +9143,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Allocate new unique sort handles to avoid conflicts with entity handles.
         // Sort entries by original sort_handle to preserve relative draw order,
         // then assign sequential new handles so ascending order is maintained.
-        let entries: Vec<_> = table.entries().collect();
+        // Entries for entities that are not written would point at nothing.
+        let entries: Vec<_> = table
+            .entries()
+            .filter(|entry| {
+                !entry.entity_handle.is_null() && self.handle_is_writable(entry.entity_handle)
+            })
+            .collect();
         let mut sorted_indices: Vec<usize> = (0..entries.len()).collect();
         sorted_indices.sort_by_key(|&i| entries[i].sort_handle.value());
 

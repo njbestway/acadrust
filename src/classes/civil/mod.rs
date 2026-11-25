@@ -22,6 +22,7 @@ mod parameters;
 mod profile;
 mod sample_lines;
 mod section;
+mod stormwater;
 mod style;
 mod subassembly;
 mod tin;
@@ -34,7 +35,7 @@ pub use alignment::{
     display_station, AlignmentAnchor, AlignmentCriteria, AlignmentElement, AlignmentType, OffsetParameters, OffsetRegion, WideningTransition, AlignmentElementKind, AlignmentPiece, DesignSpeed, GeometryPoint, SpiralShape,
     StationEquation, CriticalStationData, SuperelevationCurveData, SuperelevationView};
 pub use cogo::{CogoPoint, PointGroupClassification, PointGroupOverrides, PropertyValue, UserProperty};
-pub use create::{add_tin_surface_with, add_assembly, add_pkt_subassembly, add_pkt_subassembly_on, PktSource, add_alignment, add_alignment_with_curves, add_offset_alignment, add_offset_alignment_with_widenings, Widening, add_alignment_of_kind, add_design_speeds, add_station_equations, add_superelevation, CriticalStation, CriticalStationKind, SuperelevationCurve, AlignmentKind, VertexCurve, add_corridor, add_corridor_with, add_cogo_point, add_intersection, add_point_group, add_point_group_query, add_profile, add_profile_entities, add_profile_with_curves, add_static_profile, add_surface_profile, ProfileEntity, VerticalCurve, add_profile_view, add_profile_view_with_bands, add_profile_view_with_range, BandKind, BandStagger, ProfileViewBand, add_sample_line, add_sample_line_through, add_sample_line_group, add_sections, add_section_view, add_site, add_alignment_on_site, add_feature_line, add_parcel, add_feature_line_vertices, FeatureLineVertex, add_tin_surface, cogo_points, ensure_civil, remove_cogo_point, set_cogo_point, set_cogo_point_name, set_point_group, set_point_group_overrides, set_point_group_query, Comparison, PointAttribute, PointQuery, QueryConstant, QueryExpression, add_lot_line, add_pipe, add_pipe_network, add_pipe_of_family, add_structure, add_structure_of_family, connect_pipe, network_part_families, add_pressure_appurtenance, add_pressure_arc_pipe, add_pressure_cross, add_pressure_fitting, add_pressure_network, add_pressure_part, add_pressure_pipe, add_pressure_pipe_of_size, add_pressure_tee, connect_pressure_parts, pressure_part_descriptions, add_profile_view_style, add_profile_view_with_style, add_offset_profile, add_section_view_group, add_profile_view_style_with, set_feature_line_vertices, set_cogo_point_label_style, add_label_style, add_point_label_style, label_style, LabelStyle, add_intersection_with, add_intersection_with_curb_returns, IntersectionOffsets, CURB_RETURN_MARGIN, add_curb_return, add_curb_return_with, CurbReturnCurve, add_point_choice_property, add_point_property, add_point_property_classification, point_properties, set_cogo_point_property, add_pipe_of_size, network_pipe_sizes, add_structure_of_size, network_structure_size_fields, StructureSizeChoice, add_intersection_with_curb_return_profiles, CurbReturnProfiles};
+pub use create::{add_empty_tin_surface, add_tin_surface_with, add_assembly, add_pkt_subassembly, add_pkt_subassembly_on, PktSource, add_alignment, add_alignment_with_curves, add_offset_alignment, add_offset_alignment_with_widenings, Widening, add_alignment_of_kind, add_design_speeds, add_station_equations, add_superelevation, CriticalStation, CriticalStationKind, SuperelevationCurve, AlignmentKind, VertexCurve, add_corridor, add_corridor_with, add_cogo_point, create_cogo_point, point_creation_layer, NO_ELEVATION, add_intersection, add_point_group, add_point_group_query, add_profile, add_profile_entities, add_profile_with_curves, add_static_profile, add_surface_profile, ProfileEntity, VerticalCurve, add_profile_view, add_profile_view_with_bands, add_profile_view_with_range, BandKind, BandStagger, ProfileViewBand, add_sample_line, add_sample_line_through, add_sample_line_group, add_sections, add_section_view, add_site, add_alignment_on_site, add_feature_line, add_parcel, add_feature_line_vertices, FeatureLineVertex, add_tin_surface, cogo_points, ensure_civil, remove_cogo_point, set_cogo_point, set_cogo_point_name, set_point_group, set_point_group_overrides, set_point_group_query, Comparison, PointAttribute, PointQuery, QueryConstant, QueryExpression, add_lot_line, add_pipe, add_pipe_network, add_pipe_of_family, add_structure, add_structure_of_family, connect_pipe, network_part_families, add_pressure_appurtenance, add_pressure_arc_pipe, add_pressure_cross, add_pressure_fitting, add_pressure_network, add_pressure_part, add_pressure_pipe, add_pressure_pipe_of_size, add_pressure_tee, connect_pressure_parts, pressure_part_descriptions, add_profile_view_style, add_profile_view_with_style, add_offset_profile, add_section_view_group, add_profile_view_style_with, set_feature_line_vertices, set_cogo_point_label_style, add_label_style, add_point_label_style, label_style, LabelStyle, add_intersection_with, add_intersection_with_curb_returns, IntersectionOffsets, CURB_RETURN_MARGIN, add_curb_return, add_curb_return_with, CurbReturnCurve, add_point_choice_property, add_point_property, add_point_property_classification, point_properties, set_cogo_point_property, add_pipe_of_size, network_pipe_sizes, add_structure_of_size, network_structure_size_fields, StructureSizeChoice, add_intersection_with_curb_return_profiles, CurbReturnProfiles};
 pub use corridor::{CorridorBaseline, CorridorBoundary, CorridorDefinition, CorridorRegion, CorridorSurfaceDefinition, CurveStations, RegionFrequency, RegionTarget, TargetCurveStations, TargetKind};
 pub use grading::{CriteriaValue, GradingCriteria, GradingEntity, GradingGroup, GradingGroupRecord, GradingGroupTree};
 pub use intersection::IntersectionLayout;
@@ -44,7 +45,7 @@ pub use network::{PartField, PressurePipe, PressurePort};
 pub use parameters::{Parameter, ParameterValue};
 pub use profile::{CurveMinimumK, OffsetProfile, ProfileCriteria, ProfileLocking, ProfilePiece, ProfileViewFrame, Pvi};
 pub use parcel_segments::ParcelSegmentGeometry;
-pub use sample_lines::{SampleLines, SectionViewGroupPlot};
+pub use sample_lines::{SampleLines, SampleLineVertices, SectionViewGroupPlot};
 pub use section::{MassHaulViewFrame, SectionGeometry, SectionViewFrame};
 pub use style::{DisplayComponent, Marker, ProfileViewAxisStyle, ProfileViewAxisTitle, ProfileViewGrid, ProfileViewGridLines, ProfileViewStyleSettings, ProfileViewTicks, ProfileViewTitle, ViewAxes, ViewAxis};
 pub use subassembly::{AssemblyLayout, Attachment, SubassemblyShape};
@@ -232,7 +233,8 @@ impl ArchEntityData {
     }
 
     /// The triangulation a TIN surface's snapshot keeps; `None` without a
-    /// snapshot.
+    /// snapshot. A snapshot of a surface with no triangulation decodes as a
+    /// corner-only [`TinSurface`] (four vertices, no triangles).
     pub fn tin_snapshot(&self) -> Option<TinSurface> {
         if self.civil_kind() != Some(CivilKind::TinSurface) {
             return None;
@@ -243,8 +245,10 @@ impl ArchEntityData {
 
     /// Triangulation stored by a Civil 3D TIN surface.
     ///
-    /// `None` for other classes or when the body has no readable
-    /// triangulation.
+    /// `None` for other classes. A surface the application has not built
+    /// keeps only its shell (the four bounding corners, no triangles —
+    /// `Surface-2.dwg` "EG"); it decodes as a [`TinSurface`] with four
+    /// vertices and no triangles, not as `None`.
     pub fn tin_surface(&self) -> Option<TinSurface> {
         if self.civil_kind() != Some(CivilKind::TinSurface) {
             return None;
@@ -772,7 +776,15 @@ impl ArchEntityData {
         if let Some(reference) = strings.iter().find_map(|s| s.rsplit_once(".dwg:")) {
             return Some(reference.1.to_string());
         }
-        strings.get(3).filter(|s| !s.is_empty()).cloned()
+        // The application stores a created-by name before the alignment's
+        // own (2027 samples: "AeccImpAlignment", "", "", "Administrator",
+        // "Centerline (1)"); records this crate writes keep the name at
+        // index 3. Prefer the first non-empty string from index 4, then 3.
+        strings
+            .get(4)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .or_else(|| strings.get(3).filter(|s| !s.is_empty()).cloned())
     }
 
     /// The profile's name: the string after its label point names, which
@@ -1017,6 +1029,21 @@ impl ArchEntityData {
         }
         let (data, start, end) = self.main_stream()?;
         section::mass_haul_view_frame(data, start, end)
+    }
+
+
+    /// Station and vertex sides of a sample line
+    /// (`AECC_SAMPLE_LINE`): where it crosses its alignment and, per side
+    /// (left first), its vertices as `(offset, station less the line's)`
+    /// from the alignment outwards. The line's swath widths are its
+    /// extreme offsets.
+    pub fn sample_line_vertices(&self) -> Option<SampleLineVertices> {
+        if self.dxf_name != "AECC_SAMPLE_LINE" {
+            return None;
+        }
+        let (data, start, end) = self.main_stream()?;
+        let (station, sides) = sample_lines::line_station_and_sides(data, start, end)?;
+        Some(SampleLineVertices { station, left: sides[0].clone(), right: sides[1].clone() })
     }
 
     /// Insertion point of a Civil 3D pressure fitting or appurtenance
@@ -1278,6 +1305,24 @@ impl ArchEntityData {
         self.main_stream()
             .map(|(data, start, end)| corridor::feature_line_groups(data, start, end))
             .unwrap_or_default()
+    }
+
+    /// Geometry and style of a stormwater control entity (`AECC_POND`,
+    /// `AECC_UNDERGROUNDSTORAGE` or `AECC_CHANNEL`); see
+    /// [`stormwater::StormWater`]. The hydraulic parameters the application
+    /// shows for these are not persisted in the record — see the module
+    /// notes.
+    pub fn stormwater(&self) -> Option<stormwater::StormWater> {
+        let kind = match self.dxf_name.as_str() {
+            "AECC_POND" => stormwater::StormWaterKind::Pond,
+            "AECC_UNDERGROUNDSTORAGE" => stormwater::StormWaterKind::UndergroundStorage,
+            "AECC_CHANNEL" => stormwater::StormWaterKind::Channel,
+            _ => return None,
+        };
+        let (data, start, end) = self.main_stream()?;
+        let graphic = super::arch::decode::entity_graphic_data(self)?;
+        let handles = self.decode().handles;
+        stormwater::entity(kind, data, start, end, &graphic, &handles)
     }
 
     /// Raw record and the bit range of its class body.
