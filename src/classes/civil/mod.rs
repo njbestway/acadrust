@@ -17,6 +17,7 @@ mod grading;
 mod intersection;
 mod labels;
 mod label_style;
+mod section_bands;
 mod network;
 mod parameters;
 mod profile;
@@ -32,14 +33,15 @@ mod topology;
 mod view_frames;
 
 pub use alignment::{
-    display_station, AlignmentAnchor, AlignmentCriteria, AlignmentElement, AlignmentType, OffsetParameters, OffsetRegion, WideningTransition, AlignmentElementKind, AlignmentPiece, DesignSpeed, GeometryPoint, SpiralShape,
+    display_station, AlignmentAnchor, AlignmentCriteria, AlignmentElement, AlignmentType, OffsetParameters, OffsetRegion, WideningTransition, AlignmentElementKind, AlignmentPiece, BestFitPoint, DesignSpeed, GeometryPoint, SpiralShape,
     StationEquation, CriticalStationData, SuperelevationCurveData, SuperelevationView};
 pub use cogo::{CogoPoint, PointGroupClassification, PointGroupOverrides, PropertyValue, UserProperty};
-pub use create::{add_empty_tin_surface, add_tin_surface_with, add_assembly, add_pkt_subassembly, add_pkt_subassembly_on, PktSource, add_alignment, add_alignment_with_curves, add_offset_alignment, add_offset_alignment_with_widenings, Widening, add_alignment_of_kind, add_design_speeds, add_station_equations, add_superelevation, CriticalStation, CriticalStationKind, SuperelevationCurve, AlignmentKind, VertexCurve, add_corridor, add_corridor_with, add_cogo_point, create_cogo_point, point_creation_layer, NO_ELEVATION, add_intersection, add_point_group, add_point_group_query, add_profile, add_profile_entities, add_profile_with_curves, add_static_profile, add_surface_profile, ProfileEntity, VerticalCurve, add_profile_view, add_profile_view_with_bands, add_profile_view_with_range, BandKind, BandStagger, ProfileViewBand, add_sample_line, add_sample_line_through, add_sample_line_group, add_sections, add_section_view, add_site, add_alignment_on_site, add_feature_line, add_parcel, add_feature_line_vertices, FeatureLineVertex, add_tin_surface, cogo_points, ensure_civil, remove_cogo_point, set_cogo_point, set_cogo_point_name, set_point_group, set_point_group_overrides, set_point_group_query, Comparison, PointAttribute, PointQuery, QueryConstant, QueryExpression, add_lot_line, add_pipe, add_pipe_network, add_pipe_of_family, add_structure, add_structure_of_family, connect_pipe, network_part_families, add_pressure_appurtenance, add_pressure_arc_pipe, add_pressure_cross, add_pressure_fitting, add_pressure_network, add_pressure_part, add_pressure_pipe, add_pressure_pipe_of_size, add_pressure_tee, connect_pressure_parts, pressure_part_descriptions, add_profile_view_style, add_profile_view_with_style, add_offset_profile, add_section_view_group, add_profile_view_style_with, set_feature_line_vertices, set_cogo_point_label_style, add_label_style, add_point_label_style, label_style, LabelStyle, add_intersection_with, add_intersection_with_curb_returns, IntersectionOffsets, CURB_RETURN_MARGIN, add_curb_return, add_curb_return_with, CurbReturnCurve, add_point_choice_property, add_point_property, add_point_property_classification, point_properties, set_cogo_point_property, add_pipe_of_size, network_pipe_sizes, add_structure_of_size, network_structure_size_fields, StructureSizeChoice, add_intersection_with_curb_return_profiles, CurbReturnProfiles};
+pub use create::{add_empty_tin_surface, add_tin_surface_with, add_assembly, add_pkt_subassembly, add_pkt_subassembly_on, PktSource, add_alignment, add_alignment_with_curves, add_offset_alignment, add_offset_alignment_with_widenings, Widening, add_alignment_of_kind, add_design_speeds, add_station_equations, add_superelevation, CriticalStation, CriticalStationKind, SuperelevationCurve, AlignmentKind, VertexCurve, add_corridor, add_corridor_with, add_cogo_point, create_cogo_point, point_creation_layer, NO_ELEVATION, add_intersection, add_point_group, add_point_group_query, add_profile, add_profile_entities, add_profile_with_curves, add_static_profile, add_surface_profile, ProfileEntity, VerticalCurve, add_profile_view, add_profile_view_with_bands, add_profile_view_with_range, BandKind, BandStagger, ProfileViewBand, add_sample_line, add_sample_line_through, add_sample_line_group, add_sections, add_section_view, add_site, add_alignment_on_site, add_feature_line, add_parcel, parcel_name, PARCEL_STYLE_NAME, PARCEL_NUMBER, add_feature_line_vertices, FeatureLineVertex, add_tin_surface, cogo_points, ensure_civil, feature_line_vertices, remove_cogo_point, set_cogo_point, set_cogo_point_name, set_point_group, set_point_group_overrides, set_point_group_query, set_point_group_styles, Comparison, PointAttribute, PointQuery, QueryConstant, QueryExpression, add_lot_line, add_pipe, add_pipe_network, add_pipe_of_family, add_structure, add_structure_of_family, connect_pipe, set_network_part_name, network_part_families, add_pressure_appurtenance, add_pressure_arc_pipe, add_pressure_cross, add_pressure_fitting, add_pressure_network, add_pressure_part, add_pressure_pipe, add_pressure_pipe_of_size, add_pressure_tee, connect_pressure_parts, pressure_part_descriptions, add_profile_view_style, add_profile_view_with_style, add_offset_profile, add_section_view_group, add_profile_view_style_with, set_feature_line_vertices, set_cogo_point_label_style, add_label_style, add_point_label_style, label_style, LabelStyle, add_intersection_with, add_intersection_with_curb_returns, IntersectionOffsets, CURB_RETURN_MARGIN, add_curb_return, add_curb_return_with, CurbReturnCurve, add_point_choice_property, add_point_property, add_point_property_classification, point_properties, set_cogo_point_property, add_pipe_of_size, network_pipe_sizes, add_structure_of_size, network_structure_size_fields, StructureSizeChoice, add_intersection_with_curb_return_profiles, CurbReturnProfiles, add_section_data_band_label_group, add_alignment_label_group, AlignmentGroupLabel, AlignmentLabelGroup, AlignmentLabelGroupKind, LabelKeyValue, LabelOverrideProperty, LabelOverrideValue};
 pub use corridor::{CorridorBaseline, CorridorBoundary, CorridorDefinition, CorridorRegion, CorridorSurfaceDefinition, CurveStations, RegionFrequency, RegionTarget, TargetCurveStations, TargetKind};
 pub use grading::{CriteriaValue, GradingCriteria, GradingEntity, GradingGroup, GradingGroupRecord, GradingGroupTree};
 pub use intersection::IntersectionLayout;
-pub use labels::{parse_format, property, LabelPart, LabelText};
+pub use labels::{parse_format, property, LabelDimensionAnchor, LabelPart, LabelText};
+pub use section_bands::{BandKeyValue, SectionDataBandGroup, SectionDataBandLabel};
 pub use label_style::{LabelArrowComponent, LabelBlockComponent, LabelBorder, LabelDraggedState, LabelIteratorComponent, LabelLeader, LabelLineComponent, LabelStyleSettings, LabelTextComponent, LabelTickComponent};
 pub use network::{PartField, PressurePipe, PressurePort};
 pub use parameters::{Parameter, ParameterValue};
@@ -49,7 +51,7 @@ pub use sample_lines::{SampleLines, SampleLineVertices, SectionViewGroupPlot};
 pub use section::{MassHaulViewFrame, SectionGeometry, SectionViewFrame};
 pub use style::{DisplayComponent, Marker, ProfileViewAxisStyle, ProfileViewAxisTitle, ProfileViewGrid, ProfileViewGridLines, ProfileViewStyleSettings, ProfileViewTicks, ProfileViewTitle, ViewAxes, ViewAxis};
 pub use subassembly::{AssemblyLayout, Attachment, SubassemblyShape};
-pub use survey::SurveyFigure;
+pub use survey::{SurveyFigure, SurveyFigureGeometry};
 pub use view_frames::{MatchLine, MatchLineGeometry, SheetGeometry, ViewFrame, ViewFrameGeometry};
 pub use topology::{Topology, TopologyVertex};
 pub use tin::{TinBoundaryType, TinBreaklineType, TinDefinition, TinLines, TinOperation, TinSurface, TinTriangle, TinVertex};
@@ -164,6 +166,11 @@ pub const ENTITY_CLASSES: &[(&str, &str, CivilKind)] = &[
         CivilKind::Label,
     ),
     (
+        "AECC_SECTIONDATABAND_LABELGROUP",
+        "AeccDbSectionDataBandLabeling",
+        CivilKind::Label,
+    ),
+    (
         "AECC_STATION_ELEVATION_LABEL",
         "AeccDbStaElevLabel",
         CivilKind::Label,
@@ -257,10 +264,52 @@ impl ArchEntityData {
         tin::find(data, start, end)
     }
 
+    /// The surface's name: the first non-empty string after the
+    /// definitions' texts. The application stores a created-by name before
+    /// them (2027 samples: "", "", "leightkadmin", then the definitions'
+    /// names, two texts per elevation analysis range, the surface's name
+    /// and its description — `Surface-2.dwg`'s empty shell reads "EG");
+    /// records this crate writes keep the name
+    /// right after the texts, so it is read there as a fallback. A record
+    /// whose definitions this grammar does not read names `None` — its
+    /// text boundary is unknown.
+    pub fn surface_name(&self) -> Option<String> {
+        if self.civil_kind() != Some(CivilKind::TinSurface) {
+            return None;
+        }
+        let (data, start, end) = self.main_stream()?;
+        let texts = match tin::definitions(data, start, end) {
+            Some(d) => d.list.iter().map(TinDefinition::text_count).sum::<usize>() + 2 * d.ranges,
+            None => match tin::definitions_count(data, start, end) {
+                None => 0,
+                Some(_) => return None,
+            },
+        };
+        let strings = self.decode().strings;
+        strings
+            .get(3 + texts)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .or_else(|| strings.get(2 + texts).filter(|s| !s.is_empty()).cloned())
+    }
+
     /// Definitions of a TIN surface in build order, with their
     /// texts (before the surface name) and source objects (the references
     /// after the hard owner), and whether the surface
     /// rebuilds itself when a source changes.
+    ///
+    /// The two layouts' text streams differ in one slot: the application
+    /// keeps a created-by name between the two empty strings and the
+    /// definitions' texts, records this crate writes start the texts
+    /// right there. Which layout a record keeps follows from its own
+    /// lengths — the stream runs the two empty strings, the created-by
+    /// name (application only), the definitions' texts, two texts per
+    /// elevation range, the surface's name, its description and one empty
+    /// string, and the definitions' text need is known from their kinds.
+    /// A record of neither length keeps an unmapped stream: `None` rather
+    /// than a guessed boundary — unless its definitions keep no texts, when
+    /// no boundary is needed (the Civil 2013 surfaces, whose leading texts
+    /// also hold the source drawing's path).
     pub fn tin_definitions(&self) -> Option<(Vec<TinDefinition>, bool)> {
         if self.civil_kind() != Some(CivilKind::TinSurface) {
             return None;
@@ -269,7 +318,14 @@ impl ArchEntityData {
         let found = tin::definitions(data, start, end)?;
         let strings = self.decode().strings;
         let refs = self.typed_handles();
-        let mut text = 2;
+        let need = found.list.iter().map(TinDefinition::text_count).sum::<usize>() + 2 * found.ranges;
+        let mut text = if strings.len() == 3 + need + 3 {
+            3
+        } else if strings.len() == 2 + need + 3 || need == 0 {
+            2
+        } else {
+            return None;
+        };
         let mut source = refs.iter().position(|r| r.1 == 3)? + 1;
         let mut list = found.list;
         for d in &mut list {
@@ -543,8 +599,13 @@ impl ArchEntityData {
         if self.civil_kind() != Some(CivilKind::Label) {
             return None;
         }
+        let projection = match self.dxf_name.as_str() {
+            "AECC_STATION_ELEVATION_LABEL" => false,
+            "AECC_PROFILE_PROJECTION_LABEL" => true,
+            _ => return None,
+        };
         let (data, start, end) = self.main_stream()?;
-        labels::anchor(data, start, end)
+        labels::anchor(data, start, end, projection)
     }
 
     /// Stations a Civil 3D label group places labels at, in order.
@@ -552,19 +613,13 @@ impl ArchEntityData {
         if self.civil_kind() != Some(CivilKind::Label) {
             return Vec::new();
         }
-        // Groups whose records vary in size (geometry points between
-        // intervals) are only read through their record marker.
         self.main_stream()
-            .map(|(data, start, end)| {
+            .and_then(|(data, start, end)| {
                 if matches!(self.dxf_name.as_str(), "AECC_ALIGNMENT_STATION_LABEL_GROUP" | "AECC_ALIGNMENT_MINOR_STATION_LABEL_GROUP") {
-                    if let Some(stations) = labels::group_stations(data, start, end) {
-                        return stations;
-                    }
+                    labels::group_stations(data, start, end)
+                } else {
+                    labels::stations(data, start, end)
                 }
-                // debt: other label group classes are searched for their
-                // stations.
-                let marked = labels::marked_stations(data, start, end);
-                if marked.len() >= 2 { marked } else { labels::stations(data, start, end) }
             })
             .unwrap_or_default()
     }
@@ -577,11 +632,28 @@ impl ArchEntityData {
             return Vec::new();
         }
         self.main_stream()
-            .map(|(data, start, end)| {
-                // debt: groups whose labels do not read are searched.
-                labels::group_point_kinds(data, start, end).unwrap_or_else(|| labels::geometry_point_kinds(data, start, end))
-            })
+            .and_then(|(data, start, end)| labels::group_point_kinds(data, start, end))
             .unwrap_or_default()
+    }
+
+    /// A section view data band's label group
+    /// (`AECC_SECTIONDATABAND_LABELGROUP`), by its fields; `None` when the
+    /// record stores a form the crate does not read (a label set in the
+    /// settings, nested labels, overrides, or key values beyond numbers —
+    /// the corpus's 19 records carry none of these).
+    pub fn section_data_band_group(&self) -> Option<SectionDataBandGroup> {
+        if self.dxf_name != "AECC_SECTIONDATABAND_LABELGROUP" {
+            return None;
+        }
+        let (data, start, end) = self.main_stream()?;
+        section_bands::group(data, start, end)
+    }
+
+    /// Offsets a section view data band's labels name (see
+    /// [`Self::section_data_band_group`]), in record order; empty for a
+    /// group this crate does not read.
+    pub fn section_data_band_offsets(&self) -> Vec<f64> {
+        self.section_data_band_group().map(|g| g.offsets()).unwrap_or_default()
     }
 
     /// Offset from the labelled point to where a dragged label sits, `None`
@@ -591,7 +663,30 @@ impl ArchEntityData {
             return None;
         }
         let (data, start, end) = self.main_stream()?;
-        labels::dragged_offset(data, start, end)
+        labels::dragged_offset(data, start, end)?
+    }
+
+    /// Each label's offset from the point it labels to where it was
+    /// dragged, in the order the record numbers its labels (a group's
+    /// sub-labels); `None` for a label left in place. Empty when the record
+    /// does not read.
+    pub fn label_dragged_offsets(&self) -> Vec<Option<Vector2>> {
+        if self.civil_kind() != Some(CivilKind::Label) {
+            return Vec::new();
+        }
+        self.main_stream()
+            .and_then(|(data, start, end)| labels::dragged_offsets(data, start, end))
+            .unwrap_or_default()
+    }
+
+    /// The dimension anchor a Civil 3D label record gives its labels by
+    /// default (see [`LabelDimensionAnchor`]).
+    pub fn label_dimension_anchor(&self) -> Option<LabelDimensionAnchor> {
+        if self.civil_kind() != Some(CivilKind::Label) {
+            return None;
+        }
+        let (data, start, end) = self.main_stream()?;
+        labels::dimension_anchor(data, start, end)
     }
 
     /// Ids of the profile entities a profile label group
@@ -602,7 +697,7 @@ impl ArchEntityData {
             return Vec::new();
         }
         self.main_stream()
-            .map(|(data, start, end)| labels::labelled_entity_ids(data, start, end))
+            .and_then(|(data, start, end)| labels::labelled_entity_ids(data, start, end))
             .unwrap_or_default()
     }
 
@@ -614,7 +709,7 @@ impl ArchEntityData {
             return Vec::new();
         }
         self.main_stream()
-            .map(|(data, start, end)| labels::entity_refs(data, start, end))
+            .and_then(|(data, start, end)| labels::entity_refs(data, start, end))
             .unwrap_or_default()
     }
 
@@ -874,6 +969,29 @@ impl ArchEntityData {
         self.decode().handles.iter().copied().find(|h| *h != 0)
     }
 
+    /// The feature line's edge in its site container's [`Topology`] (see
+    /// [`Self::feature_line_container`]):
+    ///
+    /// ```text
+    /// BL 80, BL 0, BL 80, BL 80, BL 0, BL 0x10025F04, 6 bits (010010,
+    ///   a keyed class head without keys), 128 zero bits, BL 0, BL edge,
+    ///   7 bits, BS 0x04BE
+    /// ```
+    pub fn feature_line_edge(&self) -> Option<i32> {
+        if self.dxf_name != "AECC_FEATURE_LINE" {
+            return None;
+        }
+        let (data, start, end) = self.main_stream()?;
+        let mut bits = bits::Bits::new(data, start, end);
+        for _ in 0..6 {
+            bits.bit_long()?;
+        }
+        (bits.bits_value(6)? == 0b010010).then_some(())?;
+        bits.skip(128)?;
+        (bits.bit_long()? == 0).then_some(())?;
+        bits.bit_long()
+    }
+
     /// Name and description of a feature line.
     pub fn feature_line_name(&self) -> Option<(String, String)> {
         if self.dxf_name != "AECC_FEATURE_LINE" {
@@ -921,17 +1039,14 @@ impl ArchEntityData {
     /// (see [`Self::parcel_face`]).
     pub fn parcel_faces(&self) -> Option<(i32, Vec<i32>)> {
         self.parcel_site()?;
-        let (data, start, end) = self.main_stream()?;
-        let mut b = bits::Bits::new(data, start, end);
-        alignment::class_keys(&mut b)?;
-        b.pos += 121;
+        let mut b = self.parcel_fields()?;
         let number = b.bit_long()?;
         b.bit_long()?;
         b.bit_long()?;
         for _ in 0..4 {
             b.bit_double()?;
         }
-        (b.bit_long()? == 80 && b.bit_long()? == 1).then_some(())?;
+        (matches!(b.bit_long()?, 80 | 112) && b.bit_long()? == 1).then_some(())?;
         for _ in 0..3 {
             b.bit_double()?;
         }
@@ -941,14 +1056,42 @@ impl ArchEntityData {
         Some((number, (0..n).map(|_| b.bit_long()).collect::<Option<_>>()?))
     }
 
+    /// Where a parcel's own fields start: past the class header and its
+    /// schema-word prefix. The header closes `BL 0x10025F04, 6 bits`; the
+    /// word gates the prefix, the parcel fields proper are
+    ///
+    /// ```text
+    /// BL number, BL 0, BL 0, BD 0, 3BD label location, BL 80 or 112,
+    /// BL 1, 3BD label location (a copy), BL 2, BL n, n x BL face,
+    /// BL 0, B 0, BS 0x04BE
+    /// ```
+    ///
+    /// Prefixes on file (all 54 parcels of Labels-Parcels.dwg, plus the
+    /// parcel drawings Parcel-1E/3A):
+    ///
+    /// * `0b01_0101` (the word this crate writes): 8-bit key count, keys
+    ///   (see [`alignment::key`]), then a closing `BL` — 0 in fresh
+    ///   records, 16 or 88 in re-saved ones — then 121 bits.
+    /// * `0b01_0010` (Civil 3D 2013 parcels, no keys): 128 bits.
+    /// * older words (`0..=7`): a raw 32-bit head word whose top byte
+    ///   gates the prefix — `0x02`: four raw longs (the 2013 prefix behind
+    ///   a head); `0x05`: 8-bit key count, keys, a closing `BL`, then the
+    ///   same 121 bits the keyed word carries. A record of an older word
+    ///   is admitted only with its whole body validated (label echo,
+    ///   faces, tail, exact end); anything else reads `None`.
+    fn parcel_fields(&self) -> Option<bits::Bits<'_>> {
+        let (data, start, end) = self.main_stream()?;
+        let at = parcel_fields_offset(data, start, end)?;
+        let mut b = bits::Bits::new(data, start, end);
+        b.pos = at;
+        Some(b)
+    }
+
     /// Where a parcel's area label sits (the label location after its
     /// number; see [`Self::parcel_face`]).
     pub fn parcel_label(&self) -> Option<Vector2> {
         self.parcel_site()?;
-        let (data, start, end) = self.main_stream()?;
-        let mut b = bits::Bits::new(data, start, end);
-        alignment::class_keys(&mut b)?;
-        b.pos += 121;
+        let mut b = self.parcel_fields()?;
         for _ in 0..3 {
             b.bit_long()?;
         }
@@ -964,6 +1107,15 @@ impl ArchEntityData {
         }
         let handles = self.decode().handles;
         (handles.first() == Some(&0)).then(|| handles.get(1).copied()).flatten().filter(|h| *h != 0)
+    }
+
+    /// The `AECC_PARCEL_STYLE` a parcel references (its fourth body
+    /// handle); `None` for a site, which stores no style.
+    pub fn parcel_style(&self) -> Option<u64> {
+        if self.dxf_name != "AECC_PARCEL" || self.parcel_site().is_none() {
+            return None;
+        }
+        self.decode().handles.get(3).copied().filter(|h| *h != 0)
     }
 
     /// The `AECC_FEATURE_STYLE` record an alignment's geometry points are
@@ -1132,6 +1284,20 @@ impl ArchEntityData {
         survey::figure(&self.decode().strings)
     }
 
+    /// Geometry of a survey figure (`AECC_SVFIGURE`): the traverse vertices
+    /// the record caches (within the shared solved-point tolerance of the
+    /// live application's; see [`survey::SurveyFigureGeometry`]) and the
+    /// elevation range its bbox solid stores (the live application's
+    /// `MinElevation`/`MaxElevation`, bit for bit).
+    pub fn survey_figure_geometry(&self) -> Option<survey::SurveyFigureGeometry> {
+        if self.dxf_name != "AECC_SVFIGURE" {
+            return None;
+        }
+        let graphic = super::arch::decode::entity_graphic_data(self)?;
+        let (data, start, end) = self.main_stream()?;
+        survey::geometry(&data, start, end, &graphic)
+    }
+
     /// Name of a survey network (`AECC_SVNETWORK`).
     pub fn survey_network_name(&self) -> Option<String> {
         if self.dxf_name != "AECC_SVNETWORK" {
@@ -1237,27 +1403,14 @@ impl ArchEntityData {
             .unwrap_or_default()
     }
 
-    /// Insertion point of a Civil 3D structure (`AECC_STRUCTURE`); a record
-    /// laid out otherwise is searched inside the extents its cached preview
-    /// records.
+    /// Insertion point of a Civil 3D structure (`AECC_STRUCTURE`), read by
+    /// the record's fields.
     pub fn structure_position(&self) -> Option<crate::types::Vector3> {
         if self.dxf_name != "AECC_STRUCTURE" {
             return None;
         }
         let (data, start, end) = self.main_stream()?;
-        if let Some(p) = network::structure_at(data, start, end) {
-            return Some(p);
-        }
-        // debt: a record the field reader rejects is still located through
-        // the cache extents; replace once such a record's layout is known.
-        let mut min = [f64::INFINITY; 2];
-        let mut max = [f64::NEG_INFINITY; 2];
-        for p in self.profiles.iter().flatten() {
-            min = [min[0].min(p.x), min[1].min(p.y)];
-            max = [max[0].max(p.x), max[1].max(p.y)];
-        }
-        (min[0] <= max[0]).then_some(())?;
-        network::structure_position(data, start, end, min, max)
+        network::structure_at(data, start, end)
     }
 
     /// Baseline point of a Civil 3D assembly and where each of its
@@ -1279,6 +1432,19 @@ impl ArchEntityData {
         }
         self.main_stream()
             .map(|(data, start, end)| corridor::baselines(data, start, end))
+            .unwrap_or_default()
+    }
+
+    /// The point codes a corridor draws feature lines for, in the order of
+    /// [`Self::corridor_baselines`]' groups; empty when the record is not
+    /// read.
+    pub fn corridor_point_codes(&self) -> Vec<String> {
+        if self.civil_kind() != Some(CivilKind::Corridor) {
+            return Vec::new();
+        }
+        let strings = self.decode().strings;
+        self.main_stream()
+            .and_then(|(data, start, end)| corridor::point_codes(data, start, end, &strings))
             .unwrap_or_default()
     }
 
@@ -1417,6 +1583,30 @@ impl ArchObject {
         topology::topology(data, start, end)
     }
 
+    /// The feature-line topology of a site container
+    /// (`AECC_FEATURE_STYLE`): one edge per feature line, not split where
+    /// lines cross. This reads through [`Self::topology`]: on a site that
+    /// gained gradings after it was first written, the record keeps its
+    /// grading data between the elevation-point table and the site graph
+    /// as elements whose faces' bodies are modeler binary streams, and
+    /// `topology` reads each body to its end record, steps over the
+    /// elements' own graphs, and lands on the site graph that follows —
+    /// the feature lines'. On the six graded tutorial containers
+    /// (Grading-3A to Grading-8) the walk ends exactly there (Grading-3A:
+    /// 14 edges, ids in the recorded slot order), so the two read the
+    /// same graph.
+    ///
+    /// One limit stays at the record level: a feature line the user
+    /// imported (`AeccImpFeatureLine`) keeps no edge word in its own
+    /// record, so it decodes to `None` even where the site's graph holds
+    /// its edge — handle 0xC88 on the Grading-4 and Grading-5 drawings.
+    pub fn feature_line_topology(&self) -> Option<Topology> {
+        if !self.dxf_name.eq_ignore_ascii_case("AECC_FEATURE_STYLE") {
+            return None;
+        }
+        self.topology()
+    }
+
     /// Alignments and feature lines a site container (`AECC_FEATURE_STYLE`)
     /// lists, in the order of its topology's edges: the references before
     /// the site that owns it.
@@ -1479,36 +1669,37 @@ impl ArchObject {
     /// style class defines them: every component of the plan view, then the
     /// model view and the other view directions.
     ///
-    /// `is_layer` tells layer handles apart; only styles with an unmapped
-    /// block before their component lists need it.
-    pub fn display_components(&self, is_layer: impl Fn(u64) -> bool) -> Vec<DisplayComponent> {
+    /// The references are read by the record's own layout; `is_layer` is
+    /// not consulted (kept for callers). A style whose block before its
+    /// component lists is in neither known form gives no components.
+    pub fn display_components(&self, _is_layer: impl Fn(u64) -> bool) -> Vec<DisplayComponent> {
         if self.civil_kind() != Some(CivilObjectKind::Style) {
             return Vec::new();
         }
         let handles = self.decode().handles;
         self.main_stream()
-            .map(|(data, start, end)| style::components(data, start, end, &handles, is_layer))
+            .map(|(data, start, end)| style::components(data, start, end, &handles))
             .unwrap_or_default()
     }
 
-    /// Plotted length and angle (radians, to the anchor's direction) of a
-    /// Civil 3D label line component.
+    /// Plotted fixed length and angle (radians, to the anchor's direction)
+    /// of a Civil 3D label line component, read by its fields; `None` for a
+    /// dragged-state copy that shows the copied component's values.
     pub fn label_line(&self) -> Option<(f64, f64)> {
-        if self.dxf_name != "AECC_LABEL_RADIAL_LINE_STYLE" {
-            return None;
-        }
-        let (data, start, end) = self.main_stream()?;
-        labels::line_component(data, start, end)
+        self.label_component_fields(true)?.0.line_shown()
     }
 
     /// Whether a label style component (text, line, tick, ...) is shown;
     /// `true` when the record does not say.
     pub fn label_component_visible(&self) -> bool {
-        if !self.dxf_name.starts_with("AECC_LABEL_") {
+        // A label style (the collector) is not a component and has no
+        // component visibility.
+        if !self.dxf_name.starts_with("AECC_LABEL_") || self.dxf_name == "AECC_LABEL_COLLECTOR_STYLE" {
             return true;
         }
         self.main_stream()
-            .is_none_or(|(data, start, end)| labels::component_visible(data, start, end))
+            .and_then(|(data, start, end)| labels::component_visible(data, start, end))
+            .unwrap_or(true)
     }
 
     /// Plotted height of a Civil 3D profile view band.
@@ -1747,11 +1938,12 @@ impl ArchObject {
             .unwrap_or_default()
     }
 
-    /// UTF-16 strings the record stores inline (label formats and the
-    /// like), in record order.
+    /// UTF-16 texts a style's settings keys hold inline (label formats and
+    /// the like), in key order; empty for a record that is not a style or
+    /// whose settings do not read.
     pub fn inline_strings(&self) -> Vec<String> {
         self.main_stream()
-            .map(|(data, start, end)| labels::inline_strings(data, start, end))
+            .and_then(|(data, start, end)| style::key_texts(data, start, end))
             .unwrap_or_default()
     }
 
@@ -1770,5 +1962,147 @@ impl ArchObject {
         let start = usize::try_from(reader.position_in_bits()).ok()?;
         let len = usize::try_from(reader.main_remaining_bits()).ok()?;
         Some((raw, start, start + len))
+    }
+}
+
+/// Where a parcel's own fields start in its class body (see
+/// [`ArchEntityData::parcel_fields`]): the schema word after the class
+/// header gates the prefix.
+fn parcel_fields_offset(data: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut b = bits::Bits::new(data, start, end);
+    match alignment::class_header(&mut b)? {
+        alignment::KEYED => {
+            for _ in 0..b.bits_value(8)? {
+                alignment::key(&mut b)?;
+            }
+            b.bit_long()?;
+            b.pos += 121;
+            Some(b.pos)
+        }
+        // Civil 3D 2013: no keys.
+        0b01_0010 => Some(b.pos + 128),
+        // Older words open their prefix with a raw 32-bit head word whose
+        // top byte gates what follows: `0x02` carries the 2013 prefix (four
+        // raw longs) behind the head; `0x05` carries a keyed block — 8-bit
+        // key count, keys (see [`alignment::key`]), a closing `BL`, then
+        // the same 121 bits the keyed word carries. Either way the body
+        // must validate to the record's exact end.
+        _ => {
+            let kind = b.raw_long()? as u32 >> 24;
+            let at = match kind {
+                0x02 => b.pos + 128,
+                0x05 => {
+                    for _ in 0..b.bits_value(8)? {
+                        alignment::key(&mut b)?;
+                    }
+                    b.bit_long()?;
+                    b.pos + 121
+                }
+                _ => return None,
+            };
+            parcel_body_ok(data, at, end).map(|_| at)
+        }
+    }
+}
+
+/// Whether a full parcel body parses at `at` (see
+/// [`ArchEntityData::parcel_fields`] for the grammar): the label location
+/// twice over, a face list, and the closing word to the record's exact end.
+fn parcel_body_ok(data: &[u8], at: usize, end: usize) -> Option<()> {
+    let mut b = bits::Bits::new(data, at, end);
+    b.bit_long()?;
+    b.bit_long()?;
+    b.bit_long()?;
+    (b.bit_double()? == 0.0).then_some(())?;
+    let (x, y, z) = (b.bit_double()?, b.bit_double()?, b.bit_double()?);
+    (x.is_finite() && y.is_finite()).then_some(())?;
+    (matches!(b.bit_long()?, 80 | 112) && b.bit_long()? == 1).then_some(())?;
+    (b.bit_double()? == x && b.bit_double()? == y && b.bit_double()? == z).then_some(())?;
+    (b.bit_long()? == 2).then_some(())?;
+    let n = b.bit_long()?;
+    (1..=64).contains(&n).then_some(())?;
+    for _ in 0..n {
+        b.bit_long()?;
+    }
+    (b.bit_long()? == 0).then_some(())?;
+    (b.bit()? == false).then_some(())?;
+    (b.bit_short()? == 0x04BE).then_some(())?;
+    (b.remaining() == 0).then_some(())
+}
+
+#[cfg(test)]
+mod parcel_word_tests {
+    use super::*;
+
+    fn record(hex: &str) -> Vec<u8> {
+        (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Word 3, head 0x02040810: four raw longs, body at +160 (the shape of
+    /// the Labels-Parcels word-2 records), parcel 25 at (100.5, -2.5).
+    const WORD3_HEAD02: (&str, usize) = (
+        "542541508045f02100c4020100b8ca4000390a4000394a4000398a4000119a8000000000020594000000000000001302541010000000000081650000000000000004c0902404e804000085f020",
+        613,
+    );
+
+    /// Word 4, head 0x05040840: a ref key and a date key, closing `BL` 16,
+    /// 121 bits, body at +303 (the Labels-Parcels re-save form).
+    const WORD4_HEAD05: (&str, usize) = (
+        "542541508045f02101100201014081010000407c40005800000000000000011000000000000000000000000000000023350000000000040b28000000000000002604a82020000000000102ca000000000000000981204809d00800010be040",
+        756,
+    );
+
+    /// Word 0, head 0x050408f8: four keys (ref, long, date, ref), body at
+    /// +373 (Parcel-1E's re-saved STANDARD parcels).
+    const WORD0_HEAD05_4KEYS: (&str, usize) = (
+        "542541508045f021003e0201014101010000403e00000607c4000580000000000000000048000044400000000000000000000000000000008cd40000000000102ca0000000000000009812a0808000000000040b28000000000000002604812027402000042f8100",
+        826,
+    );
+
+    /// Word 2 with an unmapped head word: not admitted.
+    const WORD2_HEAD_UNKNOWN: (&str, usize) = (
+        "542541508045f0210090020100519a8000000000020594000000000000001302541010000000000081650000000000000004c0902404e804000085f020",
+        485,
+    );
+
+    #[test]
+    fn an_older_word_with_a_type_02_head_reads_the_2013_prefix_behind_it() {
+        let (hex, bits) = WORD3_HEAD02;
+        let data = record(hex);
+        assert_eq!(parcel_fields_offset(&data, 0, bits), Some(74 + 160));
+    }
+
+    #[test]
+    fn an_older_word_with_a_type_05_head_reads_keys_then_121_bits() {
+        let (hex, bits) = WORD4_HEAD05;
+        let data = record(hex);
+        assert_eq!(parcel_fields_offset(&data, 0, bits), Some(74 + 303));
+    }
+
+    #[test]
+    fn a_type_05_head_with_four_keys_lands_past_them() {
+        let (hex, bits) = WORD0_HEAD05_4KEYS;
+        let data = record(hex);
+        assert_eq!(parcel_fields_offset(&data, 0, bits), Some(74 + 373));
+    }
+
+    #[test]
+    fn an_unmapped_head_word_reads_none() {
+        let (hex, bits) = WORD2_HEAD_UNKNOWN;
+        let data = record(hex);
+        assert_eq!(parcel_fields_offset(&data, 0, bits), None);
+    }
+
+    #[test]
+    fn a_head_whose_body_fails_validation_reads_none() {
+        // The keyed form parses, but the 0x04BE closing word of the body is
+        // broken, so the record is not admitted.
+        let (hex, bits) = WORD4_HEAD05;
+        let mut data = record(hex);
+        let last = data.len() - 1;
+        data[last] ^= 0x10;
+        assert_eq!(parcel_fields_offset(&data, 0, bits), None);
     }
 }

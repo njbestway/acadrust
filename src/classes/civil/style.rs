@@ -56,8 +56,6 @@ struct Layout {
     components: Vec<(bool, Color, i16, f64)>,
     /// The bit after the component lists.
     end: usize,
-    /// Bits skipped before the component lists (see [`layout`]).
-    skipped: bool,
 }
 
 const COMPONENT_LISTS: usize = 8;
@@ -89,28 +87,19 @@ fn layout(data: &[u8], start: usize, end: usize) -> Option<Layout> {
         bits = probe;
     }
     refs += keys.iter().filter(|(key, _)| KeyValue::has_reference(*key)).count();
-    let mut skipped = false;
-    let (components, end) = component_lists(data, bits.pos, end)
-        .or_else(|| {
-            let mut bits = Bits::new(data, bits.pos, end);
-            let more = extra_keys(&mut bits)?;
-            let found = component_lists(data, bits.pos, end)?;
-            refs += more;
-            Some(found)
-        })
-        .or_else(|| {
-            // debt: a block before the BL 32 in neither form of
-            // [`extra_keys`] is found by probing past it.
-            skipped = true;
-            (bits.pos + 1..(bits.pos + 512).min(end)).find_map(|pos| component_lists(data, pos, end))
-        })?;
+    let (components, end) = component_lists(data, bits.pos, end).or_else(|| {
+        let mut bits = Bits::new(data, bits.pos, end);
+        let more = extra_keys(&mut bits)?;
+        let found = component_lists(data, bits.pos, end)?;
+        refs += more;
+        Some(found)
+    })?;
     Some(Layout {
         keys,
         refs,
         header,
         components,
         end,
-        skipped,
     })
 }
 
@@ -139,12 +128,26 @@ pub(super) fn class_data(data: &[u8], start: usize, end: usize) -> Option<usize>
     Some(layout(data, start, end)?.end)
 }
 
+/// The texts a style's settings keys hold inline (type 0x18, without
+/// their terminating NUL), in key order.
+pub(super) fn key_texts(data: &[u8], start: usize, end: usize) -> Option<Vec<String>> {
+    Some(
+        layout(data, start, end)?
+            .keys
+            .into_iter()
+            .filter_map(|(_, value)| match value {
+                KeyValue::Text(text) => Some(text.trim_end_matches('\0').to_string()),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
 /// Where a style's class data starts, the index of its own reference
 /// (the first after the header's lists and the keys' references) and how
 /// many keys hold a text (their texts follow the record's own ones).
 pub(super) fn class_layout(data: &[u8], start: usize, end: usize) -> Option<(usize, usize, usize)> {
     let l = layout(data, start, end)?;
-    (!l.skipped).then_some(())?;
     Some((l.end, l.refs - 1, l.keys.iter().filter(|(key, _)| key >> 24 == 0x04).count()))
 }
 
@@ -251,23 +254,12 @@ pub(super) fn components(
     start: usize,
     end: usize,
     handles: &[u64],
-    is_layer: impl Fn(u64) -> bool,
 ) -> Vec<DisplayComponent> {
     let Some(layout) = layout(data, start, end) else {
         return Vec::new();
     };
     let count = layout.components.len();
-    let triples_at = |first: usize| -> Vec<&[u64]> { handles.get(first..).unwrap_or_default().chunks_exact(3).take(count).collect() };
-    let first = if layout.skipped {
-        // debt: the skipped bits hold references too; the triples start
-        // where the most of them name a layer.
-        (layout.refs..=handles.len().saturating_sub(3 * count))
-            .max_by_key(|&first| (triples_at(first).iter().filter(|t| is_layer(t[0])).count(), std::cmp::Reverse(first)))
-            .unwrap_or(layout.refs)
-    } else {
-        layout.refs
-    };
-    let triples = triples_at(first);
+    let triples: Vec<&[u64]> = handles.get(layout.refs..).unwrap_or_default().chunks_exact(3).take(count).collect();
     if triples.len() < count {
         return Vec::new();
     }

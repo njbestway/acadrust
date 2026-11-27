@@ -1,6 +1,7 @@
 //! Sites (`AECC_PARCEL` records named `AeccImpFace` without a site of
 //! their own), their containers and the alignments on them.
 
+use super::stormwater::graphic_image;
 use super::arrangement::{build, Arrangement, Input};
 use super::alignment::{default_style as alignment_style, elements, solve, write_alignment, PathPoint, VertexCurve, ARC_EDGE};
 use super::groups::bucket_insert;
@@ -12,7 +13,7 @@ use crate::classes::civil::alignment::same_solved_point;
 use crate::entities::{EntityCommon, EntityType, ExtendedEntityData};
 use crate::error::DxfError;
 use crate::io::dwg::dwg_reference_type::DwgReferenceType;
-use crate::types::{Handle, Vector2};
+use crate::types::{Handle, Vector2, Vector3};
 use crate::CadDocument;
 
 /// Root key of the node that lists the sites.
@@ -973,6 +974,11 @@ pub fn add_alignment_on_site(doc: &mut CadDocument, site: Handle, name: &str, ve
     if curves.len() + 2 != vertices.len() {
         return Err(invalid("an alignment needs one curve per inner vertex"));
     }
+    // A spanning arc replaces a segment, which the site's topology (one
+    // member per segment) has no place for.
+    if curves.iter().any(|c| c.spans()) {
+        return Err(invalid("an alignment on a site cannot carry spanning arcs (write it siteless)"));
+    }
     let elements = elements(vertices, curves);
     let path = solve(vertices, curves, &elements).ok_or_else(|| invalid("a curve has no turn or is not positive, or the curves do not fit on the lines"))?;
     if alignment_style(doc).is_none() {
@@ -1027,6 +1033,86 @@ pub struct FeatureLineVertex {
     pub point: crate::types::Vector3,
     pub bulge: f64,
     pub elevation_point: bool,
+}
+
+/// The vertices of a Civil 3D feature line: the points of its edge in
+/// its site container's [`Topology`](crate::classes::civil::Topology) —
+/// the PIs and elevation points with their elevations and the bulge of
+/// the segment starting at each (see [`FeatureLineVertex`]). `None` when
+/// the record is not a feature line, its site container or its edge
+/// cannot be read, or the container keeps no edge with its id.
+pub fn feature_line_vertices(doc: &CadDocument, feature_line: Handle) -> Option<Vec<FeatureLineVertex>> {
+    let Some(EntityType::Extended(x)) = doc.get_entity(feature_line) else { return None };
+    let ExtendedEntityData::Arch(a) = &x.data else { return None };
+    let container = crate::types::Handle::new(a.feature_line_container()?);
+    let o = match doc.objects.get(&container) {
+        Some(crate::objects::ObjectType::Arch(o)) => o,
+        _ => return None,
+    };
+    let topology = o.feature_line_topology()?;
+    let edge = a.feature_line_edge()?;
+    let index = topology.edge_ids.iter().position(|id| *id == edge)?;
+    Some(topology.edges[index].iter().map(|v| FeatureLineVertex {
+        point: crate::types::Vector3::new(v.point.x, v.point.y, v.z),
+        bulge: v.bulge,
+        elevation_point: v.is_elevation_point(),
+    }).collect())
+}
+
+/// Label property of a parcel style's name (the style name token in its
+/// name template, `<[167804933(...)]>`).
+pub const PARCEL_STYLE_NAME: u32 = 167_804_933;
+/// Label property of a parcel's number (the number token in a parcel
+/// style's name template, `<[16809985(...)]>`).
+pub const PARCEL_NUMBER: u32 = 16_809_985;
+
+/// Formatting option of a name template's style token: show the style's
+/// name in upper case (`Parcel-2C.dwg`: "Road (Local)" reads as
+/// "ROAD (LOCAL)"; 2449 keeps it as written — "Standard : 1").
+const NAME_UPPER_CASE: u32 = 2450;
+
+/// The name of a Civil 3D parcel: the string its record stores, or, when
+/// the record stores none (2027 samples: `Parcel-2C.dwg`'s parcels name
+/// empty where the application reads "ROAD (LOCAL): 100"), its style's
+/// name template evaluated — the style's own name (upper case when the
+/// template's style token asks for it) and the parcel's number. `None`
+/// when the record is not a parcel, or the template, the style's name or
+/// the number cannot be read (a style without a name of its own — this
+/// crate's default parcel style — evaluates to no name, as the
+/// application keeps no name for it in the record either).
+pub fn parcel_name(doc: &CadDocument, parcel: Handle) -> Option<String> {
+    let Some(EntityType::Extended(x)) = doc.get_entity(parcel) else { return None };
+    let ExtendedEntityData::Arch(a) = &x.data else { return None };
+    // A record that stores its name (the application's older form,
+    // `Labels-Parcels.dwg` "Road : 9") reads it directly.
+    let (stored, _) = a.face_name().unwrap_or_default();
+    if !stored.is_empty() {
+        return Some(stored);
+    }
+    let style = crate::types::Handle::new(a.parcel_style()?);
+    let o = match doc.objects.get(&style) {
+        Some(crate::objects::ObjectType::Arch(o)) if o.dxf_name == "AECC_PARCEL_STYLE" => o,
+        _ => return None,
+    };
+    let strings = o.decode().strings;
+    let template_at = strings.iter().position(|s| s.contains("<["))?;
+    let style_name = strings[..template_at].iter().find(|s| !s.is_empty())?;
+    let number = a.parcel_face()?.0;
+    let mut name = String::new();
+    for part in super::super::labels::parse_format(&strings[template_at]) {
+        match part {
+            super::super::labels::LabelPart::Text(text) => name.push_str(&text),
+            super::super::labels::LabelPart::NewLine => name.push('\n'),
+            super::super::labels::LabelPart::Field { property, options } => match property {
+                PARCEL_STYLE_NAME => {
+                    name.push_str(&if options.contains(&NAME_UPPER_CASE) { style_name.to_ascii_uppercase() } else { style_name.clone() });
+                }
+                PARCEL_NUMBER => name.push_str(&number.to_string()),
+                _ => return None,
+            },
+        }
+    }
+    (!name.is_empty()).then_some(name)
 }
 
 /// Adds a feature line through `points` (x, y, elevation; straight
@@ -1099,7 +1185,7 @@ pub fn add_feature_line_vertices(doc: &mut CadDocument, site: Handle, name: &str
             let refs = a.typed_handles();
             let (Some((number, _)), style, label_style) = (a.parcel_face(), refs.get(3).map_or(0, |r| r.0), refs.get(4).map_or(0, |r| r.0)) else { continue };
             let common = x.common.clone();
-            write_parcel(doc, common, site, number, new.face_ids[i + 1], new.faces[i + 1].label, style, label_style)?;
+            write_parcel(doc, common, site, number, new.face_ids[i + 1], &new.faces[i + 1].outline(), new.faces[i + 1].label, style, label_style)?;
         }
         return Ok(line);
     }
@@ -1147,7 +1233,7 @@ pub fn add_feature_line_vertices(doc: &mut CadDocument, site: Handle, name: &str
         // Its faces by id (PD01: 4, 5; PD08: 8 to 11).
         let mut ids: Vec<i32> = faces.iter().map(|f| new.face_id(*f)).collect();
         ids.sort_unstable();
-        write_parcel_over(doc, common, site, number, &ids, label, z, style, label_style)?;
+        write_parcel_over(doc, common, site, number, &ids, &[], label, z, style, label_style)?;
     }
     Ok(line)
 }
@@ -1260,16 +1346,26 @@ fn write_lot_line(doc: &mut CadDocument, common: EntityCommon, edge: i32, contai
 /// a parcel's area and
 /// boundary come from its face in the site's container (WP03 to WP14:
 /// parcels of other areas have the same record).
-fn write_parcel(doc: &mut CadDocument, common: EntityCommon, site: Handle, number: i32, face: i32, label: Vector2, style: u64, label_style: u64) -> Result<Handle, DxfError> {
-    write_parcel_over(doc, common, site, number, &[face], label, 0.0, style, label_style)
+/// The proxy-graphics class word and kind the application writes on
+/// parcel records (Labels-Parcels.dwg; `AeccDbFace (AeccLand130)`).
+const PARCEL_GRAPHIC_KIND: u32 = 3;
+const PARCEL_GRAPHIC_WORD: &str = "AeccDbFace (AeccLand130)";
+
+fn write_parcel(doc: &mut CadDocument, common: EntityCommon, site: Handle, number: i32, face: i32, outline: &[Vec<Vector3>], label: Vector2, style: u64, label_style: u64) -> Result<Handle, DxfError> {
+    write_parcel_over(doc, common, site, number, &[face], outline, label, 0.0, style, label_style)
 }
 
 /// [`write_parcel`] over the faces `faces` (`BL 2, BL n, n x BL face`; a
 /// feature line splitting a parcel's face leaves the parcel over the
 /// parts, PD01) with the label at elevation `z`.
 #[allow(clippy::too_many_arguments)]
-fn write_parcel_over(doc: &mut CadDocument, common: EntityCommon, site: Handle, number: i32, faces: &[i32], label: Vector2, z: f64, style: u64, label_style: u64) -> Result<Handle, DxfError> {
+fn write_parcel_over(doc: &mut CadDocument, mut common: EntityCommon, site: Handle, number: i32, faces: &[i32], outline: &[Vec<Vector3>], label: Vector2, z: f64, style: u64, label_style: u64) -> Result<Handle, DxfError> {
     let byte = |w: &mut crate::io::dwg::dwg_stream_writers::DwgMergedWriter, v: u8| bits(w, &format!("{v:08b}"));
+    // The outline the record's proxy graphics sketch (one closed piece
+    // per boundary loop); a parcel over several faces has no single face
+    // loop, and goes without one.
+    common.graphic_data = (!outline.is_empty())
+        .then(|| graphic_image(PARCEL_GRAPHIC_KIND, PARCEL_GRAPHIC_WORD, 2, Vector3::new(label.x, label.y, z), outline));
     let refs = vec![soft_pointer(0), hard_pointer(site.value()), Ref(DwgReferenceType::HardOwnership, 0), hard_pointer(style), hard_pointer(label_style)];
     let strings = vec!["AeccImpFace".to_string(), String::new(), String::new()];
     put_entity(
@@ -1467,12 +1563,12 @@ pub(super) fn join_site_as(doc: &mut CadDocument, site: Handle, line: EntityComm
             let refs = a.typed_handles();
             let (style, label_style) = (refs.get(3).map_or(style, |r| r.0), refs.get(4).map_or(label_style, |r| r.0));
             let common = x.common.clone();
-            write_parcel(doc, common, site, number, arrangement.face_ids[i], arrangement.faces[i].label, style, label_style)?;
+            write_parcel(doc, common, site, number, arrangement.face_ids[i], &arrangement.faces[i].outline(), arrangement.faces[i].label, style, label_style)?;
         }
     }
     let mut out = Vec::new();
     for (c, number, face) in made {
-        out.push(write_parcel(doc, c, site, number, arrangement.face_id(face), arrangement.faces[face as usize - 1].label, style, label_style)?);
+        out.push(write_parcel(doc, c, site, number, arrangement.face_id(face), &arrangement.faces[face as usize - 1].outline(), arrangement.faces[face as usize - 1].label, style, label_style)?);
     }
     Ok((segment, out))
 }
@@ -1640,14 +1736,14 @@ fn join_groups(
             _ => arrangement.faces[root].label,
         };
         match made.iter().position(|c| c.handle.value() == h) {
-            Some(k) => out.push(write_parcel_over(doc, made[k].clone(), site, number, &ids, label, z, style, label_style)?),
+            Some(k) => out.push(write_parcel_over(doc, made[k].clone(), site, number, &ids, &[], label, z, style, label_style)?),
             None => {
                 let Some(EntityType::Extended(x)) = doc.get_entity(Handle::new(h)) else { continue };
                 let ExtendedEntityData::Arch(a) = &x.data else { continue };
                 let refs = a.typed_handles();
                 let (style, label_style) = (refs.get(3).map_or(style, |r| r.0), refs.get(4).map_or(label_style, |r| r.0));
                 let common = x.common.clone();
-                write_parcel_over(doc, common, site, number, &ids, label, z, style, label_style)?;
+                write_parcel_over(doc, common, site, number, &ids, &[], label, z, style, label_style)?;
             }
         }
     }

@@ -96,6 +96,9 @@ const CLASSES: &[Class] = &[
     Class { dxf: "AECC_VALIGNMENT_PVI_LABEL_GROUP", cpp: "AeccDbVAlignmentPVILabeling", module: "AeccLand130", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_VALIGNMENT_SAGCURVE_LABEL_GROUP", cpp: "AeccDbVAlignmentSagCurveLabeling", module: "AeccLand130", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_VALIGNMENT_CRESTCURVE_LABEL_GROUP", cpp: "AeccDbVAlignmentCrestCurveLabeling", module: "AeccLand130", proxy_flags: 0x37d, entity: true },
+    Class { dxf: "AECC_ALIGNMENT_STATION_LABEL_GROUP", cpp: "AeccDbAlignmentStationLabeling", module: "AeccLand130", proxy_flags: 0x37d, entity: true },
+    Class { dxf: "AECC_ALIGNMENT_MINOR_STATION_LABEL_GROUP", cpp: "AeccDbAlignmentMinorStationLabeling", module: "AeccLand130", proxy_flags: 0x37d, entity: true },
+    Class { dxf: "AECC_ALIGNMENT_GEOMPOINT_LABEL_GROUP", cpp: "AeccDbAlignmentGeomPointLabeling", module: "AeccLand130", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_ASSEMBLY", cpp: "AeccDbAssembly", module: "AeccRoadway130", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_SUBASSEMBLY", cpp: "AeccDbSubassembly", module: "AeccRoadway130", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_SUBASSEMBLY_STYLE", cpp: "AeccDbSubAssemblyStyle", module: "AeccRoadway130", proxy_flags: 0x81, entity: false },
@@ -117,6 +120,7 @@ const CLASSES: &[Class] = &[
     Class { dxf: "AECC_SAMPLE_LINE_GROUP_STYLE", cpp: "AeccDbSampleLineGroupStyle", module: "AeccLand130", proxy_flags: 0x81, entity: false },
     Class { dxf: "AECC_SECTION_VIEW_STYLE", cpp: "AeccDbGraphStyleCrossSection", module: "AeccLand130", proxy_flags: 0x81, entity: false },
     Class { dxf: "AECC_SECTION_VIEW_BAND_STYLE_SET", cpp: "AeccDbGraphSectionBandStyleSet", module: "AeccLand130", proxy_flags: 0x81, entity: false },
+    Class { dxf: "AECC_SECTIONDATABAND_LABELGROUP", cpp: "AeccDbSectionDataBandLabeling", module: "AeccLand130", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_INTERSECTION_STYLE", cpp: "AeccDbIntersectionStyle", module: "AeccRoadway130", proxy_flags: 0x81, entity: false },
     Class { dxf: "AECC_ROADWAYMARKER_STYLE", cpp: "AeccDbRoadwayMarkerStyle", module: "AeccLand130", proxy_flags: 0x81, entity: false },
     Class { dxf: "AECC_LABEL_NODE", cpp: "AeccDbLabelNode", module: "AeccLand130", proxy_flags: 0x81, entity: false },
@@ -157,6 +161,7 @@ const CLASSES: &[Class] = &[
     Class { dxf: "AECC_UNDERGROUNDSTORAGE", cpp: "AeccDbUndergroundStorage", module: "AeccStormWaterControl130|Product Desc: Autodesk Civil 3D |Company: Autodesk,Inc. |WEB Address: www.autodesk.com", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_CHANNEL", cpp: "AeccDbChannel", module: "AeccDrainageChannel130|Product Desc: Autodesk Civil 3D |Company: Autodesk,Inc. |WEB Address: www.autodesk.com", proxy_flags: 0x37d, entity: true },
     Class { dxf: "AECC_GRADING_GROUP", cpp: "AeccDbGradingGroup", module: "AeccLand130", proxy_flags: 0x81, entity: false },
+    Class { dxf: "AECC_GRADING", cpp: "AeccDbGrading", module: "AeccLand130|Product Desc: Autodesk Civil 3D |Company: Autodesk,Inc. |WEB Address: www.autodesk.com", proxy_flags: 0x37d, entity: true },
 ];
 
 /// The class entry's DWG schema version: the stormwater control classes

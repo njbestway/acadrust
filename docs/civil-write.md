@@ -1077,6 +1077,66 @@ three stations, slopes, a profile added afterwards): AUDIT 0, the
 application lists both curves and the stations with their slopes and
 edits a slope.
 
+### Alignment label groups
+
+`add_alignment_label_group(doc, alignment, style, layer, group)` writes
+an alignment's station, minor station or geometry point label group
+(`AlignmentLabelGroupKind`; `AECC_ALIGNMENT_STATION_LABEL_GROUP`,
+`AECC_ALIGNMENT_MINOR_STATION_LABEL_GROUP`,
+`AECC_ALIGNMENT_GEOMPOINT_LABEL_GROUP`) as an entity in model space. The
+record is the one `labels.rs` reads (§3h's band label groups share the
+grammar), by its fields:
+
+```text
+BL 80, 0, 80, 80, 0, 0x10025F04, 6 bits 010010, 16 residual bytes,
+BL 80, 80, 0x04BE0000, 0xFFFFFF, 3 bits 010
+BL n, n labels:
+  label: BL k, k x (BL key, value by the key's type), 2 bits 00, RC 1,
+         BL flag (0x1000 station and minor station, 0x1003 geometry
+         point), BL m, m x BL (the label set's key ids: a station group
+         lists the station and the begin/end marks 0x0200D020,
+         0x0300D622, 0x0300D623; a minor group the station; a geometry
+         point group 0x0100D068, 0x0100D61E, 0x0100D621, 0x0200D61D),
+         BL 0 (no nested labels), BL o, o x override
+  override: BL 1, BL 0, BL 0, 2 bits 00, RC 8 x properties
+  property: RC id, RC, RC (the property set, C0 0C for a label's own),
+            7-bit type, value by type, 3 bits (010 after the last)
+settings: BL 1, key 0x0F00B401 (station; ...402 minor, ...403 geometry
+  point; type 0x0F carries no value), BL 69, BL 1, 5 BD
+range: 3 bits 111, BD start, BD end (0, 0 — an automatic range)
+tail: BD increment (station and minor station), or BL n, n x full BL
+  (mode 00, 32 bits; each 0x0100 | kind) for the geometry point kinds
+B 0, BS 0x04BE
+handles: soft pointer 0, soft pointer 0, alignment (soft), label style
+  (hard), per label { alignment (soft) }
+texts: "AeccDbAlignmentStationLabeling (AeccLand130)" (MinorStation...,
+  GeomPoint...), three empty texts
+```
+
+A station group's labels run begin mark (keys `0x0300D622` byte 1 and
+the major interval `0x0200D61F`), one label per station (keys the major
+interval and the station `0x0200D020`), end mark (`0x0300D623`); a group
+of an alignment labeled the other way stores them end first (Parcel-1A).
+A minor station group's labels carry the major and minor intervals and a
+station each, no marks. A geometry point group's labels carry the mark
+(`0x0200D61D`, 0 at the alignment's beginning), the point's property
+(`0x0100D068`: `0x0200D004`/`0x0200D005` at the beginning and end,
+`0x0400D052` at curves) and the point's index (`0x0100D61E`).
+
+The 16 bytes after the class tag are residual in the application's
+records (across the corpus: zeros, UTF-16 string fragments, heap
+addresses); the writer stores what `AlignmentLabelGroup::guid` carries —
+zeros for a new group, the recorded bytes for a rebuilt one. The label
+text itself is generated from the label style and is not stored.
+
+The groups of Align-2, Align-3, Align-4, Align-6A, Align-6B,
+Labels-Alignments, Parcel-1A, Profile-1, Profile-4A, Profile-4B and
+Assembly-1a (40 records: stations every 20 to 100 with their marks, 71
+to 45-label minor groups, geometry point groups with their property and
+index keys, Parcel-1A's flipped end labels with a type 3 override in the
+label's own property set) rebuild through the writer bit for bit: every
+main stream equals the oracle's.
+
 ### Offset alignments
 
 `add_offset_alignment(doc, parent, name, offset, range, layer)` writes an
@@ -2943,6 +3003,54 @@ with the API listing two sections in each view and the offsets as
 written. Views of sampled sections are not written. A drawing without the section or section view
 styles gets the defaults (§2c).
 
+### Section data bands
+
+`add_section_data_band_label_group(doc, view, layer, group)` writes a
+section view's data band label group
+(`AECC_SECTIONDATABAND_LABELGROUP`) as an entity in model space. The
+record is the one `section_bands.rs` reads — the label grammar of
+`labels.rs` (§3h) with the band label groups' shape (§3h's bands) — by
+its fields:
+
+```text
+BL 80, 0, 80, 80, 0, 0x10025F04, 6 bits 010010, 16 residual bytes,
+BL 80, 80, 0x04BE0000, 0xFFFFFF, 3 bits 010
+BL n, n labels:
+  label: BL k, k x (BL key, value by the key's type), 2 bits 00, RC 1,
+         BL run, BL m, m x BL (the keys the label lists), BL 0, BL 0
+settings: BL 0, BL 69, BL 1, BD anchor, BD weeding, BL stagger, 2 BD
+range: 3 bits 111, BD start, BD end (0, 0 — an automatic range)
+BL band (the group's number in the view's bands)
+B 0, BS 0x04BE
+handles: soft pointer 0, soft pointer 0, the section view (soft), hard 0,
+  per label { the view (hard) }
+texts: "AeccImpSectionDataBandLabeling", three empty texts
+```
+
+The corpus's form (Sections-Project-Objects, one band per view, 19
+records): the band's start edge (keys `0x0302C108` byte 1 and the band
+number `0x01015013`), the offset-0 label (the band number alone, run
+word `0xA003` over its one key id), 58 offset labels (keys the offset
+`0x0202C012` and the band number, run word `0xA001` over the group's
+four key ids), the end edge (`0x0302C109`). The run word sits between
+the label's property-set bytes and its key list; the reader carries
+each label's run word and key ids, and the writer writes them back —
+new groups can name runs and id lists of their own.
+
+The 16 bytes after the class tag are residual in the application's
+records (across the corpus: zeros, UTF-16 string fragments, heap
+addresses); the writer stores what `SectionDataBandGroup::guid`
+carries — zeros for a new group, the recorded bytes for a rebuilt one.
+The label text itself is generated from the band's label style and is
+not stored. Groups the reader refuses (a settings label set, nested
+labels, overrides, non-numeric key values) are not writable: the typed
+fields cannot hold them.
+
+The drawing's 19 bands (edges, offsets -290 to 290 every 10 with 0
+carried by the offset-0 label, settings 69/1/0/0/stagger 0/0/1/6,
+automatic ranges, band 1) rebuild through the writer bit for bit: every
+class body equals the oracle's.
+
 ### Section view group plots
 
 `add_section_view_group(doc, group, at, layer)` writes what the
@@ -3926,6 +4034,71 @@ application touches the group. No programming interface reads the body
 nothing maps it; the writer writes none. A group record with members
 would also need member gradings, which no writer of this crate produces
 (§6a).
+
+## 3p. The minimal grading entity (the adopt-test writer)
+
+`add_grading_minimal` writes an `AECC_GRADING` entity whose unmapped
+parts are taken verbatim from a record the application wrote
+(`GradingSkeleton`: the record's 137 opening bits — its per-record head
+word and header body — its section counters, its run, its three text
+strings) around a typed anchor. The class stream is the source record's
+bit for bit when the source's own anchor is used.
+
+The record's grammar, over the 109-record corpus of the tutorials and
+sample drawings (the class stream after the constant 132-bit schema
+head; the schema head opens the class body — an AEC entity carries no
+version word):
+
+```text
+'00' + 16-bit head word, then a 119-bit header body   (137 bits, verbatim)
+BS 0, BS 0, BD x y z (the anchor, full doubles), BS 16, BS k,
+BD x y z (the record's bit-verbatim copy of the anchor),
+k × (BS 1, BS 1, BS counter; between a k = 2 record's sections the
+  second point), BS 0,
+744-bit form: BS 0, BS 0 — otherwise BS flag (1 or 2), BS a, BS b
+  (flag 2 ⇒ a == b),
+'00' + 607 (0x25F), one 0 pad bit
+handles: soft pointer 0, hard pointer parcel, hard ownership 0, hard
+  pointer 0, hard pointer label style, soft pointer 0
+texts: "", "", a label template ("<[67326721(2449)]> :
+  <[67112990(2449)]>" in 44 of 46 records; the named Grading-4 records
+  carry "<[Grading Name Template(CP)]>" in the third text)
+```
+
+Every observed record carries the three texts, and they are app-read:
+a record written without them does not resolve — the application
+opened such a file clean but listed the entity as an unresolved
+`AcRxObject` with one null-or-erased reference.
+
+The writer writes both references null, and that is the verified form.
+Reference check (Civil 3D 2027, one open/audit/save cycle, 2026-11-26):
+
+- opened read-only: no recovery, no dialog; the census lists
+  `AeccDbGrading=1` (besides the written `AeccDbFace` 2 and
+  `AeccDbLotLine` 1), the audit counts 0 null-or-erased references, and
+  the programming interface reads the entity as a managed
+  `Autodesk.Civil.DatabaseServices.Grading` (`IsAProxy=False`,
+  handle preserved, `Area=0`);
+- the application save rewrote exactly the unnamed regions — the
+  `BS 16` word 16→17 (as in the recorded clone experiment, §6a), the
+  second section header 1→0, the counter 139→0, the run fields
+  0,0→0,12 — and kept the skeleton bit for bit: the schema head, the
+  137 verbatim opening bits, the anchor (to the last digit) and its
+  copy, the section header, the 607 terminator. 770 bits became 744.
+- on the save it also re-pointed the record's null parcel reference
+  into its own tree (the site's `AECC_PARCEL_NODE`), added the entity a
+  60-byte graphic image, and rebuilt the drawing's settings and style
+  tree (29,704 → 470,764 bytes).
+
+An emission with the texts but hard references into a fresh drawing's
+objects has **not** been verified: that form wedged the reference
+application's open once (the open never completed, the session was lost
+to it), so the writer refuses non-null references.
+
+| written | result |
+|---|---|
+| the minimal grading (skeleton of Grading-3A.dwg's 13da record, the record's own anchor; E-GW1) in a new drawing | opens without a message; AUDIT 0 null-or-erased references; the API lists a managed `Grading` with the written handle; the application save keeps the skeleton bit for bit and normalizes the counters and run; the saved record re-parses under the grammar |
+| the same with the second anchor (13ea's) and the 744-bit source's skeleton (Grading-4.dwg's c89) | the class streams are the source records' bit for bit (codec gate); not app-checked |
 
 ## 4. Reference check
 
