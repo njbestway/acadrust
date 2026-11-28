@@ -122,8 +122,10 @@ fn write_database<'a>(doc: &mut CadDocument, handle: Handle, root: Handle, point
     let styled: Vec<&CogoPoint> = points.iter().filter(|p| p.style != 0).collect();
     let labelled: Vec<&CogoPoint> = points.iter().filter(|p| p.label_style != 0).collect();
     let named: Vec<&CogoPoint> = points.iter().filter(|p| p.name.is_some()).collect();
-    let described: Vec<&CogoPoint> = points.iter().filter(|p| p.description.is_some()).collect();
-    // Names and descriptions share the text ids; equal texts share one.
+    // A built-in word keeps its id and has no text here.
+    let described: Vec<&CogoPoint> = points.iter().filter(|p| p.description.is_some() || p.builtin_description.is_some()).collect();
+    let formatted: Vec<&CogoPoint> = points.iter().filter(|p| p.description_format.is_some()).collect();
+    // Formats, names and descriptions share the text ids; equal texts share one.
     let mut texts: Vec<&str> = Vec::new();
     let mut tag = |text: &'a str| {
         let i = texts.iter().position(|t| *t == text).unwrap_or_else(|| {
@@ -132,16 +134,24 @@ fn write_database<'a>(doc: &mut CadDocument, handle: Handle, root: Handle, point
         });
         (FIRST_DESCRIPTION_TAG + i as u32) as i32
     };
+    let format_tags: Vec<i32> = formatted.iter().map(|p| tag(p.description_format.as_deref().unwrap_or(""))).collect();
     let name_tags: Vec<i32> = named.iter().map(|p| tag(p.name.as_deref().unwrap_or(""))).collect();
-    let tags: Vec<i32> = described.iter().map(|p| tag(p.description.as_deref().unwrap_or(""))).collect();
+    let tags: Vec<i32> = described
+        .iter()
+        .map(|p| match (&p.description, p.builtin_description) {
+            (None, Some(id)) => id as i32,
+            (d, _) => tag(d.as_deref().unwrap_or("")),
+        })
+        .collect();
     let mut refs: Vec<Ref> = styled.iter().map(|p| hard_pointer(p.style)).collect();
     refs.extend(labelled.iter().map(|p| hard_pointer(p.label_style)));
     refs.push(soft_pointer(class_node));
     let mut strings = vec![String::new()];
+    strings.extend(formatted.iter().map(|p| p.description_format.clone().unwrap_or_default()));
     for _ in 0..2 {
         strings.extend(named.iter().map(|p| p.name.clone().unwrap_or_default()));
     }
-    strings.extend(described.iter().map(|p| p.description.clone().unwrap_or_default()));
+    strings.extend(described.iter().filter_map(|p| p.description.clone()));
     // Property values by slot, one entry per key in key order, points in
     // database order; each entry's key text, then its text values.
     let mut slots: Vec<Vec<(i32, Vec<(u32, &PropertyValue)>)>> = vec![Vec::new(); 13];
@@ -186,7 +196,11 @@ fn write_database<'a>(doc: &mut CadDocument, handle: Handle, root: Handle, point
             }
             list(w, &styled);
             list(w, &labelled);
-            w.write_bit_long(0);
+            w.write_bit_long(formatted.len() as i32);
+            for (p, tag) in formatted.iter().zip(&format_tags) {
+                w.write_bit_long(p.number as i32);
+                w.write_bit_long(*tag);
+            }
             // Names by number, then the same keyed by name.
             for by_name in [false, true] {
                 w.write_bit_long(named.len() as i32);
@@ -201,7 +215,16 @@ fn write_database<'a>(doc: &mut CadDocument, handle: Handle, root: Handle, point
                 w.write_bit_long(p.number as i32);
                 w.write_bit_long(*tag);
             }
-            for slot in &slots {
+            for (k, slot) in slots.iter().enumerate() {
+                if super::super::cogo::OVERRIDE_SLOTS.contains(&k) {
+                    let set: Vec<(u32, f64)> = points.iter().filter_map(|p| p.overrides.get(k).map(|v| (p.number, v))).collect();
+                    w.write_bit_long(set.len() as i32);
+                    for (number, v) in set {
+                        w.write_bit_long(number as i32);
+                        w.write_bit_double(v);
+                    }
+                    continue;
+                }
                 w.write_bit_long(slot.len() as i32);
                 for (key, values) in slot {
                     w.write_bit_long(key | 0x4000_0000);
@@ -300,7 +323,8 @@ pub fn add_cogo_point(
         label_style: s.defaults.label_style,
         description: description.map(str::to_string),
         name: None,
-        properties: Vec::new(),
+        description_format: None,
+        ..Default::default()
     });
     store(doc, &s, &points)?;
     put_point(doc, None, number, layer)
@@ -331,9 +355,16 @@ struct SettingKey {
 
 /// The create-points settings node, its record and its settings list.
 fn create_settings(doc: &CadDocument) -> Option<(Handle, NodeTail, Vec<SettingKey>)> {
+    let node = Handle::new(settings_node(doc, "AeccCreatePoints")?.0);
+    let (tail, keys) = settings_keys(doc, node)?;
+    Some((node, tail, keys))
+}
+
+/// A settings node's record and its settings list: after the node's
+/// children, `BL 0, B 1, BL n, n x key` (keys as class keys).
+fn settings_keys(doc: &CadDocument, node: Handle) -> Option<(NodeTail, Vec<SettingKey>)> {
     use crate::classes::civil::alignment::{read_key, KeyValue};
     use crate::classes::civil::bits::Bits;
-    let node = Handle::new(settings_node(doc, "AeccCreatePoints")?.0);
     let tail = read_node(doc, node)?;
     let bytes = bit_bytes(&tail.bits);
     let end = tail.bits.len();
@@ -352,7 +383,27 @@ fn create_settings(doc: &CadDocument) -> Option<(Handle, NodeTail, Vec<SettingKe
         });
         keys.push(SettingKey { key, value, span: k.pos..b.pos, reference });
     }
-    Some((node, tail, keys))
+    Some((tail, keys))
+}
+
+/// Root settings: whether the drawing's coordinate transformation (its
+/// geographic data's local-to-grid transformation) is applied.
+const KEY_APPLY_TRANSFORMATION: u32 = 0x0303_448C;
+
+/// Whether the drawing settings apply the drawing's coordinate
+/// transformation (local to grid coordinates); `None` when the drawing has
+/// no root settings node or the node keeps no such setting.
+pub fn transformation_applied(doc: &CadDocument) -> Option<bool> {
+    use crate::classes::civil::alignment::KeyValue;
+    let node = doc.objects.iter().find_map(|(h, o)| match o {
+        crate::objects::ObjectType::Arch(a) if a.dxf_name == "AECC_ROOT_SETTINGS_NODE" => Some(*h),
+        _ => None,
+    })?;
+    let (_, keys) = settings_keys(doc, node)?;
+    match keys.into_iter().find(|k| k.key == KEY_APPLY_TRANSFORMATION)?.value {
+        KeyValue::Byte(b) => Some(b != 0),
+        _ => None,
+    }
 }
 
 /// The create-points settings node, its record and the bit span of the
@@ -443,7 +494,7 @@ pub fn create_cogo_point(doc: &mut CadDocument, position: Vector3, description: 
     let mut points = cogo_points(doc);
     let number = next_number(doc, &points);
     let s = support(doc)?;
-    points.push(CogoPoint { number, position, style: 0, label_style: 0, description: description.map(str::to_string), name: None, properties: Vec::new() });
+    points.push(CogoPoint { number, position, description: description.map(str::to_string), ..Default::default() });
     store(doc, &s, &points)?;
     let point = put_point(doc, None, number, layer)?;
     set_next_number(doc, number + 1)?;
@@ -604,6 +655,27 @@ mod tests {
         assert_eq!((p.style, p.label_style, p.position.z, p.description.as_deref()), (0, 0, NO_ELEVATION, Some("D 3")));
         // A written tree keeps no settings of its own: no layer is named.
         assert_eq!(point_creation_layer(&back), None);
+    }
+
+    #[test]
+    fn description_formats_read_back_and_survive_a_new_point() {
+        let mut doc = CadDocument::new();
+        doc.version = DxfVersion::AC1032;
+        create_cogo_point(&mut doc, Vector3::new(1.0, 2.0, 3.0), Some("TREE OAK"), None).unwrap();
+        create_cogo_point(&mut doc, Vector3::new(4.0, 2.0, 3.0), Some("TREE"), None).unwrap();
+        let mut points = cogo_points(&doc);
+        // Equal formats share one text id, as the application writes them.
+        points[0].description_format = Some("$0 KEY".into());
+        points[1].description_format = Some("$0 KEY".into());
+        store_points(&mut doc, &points).unwrap();
+        create_cogo_point(&mut doc, Vector3::new(7.0, 2.0, 3.0), Some("X"), None).unwrap();
+        let back = cogo_points(&round_trip(&doc));
+        let formats: Vec<Option<&str>> = back.iter().map(|p| p.description_format.as_deref()).collect();
+        assert_eq!(formats, [Some("$0 KEY"), Some("$0 KEY"), None]);
+        assert_eq!(back[0].description.as_deref(), Some("TREE OAK"));
+        assert_eq!(back[0].full_description().as_deref(), Some("TREE KEY"));
+        let mh = CogoPoint { description: Some("MH1".into()), description_format: Some("MANHOLE $1".into()), ..back[2].clone() };
+        assert_eq!(mh.full_description().as_deref(), Some("MANHOLE "));
     }
 
     #[test]

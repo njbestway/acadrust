@@ -541,7 +541,7 @@ pub(crate) fn default_classes() -> Vec<DxfClass> {
         ("ACDBASSOCEDGEACTIONPARAM", "AcDbAssocEdgeActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCFACEACTIONPARAM", "AcDbAssocFaceActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCVERTEXACTIONPARAM", "AcDbAssocVertexActionParam", 0, "ObjectDBX Classes", false),
-        ("ACDBASSOCASMBODYACTIONPARAM", "AcDbAssocAsmbodyActionParam", 0, "ObjectDBX Classes", false),
+        ("ACDBASSOCASMBODYACTIONPARAM", "AcDbAssocAsmBodyActionParam", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCDIMDEPENDENCYBODY", "AcDbAssocDimDependencyBody", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCPLANESURFACEACTIONBODY", "AcDbAssocPlaneSurfaceActionBody", 0, "ObjectDBX Classes", false),
         ("ACDBASSOCEXTENDSURFACEACTIONBODY", "AcDbAssocExtendSurfaceActionBody", 0, "ObjectDBX Classes", false),
@@ -601,7 +601,9 @@ pub(crate) fn default_classes() -> Vec<DxfClass> {
         ("BLOCKLOOKUPGRIP", "AcDbBlockLookupGrip", 0, "ObjectDBX Classes", false),
         ("BLOCKROTATIONGRIP", "AcDbBlockRotationGrip", 0, "ObjectDBX Classes", false),
         ("BLOCKMOVEACTION", "AcDbBlockMoveAction", 0, "ObjectDBX Classes", false),
-        ("BLOCKROTATEACTION", "AcDbBlockRotationAction", 0, "ObjectDBX Classes", false),
+        // The class is AcDbBlockRotateAction; AcDbBlockRotationAction is the
+        // subclass marker of the action's DXF record.
+        ("BLOCKROTATEACTION", "AcDbBlockRotateAction", 0, "ObjectDBX Classes", false),
         ("BLOCKSCALEACTION", "AcDbBlockScaleAction", 0, "ObjectDBX Classes", false),
         ("BLOCKVISIBILITYGRIP", "AcDbBlockVisibilityGrip", 0, "ObjectDBX Classes", false),
         ("BLOCKLINEARPARAMETER", "AcDbBlockLinearParameter", 0, "ObjectDBX Classes", false),
